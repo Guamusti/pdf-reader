@@ -970,7 +970,7 @@ function buildInkPalette() {
     };
     updateInkColorCard();
     strip.addEventListener("click", updateInkColorCard);
-    strip.querySelector("[data-strip-close]").onclick = () => { strip.hidden = true; };
+    strip.querySelector("[data-strip-close]").onclick = () => { strip.hidden = true; colorCard.hidden = true; };
   }
   refreshInkPreview();
 }
@@ -1902,10 +1902,20 @@ function configureAiWindow() {
   card.id = "aiCard";
   header.id = "aiDragHandle";
   $("aiTitle").textContent = "Assistant";
-  card.querySelector(".ai-spark").onclick = (event) => {
+  const spark = card.querySelector(".ai-spark");
+  spark.setAttribute("role", "button");
+  spark.setAttribute("tabindex", "0");
+  spark.title = "Contraer Assistant";
+  const toggleAiIsland = (event) => {
+    event.preventDefault();
     event.stopPropagation();
     card.classList.toggle("ai-minimized");
   };
+  spark.addEventListener("pointerdown", (event) => event.stopPropagation());
+  spark.addEventListener("click", toggleAiIsland);
+  spark.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") toggleAiIsland(event);
+  });
   if (!$("newAiChat")) {
     const controls = document.createElement("div");
     controls.className = "tool-row";
@@ -2024,6 +2034,7 @@ document.querySelectorAll("[data-annotation-filter]").forEach(
 $("markerModeBtn").onclick = () => {
   const strip = $("inkStrip");
   strip.hidden = !strip.hidden;
+  $("inkColorCard").hidden = strip.hidden;
 };
 $("eraserModeBtn").onclick = () => toggleEraserMode();
 $("captureBtn").onclick = openAssistantForDocument;
