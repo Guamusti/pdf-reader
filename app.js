@@ -1041,6 +1041,8 @@ function cropPdfCapture(a, b) {
     .drawImage(source, sx, sy, sw, sh, 0, 0, out.width, out.height);
   aiImage = out.toDataURL("image/png");
   closeCapture();
+  $("captureBtn").classList.add("assistant-on");
+  $("captureBtn").textContent = "✦ On";
   openAiAssistant(true);
 }
 
@@ -1199,6 +1201,24 @@ async function openAiAssistantLegacy(fromCapture = false) {
 function closeAiAssistant() {
   aiAbortController?.abort();
   $("aiPanel").hidden = true;
+  $("captureBtn").classList.remove("assistant-on");
+  $("captureBtn").textContent = "✦";
+}
+async function openAssistantForDocument() {
+  if (!currentBook) return toast("Abre un documento primero");
+  aiScope = "document";
+  aiSelection = "";
+  aiImage = "";
+  $("aiScope").value = "document";
+  $("aiSelectionLabel").textContent = "Documento";
+  $("aiQuote").textContent = "Pregunta sobre el documento; se usará el contexto de la página actual.";
+  $("aiImagePreview").hidden = true;
+  $("aiQuestion").placeholder = "Pregunta sobre este documento…";
+  $("aiPanel").hidden = false;
+  $("captureBtn").classList.add("assistant-on");
+  $("captureBtn").textContent = "✦ On";
+  aiStatus("Assistant listo. Usa el botón de recorte para añadir una zona.");
+  $("aiQuestion").focus();
 }
 async function inspectVisionCapability() {
   if (!isSecureContext)
@@ -1875,6 +1895,19 @@ function configureAiWindow() {
     aiStatus("Nueva conversación local.");
     $("aiQuestion").focus();
   };
+  if (!$("aiCaptureBtn")) {
+    const capture = document.createElement("button");
+    capture.className = "btn icon";
+    capture.id = "aiCaptureBtn";
+    capture.title = "Recortar una zona del PDF";
+    capture.setAttribute("aria-label", capture.title);
+    capture.textContent = "⌗";
+    $("askAiSubmit").parentElement.prepend(capture);
+    capture.onclick = () => {
+      $("aiPanel").hidden = true;
+      openCapture();
+    };
+  }
 }
 document.querySelectorAll("[data-color]").forEach(
   (b) =>
@@ -1904,7 +1937,7 @@ document.querySelectorAll("[data-annotation-filter]").forEach(
 );
 $("markerModeBtn").onclick = toggleMarkerMode;
 $("eraserModeBtn").onclick = () => toggleEraserMode();
-$("captureBtn").onclick = openCapture;
+$("captureBtn").onclick = openAssistantForDocument;
 $("captureOverlay").addEventListener("pointerdown", (e) => {
   captureStart = { x: e.clientX, y: e.clientY };
   $("captureOverlay").setPointerCapture(e.pointerId);
