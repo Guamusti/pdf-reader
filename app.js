@@ -910,7 +910,29 @@ function setInkTool(tool) {
   $("markerModeBtn").title = `Aplicar ${label.toLowerCase()} directamente`;
   $("markerModeBtn").setAttribute("aria-label", $("markerModeBtn").title);
   if (markerMode) toast(`${label} seleccionado`);
+  refreshInkPreview();
   paintLiveHighlight();
+}
+function refreshInkPreview() {
+  const preview = $("inkPreview");
+  if (!preview) return;
+  const color = annotationStyle(annotationColor);
+  preview.className = `ink-preview ${inkTool}`;
+  preview.style.setProperty("--ink-preview", color);
+}
+function buildInkPalette() {
+  const popover = $("toolPopover");
+  if (!popover || $("inkPreview")) return;
+  const preview = document.createElement("div");
+  preview.id = "inkPreview";
+  preview.className = "ink-preview";
+  preview.innerHTML = "<i></i>";
+  popover.querySelector("p")?.insertAdjacentElement("afterend", preview);
+  const icons = { highlight: "▰", underline: "U̲", strike: "S̶" };
+  popover.querySelectorAll("[data-ink-tool]").forEach((button) => {
+    button.innerHTML = `<b>${icons[button.dataset.inkTool]}</b><span>${button.textContent}</span>`;
+  });
+  refreshInkPreview();
 }
 function selectionOverlaps(annotation, rects) {
   return annotation.rects.some((a) =>
@@ -1916,6 +1938,7 @@ document.querySelectorAll("[data-color]").forEach(
       document
         .querySelectorAll("[data-color]")
         .forEach((x) => x.classList.toggle("active", x === b));
+      refreshInkPreview();
       const colorNames = {
         yellow: "amarillo",
         green: "verde",
@@ -2081,6 +2104,7 @@ window.addEventListener("resize", () => {
 (async function init() {
   buildReflowControls();
   buildPageColorControls();
+  buildInkPalette();
   configureAiWindow();
   setTheme(localStorage.getItem("paper.theme") || "dark");
   setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
