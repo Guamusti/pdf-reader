@@ -20,7 +20,9 @@ let db = null,
   searchIndex = -1,
   annotationColor = "yellow",
   annotationFilter = "all",
+  inkTool = "highlight",
   markerMode = false,
+  eraserMode = false,
   captureStart = null,
   aiImage = "",
   localAiEngine = null,
@@ -625,6 +627,9 @@ function renderAnnotations() {
       el.style.top = `${rect.y * 100}%`;
       el.style.width = `${rect.w * 100}%`;
       el.style.height = `${rect.h * 100}%`;
+      el.style.setProperty("--ink-color", annotationStyle(mark.color));
+      if (mark.type === "underline")
+        el.style.top = `calc(${(rect.y + rect.h) * 100}% - 3px)`;
       if (mark.type === "highlight")
         el.style.background = annotationStyle(mark.color);
       layer.appendChild(el);
@@ -712,11 +717,14 @@ function paintLiveHighlight() {
   if (!markerMode || !rects) return;
   for (const rect of rects) {
     const el = document.createElement("i");
-    el.className = "live-highlight";
+    el.className = `live-highlight ${inkTool}`;
     el.style.left = `${rect.x * 100}%`;
     el.style.top = `${rect.y * 100}%`;
     el.style.width = `${rect.w * 100}%`;
     el.style.height = `${rect.h * 100}%`;
+    el.style.setProperty("--ink-color", annotationStyle(annotationColor));
+    if (inkTool === "underline")
+      el.style.top = `calc(${(rect.y + rect.h) * 100}% - 3px)`;
     layer.appendChild(el);
   }
 }
@@ -725,7 +733,7 @@ function clearLiveHighlight() {
 }
 function showAnnotationActions() {
   const rects = selectedRects();
-  if (!rects || markerMode) {
+  if (!rects || markerMode || eraserMode) {
     hideAnnotationActions();
     return;
   }
@@ -767,6 +775,7 @@ function saveAnnotation(type, quiet = false) {
   return true;
 }
 function toggleMarkerMode() {
+  if (eraserMode) toggleEraserMode(false);
   markerMode = !markerMode;
   document.body.classList.toggle("marker-mode", markerMode);
   $("markerModeBtn").classList.toggle("active", markerMode);
@@ -774,9 +783,56 @@ function toggleMarkerMode() {
   if (!markerMode) clearLiveHighlight();
   toast(
     markerMode
-      ? "Rotulador directo activado: selecciona texto y suelta."
+      ? `${inkTool === "highlight" ? "Marcador" : inkTool === "underline" ? "Subrayador" : "Tachado"} directo activado: selecciona texto y suelta.`
       : "Rotulador directo desactivado",
   );
+}
+function setInkTool(tool) {
+  inkTool = tool;
+  document
+    .querySelectorAll("[data-ink-tool]")
+    .forEach((button) => button.classList.toggle("active", button.dataset.inkTool === tool));
+  const label = tool === "highlight" ? "Marcador" : tool === "underline" ? "Subrayador" : "Tachado";
+  $("markerModeBtn").title = `Aplicar ${label.toLowerCase()} directamente`;
+  $("markerModeBtn").setAttribute("aria-label", $("markerModeBtn").title);
+  if (markerMode) toast(`${label} seleccionado`);
+  paintLiveHighlight();
+}
+function selectionOverlaps(annotation, rects) {
+  return annotation.rects.some((a) =>
+    rects.some((b) =>
+      a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y,
+    ),
+  );
+}
+function eraseSelectedAnnotations(quiet = false) {
+  const rects = selectedRects();
+  if (!rects || !currentBook) return false;
+  const all = annotations();
+  const kept = all.filter(
+    (annotation) => annotation.page !== currentPage || !selectionOverlaps(annotation, rects),
+  );
+  const erased = all.length - kept.length;
+  if (!erased) return false;
+  setAnnotations(kept);
+  window.getSelection().removeAllRanges();
+  clearLiveHighlight();
+  renderAnnotations();
+  renderAnnotationList();
+  if (!quiet) toast(`${erased} anotación${erased === 1 ? " eliminada" : "es eliminadas"}`);
+  return true;
+}
+function toggleEraserMode(force) {
+  eraserMode = typeof force === "boolean" ? force : !eraserMode;
+  if (eraserMode && markerMode) {
+    markerMode = false;
+    document.body.classList.remove("marker-mode");
+    $("markerModeBtn").classList.remove("active");
+    $("markerModeBtn").setAttribute("aria-pressed", "false");
+  }
+  $("eraserModeBtn").classList.toggle("active", eraserMode);
+  $("eraserModeBtn").setAttribute("aria-pressed", String(eraserMode));
+  if (eraserMode) toast("Goma activada: selecciona una anotación para borrarla.");
 }
 function clearPageAnnotations() {
   if (!currentBook) return;
@@ -1492,10 +1548,14 @@ $("searchBtn").onclick = () => search($("searchInput").value);
 $("searchInput").onkeydown = (e) => {
   if (e.key === "Enter") search(e.target.value);
 };
-$("themeSelect").onchange = (e) => {
-  document.documentElement.dataset.theme = e.target.value;
-  localStorage.setItem("paper.theme", e.target.value);
-};
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("paper.theme", theme);
+  $("themeSelect").value = theme;
+  $("appearanceTheme").value = theme;
+}
+$("themeSelect").onchange = (e) => setTheme(e.target.value);
+$("appearanceTheme").onchange = (e) => setTheme(e.target.value);
 $("openSidebar").onclick = toggleSidebar;
 $("closeSidebar").onclick = () => {
   if (window.innerWidth < 900) document.body.classList.remove("sidebar-open");
@@ -1554,6 +1614,26 @@ $("toolsBtn").onclick = () => {
     isOpen = pop.classList.toggle("open");
   $("toolsBtn").setAttribute("aria-expanded", String(isOpen));
 };
+$("appearanceBtn").onclick = () => {
+  const pop = $("appearancePopover"),
+    isOpen = pop.classList.toggle("open");
+  $("appearanceBtn").setAttribute("aria-expanded", String(isOpen));
+};
+$("appearanceZoomIn").onclick = () => zoom(0.15);
+$("appearanceZoomOut").onclick = () => zoom(-0.15);
+$("appearanceFit").onclick = fitWidth;
+document.querySelectorAll("[data-reader-margin]").forEach(
+  (button) =>
+    (button.onclick = () => {
+      const margin = button.dataset.readerMargin;
+      $("viewer").classList.remove("margin-compact", "margin-wide");
+      if (margin !== "normal") $("viewer").classList.add(`margin-${margin}`);
+      localStorage.setItem("paper.reader-margin", margin);
+      document
+        .querySelectorAll("[data-reader-margin]")
+        .forEach((item) => item.classList.toggle("active", item === button));
+    }),
+);
 document.querySelectorAll("[data-color]").forEach(
   (b) =>
     (b.onclick = () => {
@@ -1581,6 +1661,7 @@ document.querySelectorAll("[data-annotation-filter]").forEach(
     }),
 );
 $("markerModeBtn").onclick = toggleMarkerMode;
+$("eraserModeBtn").onclick = () => toggleEraserMode();
 $("captureBtn").onclick = openCapture;
 $("captureOverlay").addEventListener("pointerdown", (e) => {
   captureStart = { x: e.clientX, y: e.clientY };
@@ -1600,6 +1681,9 @@ $("captureOverlay").addEventListener("pointerup", (e) => {
 document
   .querySelectorAll("[data-annotation]")
   .forEach((b) => (b.onclick = () => saveAnnotation(b.dataset.annotation)));
+document
+  .querySelectorAll("[data-ink-tool]")
+  .forEach((b) => (b.onclick = () => setInkTool(b.dataset.inkTool)));
 $("clearPageNotes").onclick = clearPageAnnotations;
 $("noteBtn").onclick = openNotePanel;
 $("closeNotePanel").onclick = closeNotePanel;
@@ -1648,7 +1732,9 @@ document.addEventListener("selectionchange", () =>
 );
 document.addEventListener("pointerup", (e) => {
   if (markerMode && e.target.closest(".textLayer"))
-    setTimeout(() => saveAnnotation("highlight", true), 0);
+    setTimeout(() => saveAnnotation(inkTool, true), 0);
+  if (eraserMode && e.target.closest(".textLayer"))
+    setTimeout(() => eraseSelectedAnnotations(true), 0);
 });
 document.addEventListener("pointerdown", (e) => {
   if (
@@ -1656,8 +1742,10 @@ document.addEventListener("pointerdown", (e) => {
     !e.target.closest(".textLayer")
   )
     hideAnnotationActions();
-  if (!e.target.closest(".tool-menu"))
+  if (!e.target.closest(".tool-menu")) {
     $("toolPopover").classList.remove("open");
+    $("appearancePopover").classList.remove("open");
+  }
 });
 window.addEventListener("keydown", (e) => {
   if (
@@ -1716,11 +1804,16 @@ window.addEventListener("resize", () => {
 });
 
 (async function init() {
-  document.documentElement.dataset.theme =
-    localStorage.getItem("paper.theme") || "dark";
-  $("themeSelect").value = document.documentElement.dataset.theme;
+  setTheme(localStorage.getItem("paper.theme") || "dark");
   setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
   document.querySelector('[data-color="yellow"]').classList.add("active");
+  setInkTool("highlight");
+  const margin = localStorage.getItem("paper.reader-margin") || "normal";
+  $("viewer").classList.toggle("margin-compact", margin === "compact");
+  $("viewer").classList.toggle("margin-wide", margin === "wide");
+  document
+    .querySelector(`[data-reader-margin="${margin}"]`)
+    ?.classList.add("active");
   await openDb();
   await renderLibrary();
   const books = (await dbAll()).sort((a, b) => b.openedAt - a.openedAt);
