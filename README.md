@@ -1,5 +1,13 @@
 # Paper Reader
 
-Minimal PWA for reading academic PDFs locally.
+PWA local para leer, estudiar y anotar PDFs con una experiencia limpia en escritorio y móvil.
 
-PDF files are stored in the browser's IndexedDB on the device. Reading position, zoom, theme, and bookmarks are kept locally. The app does not upload PDFs to a backend.
+Los PDF se guardan en IndexedDB del navegador. La aplicación no los sube a ningún servidor.
+
+Incluye:
+
+- Biblioteca local, búsqueda de texto, marcadores y reanudación automática.
+- Zoom, ajuste al ancho y atajos de teclado para navegar sin fricción.
+- Temas oscuro, claro y sepia; tamaño ajustable para los controles de la aplicación.
+- Resaltado en amarillo, verde o rosa y subrayado de texto seleccionado. Las anotaciones se guardan localmente por documento y página.
+- Asistente de lectura con IA local: pregunta sobre una selección sin enviar el PDF ni el fragmento a una API. Requiere un navegador con WebGPU y descarga un modelo de aproximadamente 900 MB en el primer uso.

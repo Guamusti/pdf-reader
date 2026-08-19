@@ -14,15 +14,16 @@
     :root{
       --bg:#f3f3f1;--surface:rgba(255,255,255,.88);--surface-solid:#fff;--text:#111;
       --muted:#777;--line:rgba(0,0,0,.09);--soft:rgba(0,0,0,.045);--accent:#111;
-      --shadow:0 14px 44px rgba(0,0,0,.10);--radius:14px
+      --shadow:0 14px 44px rgba(0,0,0,.10);--radius:14px;--ui-scale:1
     }
     html[data-theme="dark"]{
       --bg:#161616;--surface:rgba(28,28,28,.90);--surface-solid:#202020;--text:#f5f5f5;
       --muted:#999;--line:rgba(255,255,255,.09);--soft:rgba(255,255,255,.055);--accent:#f5f5f5;
       --shadow:0 18px 55px rgba(0,0,0,.34)
     }
+    html[data-theme="sepia"]{--bg:#eee4d1;--surface:rgba(253,246,232,.9);--surface-solid:#fbf2e1;--text:#49382a;--muted:#826e5b;--line:rgba(76,55,33,.14);--soft:rgba(106,75,42,.07);--accent:#49382a;--shadow:0 14px 44px rgba(81,57,32,.16)}
     *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-    html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif}
+    html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;font-size:calc(16px * var(--ui-scale))}
     body{overflow:hidden}
     button,input,select{font:inherit;color:inherit}button{touch-action:manipulation}
     .progress{position:fixed;z-index:100;top:0;left:0;right:0;height:2px;background:transparent}.progress>div{height:100%;width:0;background:var(--text);transition:width .2s ease}
@@ -40,18 +41,20 @@
     .toolbar .grow{flex:1;min-width:0}.title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px;font-weight:620;letter-spacing:-.01em}.subtitle{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
     .searchbox{display:flex;gap:4px;align-items:center}.searchbox input{width:min(260px,31vw);border-radius:9px}.searchbox .btn{font-size:13px}
     .viewer{overflow:auto;-webkit-overflow-scrolling:touch;display:grid;place-items:start center;padding:30px 28px 110px;background:var(--bg)}
-    .canvas-wrap{position:relative;background:#fff;box-shadow:var(--shadow);margin:auto;border-radius:3px;overflow:hidden}.canvas-wrap canvas{display:block;max-width:none}.textLayer{position:absolute;inset:0;overflow:hidden;opacity:.01;line-height:1}.textLayer span{color:transparent;position:absolute;white-space:pre;transform-origin:0 0;cursor:text}.textLayer ::selection{background:rgba(80,120,255,.4)}
+    .canvas-wrap{position:relative;background:#fff;box-shadow:var(--shadow);margin:auto;border-radius:3px;overflow:hidden}.canvas-wrap canvas{display:block;max-width:none}.textLayer{position:absolute;inset:0;overflow:hidden;opacity:.01;line-height:1;z-index:3}.textLayer span{color:transparent;position:absolute;white-space:pre;transform-origin:0 0;cursor:text}.textLayer ::selection{background:rgba(80,120,255,.58)}.annotation-layer{position:absolute;inset:0;z-index:2;pointer-events:none}.annotation{position:absolute;border-radius:2px;mix-blend-mode:multiply}.annotation.highlight{background:rgba(255,213,75,.48)}.annotation.underline{height:3px!important;background:#ef6c5d;border-radius:4px}.annotation.note{background:rgba(89,151,255,.2);border:1px dashed rgba(50,107,198,.7)}
     .empty{align-self:center;justify-self:center;text-align:center;max-width:520px;padding:48px}.empty h2{font-size:clamp(30px,5vw,48px);letter-spacing:-.04em;line-height:1.02;margin:0 0 14px;font-weight:680}.empty p{color:var(--muted);line-height:1.55;font-size:14px;margin:0 auto 24px;max-width:430px}.empty .file-label{display:inline-grid;width:auto;padding:0 18px}
     .footer{position:absolute;left:50%;bottom:max(14px,env(safe-area-inset-bottom));transform:translateX(-50%);display:flex;align-items:center;gap:5px;padding:6px;background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.12);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);z-index:25}
     .footer .center{color:var(--muted);font-size:12px;text-align:center;min-width:112px;padding:0 6px}.footer .left,.footer .right{display:flex;gap:2px}.footer .right{justify-self:auto}.footer .btn{min-height:36px;border-radius:9px;font-size:13px;padding:6px 10px}.footer .left .btn{width:36px;padding:0}
     .toast{position:fixed;z-index:100;left:50%;bottom:84px;transform:translate(-50%,10px);background:var(--surface-solid);border:1px solid var(--line);border-radius:11px;padding:9px 13px;box-shadow:var(--shadow);opacity:0;transition:.2s;pointer-events:none;font-size:13px}.toast.show{opacity:1;transform:translate(-50%,0)}
     .loader{position:fixed;z-index:110;inset:0;display:none;place-items:center;background:rgba(0,0,0,.25);backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}.loader.show{display:grid}.loader-card{min-width:240px;max-width:80vw;background:var(--surface-solid);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:var(--shadow);text-align:center}.loader-card strong{font-size:14px}.loader-card p{color:var(--muted);font-size:12px;margin:7px 0 0}
     .drawer-toggle{display:none}
+    .tool-menu{position:relative}.tool-popover{position:absolute;right:0;top:calc(100% + 8px);width:248px;padding:10px;background:var(--surface-solid);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:12px;display:none}.tool-popover.open{display:block}.tool-popover p{font-size:12px;line-height:1.4;color:var(--muted);margin:3px 4px 10px}.tool-row{display:flex;gap:5px}.tool-row .btn{flex:1;font-size:12px;min-height:36px}.tool-row .btn.active{background:var(--text);color:var(--surface-solid)}.tool-row+.tool-row{margin-top:5px}.annotation-actions{position:fixed;z-index:90;display:none;gap:5px;padding:5px;background:var(--surface-solid);border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow)}.annotation-actions.show{display:flex}.annotation-actions .btn{min-height:32px;padding:4px 9px;font-size:12px}.reader-hint{font-size:11px;color:var(--muted);margin:9px 4px 0;line-height:1.4}.empty kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:1px 4px;font-size:10px}
     select.field{-webkit-appearance:none;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 16px) 17px,calc(100% - 12px) 17px;background-size:4px 4px,4px 4px;background-repeat:no-repeat;padding-right:28px}
     @media(max-width:900px){
       .app{grid-template-columns:1fr}.sidebar{position:fixed;z-index:60;inset:0 auto 0 0;width:min(82vw,300px);transform:translateX(-102%);transition:.22s ease;box-shadow:var(--shadow);padding-top:max(22px,env(safe-area-inset-top))}body.sidebar-open .sidebar{transform:none}body.sidebar-open:after{content:"";position:fixed;z-index:50;inset:0;background:rgba(0,0,0,.28);backdrop-filter:blur(2px)}.drawer-toggle{display:grid}.searchbox input{width:180px}.viewer{padding:22px 12px 104px}.toolbar{padding-top:max(10px,env(safe-area-inset-top))}
     }
     @media(max-width:650px){.searchbox{display:none}.toolbar{gap:4px}.viewer{padding-inline:6px}.footer .center{min-width:92px}.footer{max-width:calc(100vw - 14px)}.footer .btn{padding-inline:8px}}
+    .ai-panel{position:fixed;z-index:120;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.36);backdrop-filter:blur(6px);padding:18px}.ai-panel[hidden]{display:none}.ai-card{width:min(600px,100%);max-height:min(730px,calc(100dvh - 36px));overflow:auto;background:var(--surface-solid);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:20px}.ai-card header{display:flex;align-items:center;justify-content:space-between;gap:12px}.ai-card h2{font-size:18px;letter-spacing:-.02em;margin:0}.ai-card .quote{background:var(--soft);border-left:3px solid #7a9dff;border-radius:7px;padding:10px 12px;font-size:13px;line-height:1.45;max-height:130px;overflow:auto;margin:15px 0}.ai-card textarea{width:100%;min-height:74px;resize:vertical;border:1px solid var(--line);background:var(--soft);border-radius:10px;padding:10px;outline:none}.ai-card textarea:focus{box-shadow:0 0 0 2px rgba(102,139,255,.25)}.ai-card footer{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px}.ai-answer{white-space:pre-wrap;font-size:14px;line-height:1.55;margin:17px 0 4px}.ai-status{font-size:12px;color:var(--muted);line-height:1.4}.primary{background:var(--text);color:var(--surface-solid)}
   </style>
 </head>
 <body>
@@ -62,7 +65,7 @@
     <div class="section"><label class="file-label" for="fileInput">Añadir PDF</label><input class="file-input" id="fileInput" type="file" accept="application/pdf,.pdf" /></div>
     <div class="section"><div class="label">Biblioteca</div><div class="library" id="library"></div></div>
     <div class="section"><div class="label">Marcadores</div><div class="bookmark-list" id="bookmarkList"></div></div>
-    <div class="section"><div class="label">Apariencia</div><select class="field" id="themeSelect"><option value="dark">Oscuro</option><option value="light">Claro</option></select></div>
+    <div class="section"><div class="label">Apariencia</div><select class="field" id="themeSelect"><option value="dark">Oscuro</option><option value="light">Claro</option><option value="sepia">Sepia</option></select><div class="label" style="margin-top:16px">Tamaño de interfaz</div><div class="tool-row"><button class="btn" id="uiSmaller" aria-label="Reducir tamaño de interfaz">A−</button><button class="btn" id="uiLarger" aria-label="Aumentar tamaño de interfaz">A+</button></div><p class="reader-hint">La escala de lectura amplía el PDF; el tamaño ajusta los controles y menús.</p></div>
   </aside>
 
   <main class="main">
@@ -70,12 +73,13 @@
       <button class="btn icon drawer-toggle" id="openSidebar">☰</button>
       <div class="grow"><div class="title" id="docTitle">Paper Reader</div><div class="subtitle" id="docMeta">Tus documentos se quedan en este dispositivo</div></div>
       <div class="searchbox"><input class="field" id="searchInput" placeholder="Buscar en el paper…"/><button class="btn" id="searchBtn">Buscar</button></div>
-      <button class="btn icon" id="bookmarkBtn" title="Marcar página">🔖</button>
+      <div class="tool-menu"><button class="btn icon" id="toolsBtn" title="Herramientas de lectura" aria-expanded="false">✦</button><div class="tool-popover" id="toolPopover"><p>Selecciona texto en el PDF para resaltarlo o subrayarlo.</p><div class="tool-row"><button class="btn" data-color="yellow">Amarillo</button><button class="btn" data-color="green">Verde</button><button class="btn" data-color="pink">Rosa</button></div><div class="tool-row"><button class="btn" id="clearPageNotes">Limpiar anotaciones</button></div></div></div>
+      <button class="btn icon" id="bookmarkBtn" title="Marcar página" aria-label="Marcar página">🔖</button>
     </header>
 
     <section class="viewer" id="viewer">
-      <div class="empty" id="emptyState"><h2>Lee. Marca. Continúa.</h2><p>Tus papers se guardan en este dispositivo y mantienen su diseño original.</p><label class="file-label" for="fileInput">Abrir PDF</label></div>
-      <div class="canvas-wrap" id="canvasWrap" hidden><canvas id="pdfCanvas"></canvas><div class="textLayer" id="textLayer"></div></div>
+      <div class="empty" id="emptyState"><h2>Lee. Piensa. Recuerda.</h2><p>Tu biblioteca privada para PDFs: lectura cómoda, búsqueda, marcadores y anotaciones guardadas en este dispositivo.</p><label class="file-label" for="fileInput">Abrir PDF</label><p style="margin-top:18px;font-size:12px">Atajos: <kbd>←</kbd> <kbd>→</kbd> páginas · <kbd>+</kbd> <kbd>−</kbd> zoom</p></div>
+      <div class="canvas-wrap" id="canvasWrap" hidden><canvas id="pdfCanvas"></canvas><div class="annotation-layer" id="annotationLayer"></div><div class="textLayer" id="textLayer"></div></div>
     </section>
 
     <footer class="footer">
@@ -87,6 +91,8 @@
 </div>
 <div class="loader" id="loader"><div class="loader-card"><strong id="loaderTitle">Abriendo PDF…</strong><p id="loaderText">Preparando documento</p></div></div>
 <div class="toast" id="toast"></div>
-<script type="module" src="/app.js"></script>
+<div class="annotation-actions" id="annotationActions"><button class="btn" data-annotation="highlight" aria-label="Resaltar selección">Resaltar</button><button class="btn" data-annotation="underline" aria-label="Subrayar selección">Subrayar</button><button class="btn" id="askAiBtn" aria-label="Preguntar a la IA sobre la selección">Preguntar IA</button></div>
+<section class="ai-panel" id="aiPanel" hidden role="dialog" aria-modal="true" aria-labelledby="aiTitle"><div class="ai-card"><header><div><h2 id="aiTitle">Consulta la selección</h2><div class="ai-status">IA local · sin API ni coste por consulta</div></div><button class="btn icon" id="closeAiPanel" aria-label="Cerrar asistente">✕</button></header><div class="quote" id="aiQuote"></div><label class="label" for="aiQuestion" style="display:block;margin-left:0">Tu pregunta</label><textarea id="aiQuestion" placeholder="Por ejemplo: explícamelo de forma sencilla, resume el argumento o señala las ideas clave."></textarea><div class="ai-answer" id="aiAnswer"></div><footer><div class="ai-status" id="aiStatus">La primera vez descargará un modelo local (aprox. 900 MB) y requiere WebGPU.</div><button class="btn primary" id="askAiSubmit">Consultar</button></footer></div></section>
+<script type="module" src="/app.js?v=3"></script>
 </body>
 </html>
