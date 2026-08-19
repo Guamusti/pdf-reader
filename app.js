@@ -941,6 +941,23 @@ function buildInkPalette() {
     toggleEraserMode();
     popover.classList.remove("open");
   };
+  if (!$("inkStrip")) {
+    const strip = document.createElement("div");
+    strip.className = "ink-strip";
+    strip.id = "inkStrip";
+    strip.hidden = true;
+    strip.innerHTML = '<button data-strip-tool="highlight" title="Marcador">▰</button><button data-strip-tool="underline" title="Subrayado recto">U̲</button><button data-strip-tool="strike" title="Tachado">S̶</button><button data-strip-eraser title="Goma">⌫</button><button data-strip-color title="Cambiar color"><i class="ink-dot"></i></button><button data-strip-close title="Cerrar">⌃</button>';
+    $("openSidebar").closest(".toolbar").append(strip);
+    const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
+    const updateStrip = () => {
+      strip.querySelector(".ink-dot").style.setProperty("--ink-dot", annotationStyle(annotationColor));
+      strip.querySelectorAll("[data-strip-tool]").forEach((button) => button.classList.toggle("active", button.dataset.stripTool === inkTool && markerMode));
+    };
+    strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => { setInkTool(button.dataset.stripTool); if (!markerMode) toggleMarkerMode(); updateStrip(); }));
+    strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
+    strip.querySelector("[data-strip-color]").onclick = () => { annotationColor = colors[(colors.indexOf(annotationColor) + 1) % colors.length]; refreshInkPreview(); updateStrip(); toast("Color de tinta actualizado"); };
+    strip.querySelector("[data-strip-close]").onclick = () => { strip.hidden = true; };
+  }
   refreshInkPreview();
 }
 function selectionOverlaps(annotation, rects) {
@@ -1987,8 +2004,8 @@ document.querySelectorAll("[data-annotation-filter]").forEach(
     }),
 );
 $("markerModeBtn").onclick = () => {
-  const pop = $("toolPopover"), isOpen = pop.classList.toggle("open");
-  $("toolsBtn").setAttribute("aria-expanded", String(isOpen));
+  const strip = $("inkStrip");
+  strip.hidden = !strip.hidden;
 };
 $("eraserModeBtn").onclick = () => toggleEraserMode();
 $("captureBtn").onclick = openAssistantForDocument;
