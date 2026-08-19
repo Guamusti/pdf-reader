@@ -12,6 +12,8 @@ Incluye:
 - Resaltado en amarillo, verde o rosa, subrayado y notas vinculadas al fragmento. Las anotaciones se guardan localmente por documento y página, se pueden borrar desde la barra lateral y exportar en JSON o Markdown.
 - Asistente de lectura con IA local: consulta una selección sin enviar el PDF ni el fragmento a una API. Usa la IA integrada del navegador cuando está disponible o un modelo local WebGPU; el primer uso de este último descarga aproximadamente 900 MB.
 - Panel de IA de lectura: fragmento y pregunta claramente separados, accesos de resumen, explicación o estudio y respuestas formateadas en títulos y listas en vez de Markdown en bruto.
+- Rotulador directo: activa el modo, selecciona texto y el resaltado se guarda al soltar. La biblioteca se abre desde Home para preservar una barra lateral centrada en el documento.
+- Recorte visual para IA: permite capturar una zona concreta del PDF sin subirla. La captura queda lista para modelos locales con visión; el modelo actual es exclusivamente textual.
 - Selección nativa azul como previsualización, índice navegable cuando el PDF lo ofrece, salto directo de página y resultados de búsqueda con coincidencias señaladas en la página.
 - Modo enfoque, búsqueda cíclica entre todas las coincidencias y renderizado cancelable para una navegación más fluida.
 - Índice editorial con jerarquía y página activa, más una tira inferior de miniaturas con carga diferida para recorrer el documento visualmente.
