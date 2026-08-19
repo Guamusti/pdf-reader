@@ -7,6 +7,7 @@ const DB_NAME = "paper-reader-db",
   STORE = "pdfs";
 let db = null,
   pdfDoc = null,
+  markdownContent = "",
   currentBook = null,
   currentPage = 1,
   scale = 1.25,
@@ -169,23 +170,26 @@ function escapeHtml(s) {
 
 async function addFile(file) {
   if (!file) return;
+  const isMarkdown = /\.(md|markdown)$/i.test(file.name) || file.type === "text/markdown";
   if (
     !(
       file.type === "application/pdf" ||
-      file.name.toLowerCase().endsWith(".pdf")
+      file.name.toLowerCase().endsWith(".pdf") ||
+      isMarkdown
     )
   )
-    return toast("Selecciona un PDF");
-  showLoader(true, "Guardando PDF…", "Se queda solo en este dispositivo");
+    return toast("Selecciona un PDF o Markdown");
+  showLoader(true, `Guardando ${isMarkdown ? "Markdown" : "PDF"}…`, "Se queda solo en este dispositivo");
   try {
     const id = bookId(file),
       buffer = await file.arrayBuffer();
     await dbPut({
       id,
       name: file.name,
-      blob: new Blob([buffer], { type: "application/pdf" }),
+      kind: isMarkdown ? "markdown" : "pdf",
+      blob: new Blob([buffer], { type: isMarkdown ? "text/markdown" : "application/pdf" }),
       openedAt: Date.now(),
-      pages: null,
+      pages: isMarkdown ? 1 : null,
     });
     await openStored(id);
   } catch (e) {
@@ -195,11 +199,74 @@ async function addFile(file) {
     showLoader(false);
   }
 }
+function markdownToHtml(source) {
+  const lines = source.replace(/\r/g, "").split("\n");
+  const html = [];
+  let listOpen = false;
+  const closeList = () => { if (listOpen) { html.push("</ul>"); listOpen = false; } };
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const item = line.match(/^[-*+]\s+(.+)$/);
+    if (heading) {
+      closeList();
+      html.push(`<h${heading[1].length}>${escapeHtml(heading[2])}</h${heading[1].length}>`);
+    } else if (item) {
+      if (!listOpen) { html.push("<ul>"); listOpen = true; }
+      html.push(`<li>${escapeHtml(item[1])}</li>`);
+    } else if (line.trim()) {
+      closeList();
+      html.push(`<p>${escapeHtml(line).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`(.+?)`/g, "<code>$1</code>")}</p>`);
+    } else closeList();
+  }
+  closeList();
+  return html.join("") || "<p>Documento Markdown vacío.</p>";
+}
+async function openMarkdownStored(rec) {
+  markdownContent = await rec.blob.text();
+  pdfDoc = null;
+  currentBook = rec;
+  currentPage = 1;
+  reflowMode = true;
+  rec.openedAt = Date.now();
+  rec.pages = 1;
+  await dbPut(rec);
+  $("emptyState").hidden = true;
+  $("canvasWrap").hidden = true;
+  $("reflowReader").hidden = false;
+  $("reflowReader").innerHTML = markdownToHtml(markdownContent);
+  $("docTitle").textContent = rec.name;
+  $("docMeta").textContent = "Markdown · guardado localmente";
+  $("pageStatus").textContent = "Modo lectura Markdown";
+  $("pageJump").hidden = true;
+  $("toolbarPage").disabled = true;
+  $("toolbarPrev").disabled = true;
+  $("toolbarNext").disabled = true;
+  $("pageScrubber").disabled = true;
+  $("reflowControls").hidden = false;
+  document.querySelectorAll("[data-reading-mode]").forEach((button) =>
+    button.classList.toggle("active", button.dataset.readingMode === "reflow"),
+  );
+  applyReflowPreferences();
+  renderBookmarks();
+  renderAnnotationList();
+  await renderLibrary();
+  document.body.classList.remove("sidebar-open");
+}
 async function openStored(id) {
   showLoader(true);
   try {
     const rec = await dbGet(id);
     if (!rec) throw new Error("Documento no encontrado");
+    if (rec.kind === "markdown") {
+      await openMarkdownStored(rec);
+      return;
+    }
+    markdownContent = "";
+    reflowMode = localStorage.getItem("paper.reading-mode") === "reflow";
+    $("reflowControls").hidden = !reflowMode;
+    document.querySelectorAll("[data-reading-mode]").forEach((button) =>
+      button.classList.toggle("active", button.dataset.readingMode === (reflowMode ? "reflow" : "pdf")),
+    );
     const bytes = new Uint8Array(await rec.blob.arrayBuffer());
     pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
     rec.pages = pdfDoc.numPages;
@@ -558,8 +625,15 @@ function buildThumbnails() {
     );
     scheduleScrubPage(target);
   });
-  list.addEventListener("pointerup", () => {
+  list.addEventListener("pointerup", (event) => {
+    const card = document.elementFromPoint(event.clientX, event.clientY)?.closest(".thumb");
+    const wasDragged = thumbWasDragged;
     thumbScrubStart = null;
+    if (list.hasPointerCapture(event.pointerId)) list.releasePointerCapture(event.pointerId);
+    if (!wasDragged && card) {
+      thumbWasDragged = true;
+      renderPage(Number(card.dataset.page));
+    }
   });
   list.addEventListener(
     "click",
@@ -1244,6 +1318,7 @@ async function openAiAssistant(fromCapture = false) {
   const text = window.getSelection()?.toString().trim();
   if (!fromCapture && !text)
     return toast("Selecciona un fragmento para consultarlo");
+  if (!fromCapture) aiImage = "";
   aiSelection = (text || "").slice(0, 5000);
   aiAnswerRaw = "";
   renderAiAnswer();
