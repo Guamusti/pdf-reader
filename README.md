@@ -9,8 +9,8 @@ Incluye:
 - Biblioteca local, búsqueda de texto, marcadores y reanudación automática.
 - Zoom, ajuste al ancho y atajos de teclado para navegar sin fricción.
 - Temas oscuro, claro y sepia; tamaño ajustable para los controles de la aplicación.
-- Resaltado en amarillo, verde o rosa y subrayado de texto seleccionado. Las anotaciones se guardan localmente por documento y página.
-- Asistente de lectura con IA local: pregunta sobre una selección sin enviar el PDF ni el fragmento a una API. Requiere un navegador con WebGPU y descarga un modelo de aproximadamente 900 MB en el primer uso.
-- Previsualización de subrayado al seleccionar texto, índice navegable cuando el PDF lo ofrece, salto directo de página y exportación de anotaciones en JSON.
+- Resaltado en amarillo, verde o rosa, subrayado y notas vinculadas al fragmento. Las anotaciones se guardan localmente por documento y página, se pueden borrar desde la barra lateral y exportar en JSON o Markdown.
+- Asistente de lectura con IA local: consulta una selección sin enviar el PDF ni el fragmento a una API. Usa la IA integrada del navegador cuando está disponible o un modelo local WebGPU; el primer uso de este último descarga aproximadamente 900 MB.
+- Selección nativa azul como previsualización, índice navegable cuando el PDF lo ofrece, salto directo de página y resultados de búsqueda con coincidencias señaladas en la página.
 - Modo enfoque, búsqueda cíclica entre todas las coincidencias y renderizado cancelable para una navegación más fluida.
 - Índice editorial con jerarquía y página activa, más una tira inferior de miniaturas con carga diferida para recorrer el documento visualmente.
