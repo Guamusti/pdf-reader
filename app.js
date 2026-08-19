@@ -35,6 +35,7 @@ let db = null,
   visionAiLoading = null,
   visionAiWorker = null,
   builtInAiSession = null,
+  builtInVisionSession = null,
   aiSelection = "",
   aiAnswerRaw = "",
   pendingNote = null,
@@ -1138,13 +1139,14 @@ function cropPdfCapture(a, b) {
     sy = ((top - pageBox.top) * source.height) / pageBox.height,
     sw = ((right - left) * source.width) / pageBox.width,
     sh = ((bottom - top) * source.height) / pageBox.height,
-    out = document.createElement("canvas");
-  out.width = Math.round(sw);
-  out.height = Math.round(sh);
+    out = document.createElement("canvas"),
+    captureScale = Math.min(1, 1600 / Math.max(sw, sh));
+  out.width = Math.max(1, Math.round(sw * captureScale));
+  out.height = Math.max(1, Math.round(sh * captureScale));
   out
     .getContext("2d")
     .drawImage(source, sx, sy, sw, sh, 0, 0, out.width, out.height);
-  aiImage = out.toDataURL("image/png");
+  aiImage = out.toDataURL("image/jpeg", 0.9);
   closeCapture();
   $("captureBtn").classList.add("assistant-on");
   $("captureBtn").textContent = "✦ On";
@@ -1155,8 +1157,35 @@ const BUILTIN_AI_OPTIONS = {
   expectedInputs: [{ type: "text", languages: ["es"] }],
   expectedOutputs: [{ type: "text", languages: ["es"] }],
 };
+const BUILTIN_VISION_OPTIONS = {
+  expectedInputs: [
+    { type: "text", languages: ["es"] },
+    { type: "image" },
+  ],
+  expectedOutputs: [{ type: "text", languages: ["es"] }],
+  initialPrompts: [
+    {
+      role: "system",
+      content:
+        "Eres un asistente de lectura visual riguroso. Describe diagramas, texto, relaciones y detalles relevantes. Responde siempre en español y distingue claramente lo visible de tus inferencias.",
+    },
+  ],
+};
 function aiStatus(message) {
-  $("aiStatus").textContent = message;
+  const status = $("aiStatus");
+  const raw = String(message || "");
+  const percent = raw.match(/(\d{1,3})(?:\.\d+)?%/)?.[1];
+  const loading = /fetching|loading|descarg|prepar|comprob|iniciando|pensando|analizando|cache/i.test(raw);
+  let display = raw;
+  if (/fetching param cache/i.test(raw))
+    display = `Preparando el modelo local${percent ? ` · ${percent}%` : ""}`;
+  else if (/loading model/i.test(raw))
+    display = `Cargando el modelo local${percent ? ` · ${percent}%` : ""}`;
+  status.textContent = display;
+  status.classList.toggle("is-loading", loading);
+  status.style.setProperty("--ai-progress", `${Math.min(100, Number(percent || 0))}%`);
+  $("aiCard")?.classList.toggle("ai-busy", loading);
+  $("aiCard")?.setAttribute("aria-busy", String(loading));
 }
 function formatAiAnswer(text) {
   const escaped = escapeHtml(text).replace(
@@ -1323,15 +1352,27 @@ async function openAssistantForDocument() {
   $("aiPanel").hidden = false;
   $("captureBtn").classList.add("assistant-on");
   $("captureBtn").textContent = "✦ On";
-  aiStatus("Assistant listo. Usa el botón de recorte para añadir una zona.");
+  aiStatus("Asistente listo. Usa el botón de recorte para añadir una zona.");
   $("aiQuestion").focus();
 }
 async function inspectVisionCapability() {
+  if (globalThis.LanguageModel?.availability) {
+    try {
+      const availability = await globalThis.LanguageModel.availability(
+        BUILTIN_VISION_OPTIONS,
+      );
+      if (availability !== "unavailable")
+        return { ok: true, kind: "builtin", availability };
+    } catch (error) {
+      console.info("La IA integrada no admite imagen en este navegador", error);
+    }
+  }
   if (!isSecureContext)
-    return { ok: false, reason: "La visión local necesita HTTPS." };
+    return { ok: false, kind: "none", reason: "La visión local necesita HTTPS." };
   if (!navigator.gpu)
     return {
       ok: false,
+      kind: "none",
       reason: "Este navegador no ofrece WebGPU para ejecutar visión local.",
     };
   try {
@@ -1339,6 +1380,7 @@ async function inspectVisionCapability() {
     if (!adapter)
       return {
         ok: false,
+        kind: "none",
         reason: "WebGPU está desactivado o tu GPU no es compatible.",
       };
     const storage = await navigator.storage?.estimate?.(),
@@ -1346,16 +1388,42 @@ async function inspectVisionCapability() {
     if (free && free < 4_500_000_000)
       return {
         ok: false,
+        kind: "none",
         reason:
           "La visión local necesita aproximadamente 4,5 GB libres en este dispositivo.",
       };
-    return { ok: true };
-  } catch {
+    return { ok: true, kind: "webllm", availability: "downloadable" };
+  } catch (error) {
+    console.error("No se pudo preparar WebGPU para visión", error);
     return {
       ok: false,
+      kind: "none",
       reason: "No se pudo preparar WebGPU para visión local.",
     };
   }
+}
+function friendlyAiError(error, vision = false) {
+  const message = String(
+    error?.message || (typeof error === "string" ? error : ""),
+  ).trim();
+  const details = `${error?.name || ""} ${message}`.toLowerCase();
+  if (/out of memory|memory|allocation|device lost|gpu device/.test(details))
+    return vision
+      ? "La GPU no tiene memoria suficiente para el modelo visual de 4 GB. Prueba la IA integrada de Chrome/Edge o usa un equipo con más memoria gráfica."
+      : "La GPU no tiene memoria suficiente para cargar el modelo local.";
+  if (/quota|storage|cache|space|disk/.test(details))
+    return "No hay espacio local suficiente para terminar la descarga del modelo. Libera almacenamiento del navegador y vuelve a intentarlo.";
+  if (/network|fetch|failed to fetch|cors|load model/.test(details))
+    return "La descarga del modelo se interrumpió. Comprueba la conexión y pulsa Consultar para reanudarla; el progreso descargado se conserva.";
+  if (/notsupported|not supported|unsupported/.test(details))
+    return vision
+      ? "El modelo de IA de este navegador no admite imágenes en este dispositivo. Se intentará WebGPU cuando esté disponible."
+      : "Este navegador no admite el modelo local solicitado.";
+  if (/wasm|linkerror|instantiate|tvmffi/.test(details))
+    return "El motor visual guardado es incompatible con esta versión. Recarga la aplicación para actualizar el modelo local.";
+  return message
+    ? `No se pudo iniciar la IA${vision ? " visual" : ""}: ${message}`
+    : `No se pudo iniciar la IA${vision ? " visual" : ""}. Comprueba WebGPU, memoria y espacio disponible.`;
 }
 async function copyAiAnswer() {
   const answer = aiAnswerRaw.trim();
@@ -1388,6 +1456,35 @@ async function getBuiltInAi() {
     },
   });
   return builtInAiSession;
+}
+async function getBuiltInVisionAi() {
+  if (builtInVisionSession) return builtInVisionSession;
+  if (!globalThis.LanguageModel?.availability)
+    throw new Error("La IA integrada no está disponible en este navegador.");
+  const availability = await globalThis.LanguageModel.availability(
+    BUILTIN_VISION_OPTIONS,
+  );
+  if (availability === "unavailable")
+    throw new DOMException(
+      "El modelo integrado no admite imágenes en este dispositivo.",
+      "NotSupportedError",
+    );
+  aiStatus(
+    availability === "available"
+      ? "Preparando visión integrada…"
+      : "Descargando visión integrada del navegador…",
+  );
+  builtInVisionSession = await globalThis.LanguageModel.create({
+    ...BUILTIN_VISION_OPTIONS,
+    monitor(monitor) {
+      monitor.addEventListener("downloadprogress", (event) =>
+        aiStatus(
+          `Descargando visión integrada: ${Math.round(event.loaded * 100)}%`,
+        ),
+      );
+    },
+  });
+  return builtInVisionSession;
 }
 async function getWebLlmAi() {
   if (localAiEngine) return localAiEngine;
@@ -1479,7 +1576,11 @@ async function openAiAssistant(fromCapture = false) {
     const vision = await inspectVisionCapability();
     aiStatus(
       vision.ok
-        ? "Visión local disponible. La primera consulta descargará aproximadamente 4 GB y no enviará la captura a ningún servidor."
+        ? vision.kind === "builtin"
+          ? vision.availability === "available"
+            ? "Visión integrada lista. La captura se procesa localmente en el navegador."
+            : "El navegador preparará su modelo visual integrado al consultar."
+          : "Visión WebGPU disponible. La primera consulta descargará aproximadamente 4 GB y no enviará la captura a ningún servidor."
         : vision.reason,
     );
     $("aiQuestion").focus();
@@ -1650,6 +1751,34 @@ async function search(query) {
   }
 }
 
+async function streamWebLlmVision(question) {
+  const engine = await getVisionAi();
+  aiStatus("Analizando la captura con WebGPU…");
+  const stream = await engine.chat.completions.create({
+    messages: [
+      {
+        role: "system",
+        content:
+          "Eres un asistente de lectura visual riguroso. Responde siempre en español.",
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: question },
+          { type: "image_url", image_url: { url: aiImage } },
+        ],
+      },
+    ],
+    temperature: 0.25,
+    max_tokens: 500,
+    stream: true,
+  });
+  for await (const chunk of stream) {
+    if (aiAbortController.signal.aborted) break;
+    appendAiChunk(chunk.choices[0]?.delta?.content || "");
+  }
+}
+
 function showEmpty() {
   $("emptyState").hidden = false;
   $("canvasWrap").hidden = true;
@@ -1684,6 +1813,7 @@ async function askLocalAi() {
       $("aiQuestion").value.trim() ||
       (isVision ? "Describe esta captura." : "Explica este texto.");
   if (!isVision && !aiSelection && aiScope !== "document") return;
+  const answerBeforeRequest = aiAnswerRaw;
   button.disabled = true;
   $("cancelAi").hidden = false;
   aiAnswerRaw += `${aiAnswerRaw.trim() ? "\n\n---\n\n" : ""}**Tú:** ${question}\n\n**Assistant:** `;
@@ -1691,30 +1821,39 @@ async function askLocalAi() {
   aiAbortController = new AbortController();
   try {
     if (isVision) {
-      const engine = await getVisionAi();
-      aiStatus("Analizando la captura en tu dispositivo…");
-      const stream = await engine.chat.completions.create({
-        messages: [
-          {
-            role: "system",
-            content:
-              "Eres un asistente de lectura visual riguroso. Responde siempre en español.",
-          },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: question },
-              { type: "image_url", image_url: { url: aiImage } },
-            ],
-          },
-        ],
-        temperature: 0.25,
-        max_tokens: 500,
-        stream: true,
-      });
-      for await (const chunk of stream) {
-        if (aiAbortController.signal.aborted) break;
-        appendAiChunk(chunk.choices[0]?.delta?.content || "");
+      const vision = await inspectVisionCapability();
+      if (!vision.ok) throw new Error(vision.reason);
+      if (vision.kind === "builtin") {
+        try {
+          const session = await getBuiltInVisionAi();
+          const imageBlob = await fetch(aiImage).then((response) =>
+            response.blob(),
+          );
+          aiStatus("Analizando la captura con la IA integrada…");
+          const prompt = [
+            {
+              role: "user",
+              content: [
+                { type: "text", value: question },
+                { type: "image", value: imageBlob },
+              ],
+            },
+          ];
+          for await (const chunk of session.promptStreaming(prompt, {
+            signal: aiAbortController.signal,
+          }))
+            appendAiChunk(chunk);
+        } catch (builtInError) {
+          builtInVisionSession = null;
+          console.warn(
+            "La visión integrada falló; se intenta WebGPU",
+            builtInError,
+          );
+          aiStatus("La visión integrada no respondió. Probando WebGPU…");
+          await streamWebLlmVision(question);
+        }
+      } else {
+        await streamWebLlmVision(question);
       }
     } else {
       const capability = await inspectAiCapability();
@@ -1756,11 +1895,15 @@ async function askLocalAi() {
     $("copyAiAnswer").hidden = !aiAnswerRaw.trim();
   } catch (e) {
     if (e.name === "AbortError") {
+      aiAnswerRaw = answerBeforeRequest;
+      renderAiAnswer();
       aiStatus("Consulta detenida.");
       return;
     }
     console.error(e);
-    aiStatus(`IA no disponible: ${e.message || "error de inicialización"}`);
+    aiAnswerRaw = answerBeforeRequest;
+    renderAiAnswer();
+    aiStatus(friendlyAiError(e, isVision));
   } finally {
     button.disabled = false;
     $("cancelAi").hidden = true;
@@ -1942,9 +2085,13 @@ function configureAiWindow() {
   const panel = $("aiPanel");
   const card = panel.querySelector(".ai-card");
   const header = card.querySelector("header");
+  if (localStorage.getItem("paper.assistant-layout") !== "2") {
+    localStorage.removeItem("paper.ai-window");
+    localStorage.setItem("paper.assistant-layout", "2");
+  }
   card.id = "aiCard";
   header.id = "aiDragHandle";
-  $("aiTitle").textContent = "Assistant";
+  $("aiTitle").textContent = "Paper AI";
   const spark = card.querySelector(".ai-spark");
   spark.setAttribute("role", "button");
   spark.setAttribute("tabindex", "0");
@@ -1956,7 +2103,9 @@ function configureAiWindow() {
     const saved = JSON.parse(localStorage.getItem("paper.ai-window") || "null") || savedWindow;
     card.style.right = "auto";
     card.style.bottom = "auto";
-    if (saved) {
+    if (window.innerWidth <= 700) {
+      ["left", "top", "right", "bottom", "width", "height"].forEach((property) => card.style.removeProperty(property));
+    } else if (saved) {
       card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - 140, saved.left))}px`, "important");
       card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 90, saved.top))}px`, "important");
       if (saved.width) card.style.width = `${saved.width}px`;
@@ -1991,8 +2140,8 @@ function configureAiWindow() {
   });
   if (!$("newAiChat")) {
     const controls = document.createElement("div");
-    controls.className = "tool-row";
-    controls.innerHTML = '<select class="field" id="aiScope" aria-label="Ámbito de la consulta"><option value="selection">Selección</option><option value="document">Documento</option></select><button class="btn" id="newAiChat">＋ Nueva</button>';
+    controls.className = "tool-row ai-head-controls";
+    controls.innerHTML = '<select class="field" id="aiScope" aria-label="Ámbito de la consulta"><option value="selection">Selección</option><option value="document">Documento</option></select><button class="btn" id="newAiChat" title="Nueva conversación">＋ <span>Nueva</span></button>';
     header.insertBefore(controls, $("closeAiPanel"));
   }
   if (!$("minimizeAi")) {
@@ -2015,7 +2164,7 @@ function configureAiWindow() {
       $("aiPanel").hidden = false;
     }
   };
-  if (savedWindow) {
+  if (savedWindow && window.innerWidth > 700) {
     card.style.left = `${Math.max(8, savedWindow.left)}px`;
     card.style.top = `${Math.max(8, savedWindow.top)}px`;
     if (savedWindow.width) card.style.width = `${savedWindow.width}px`;
@@ -2023,7 +2172,7 @@ function configureAiWindow() {
   }
   let drag = null;
   header.addEventListener("pointerdown", (event) => {
-    if (card.classList.contains("ai-minimized") || event.target.closest("button,select,input")) return;
+    if (window.innerWidth <= 700 || card.classList.contains("ai-minimized") || event.target.closest("button,select,input")) return;
     const box = card.getBoundingClientRect();
     drag = { x: event.clientX - box.left, y: event.clientY - box.top };
     header.setPointerCapture(event.pointerId);
@@ -2061,8 +2210,14 @@ function configureAiWindow() {
     if (!moved) expandAi();
   });
   new ResizeObserver(() => {
-    if (card.classList.contains("ai-minimized")) return;
+    if (
+      panel.hidden ||
+      window.innerWidth <= 700 ||
+      card.classList.contains("ai-minimized")
+    )
+      return;
     const box = card.getBoundingClientRect();
+    if (box.width < 420 || box.height < 300) return;
     localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
   }).observe(card);
   $("newAiChat").onclick = () => {
@@ -2089,6 +2244,23 @@ function configureAiWindow() {
       openCapture();
     };
   }
+}
+function configureResponsiveUi() {
+  if (!$("sidebarBackdrop")) {
+    const backdrop = document.createElement("button");
+    backdrop.id = "sidebarBackdrop";
+    backdrop.className = "sidebar-backdrop";
+    backdrop.setAttribute("aria-label", "Cerrar panel lateral");
+    document.querySelector(".app").append(backdrop);
+    backdrop.onclick = () => document.body.classList.remove("sidebar-open");
+  }
+  const syncViewport = () => {
+    document.body.classList.toggle("is-mobile", window.innerWidth <= 700);
+    document.body.classList.toggle("is-tablet", window.innerWidth > 700 && window.innerWidth < 1180);
+    if (window.innerWidth >= 1180) document.body.classList.remove("sidebar-open");
+  };
+  syncViewport();
+  window.addEventListener("resize", syncViewport, { passive: true });
 }
 function configureFooterIsland() {
   const footer = document.querySelector(".footer");
@@ -2305,6 +2477,7 @@ window.addEventListener("resize", () => {
   buildInkPalette();
   configureAiWindow();
   configureFooterIsland();
+  configureResponsiveUi();
   setTheme(localStorage.getItem("paper.theme") || "dark");
   setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
   document.querySelector('[data-color="yellow"]').classList.add("active");
