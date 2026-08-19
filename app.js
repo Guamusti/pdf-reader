@@ -38,6 +38,7 @@ let db = null,
   aiAnswerRaw = "",
   pendingNote = null,
   aiAbortController = null,
+  aiScope = "selection",
   thumbObserver = null,
   thumbQueue = [],
   thumbRunning = 0,
@@ -1148,6 +1149,8 @@ async function openAiAssistantLegacy(fromCapture = false) {
     return toast("Selecciona un fragmento para consultarlo");
   if (!fromCapture) aiImage = "";
   aiSelection = (text || "").slice(0, 5000);
+  aiScope = "selection";
+  $("aiScope").value = aiScope;
   aiAnswerRaw = "";
   renderAiAnswer();
   $("aiSelectionLabel").textContent = fromCapture
@@ -1320,8 +1323,8 @@ async function openAiAssistant(fromCapture = false) {
     return toast("Selecciona un fragmento para consultarlo");
   if (!fromCapture) aiImage = "";
   aiSelection = (text || "").slice(0, 5000);
-  aiAnswerRaw = "";
-  renderAiAnswer();
+  aiScope = "selection";
+  $("aiScope").value = aiScope;
   $("aiSelectionLabel").textContent = fromCapture
     ? "Recorte seleccionado"
     : "Fragmento seleccionado";
@@ -1552,10 +1555,10 @@ async function askLocalAi() {
     question =
       $("aiQuestion").value.trim() ||
       (isVision ? "Describe esta captura." : "Explica este texto.");
-  if (!isVision && !aiSelection) return;
+  if (!isVision && !aiSelection && aiScope !== "document") return;
   button.disabled = true;
   $("cancelAi").hidden = false;
-  aiAnswerRaw = "";
+  aiAnswerRaw += `${aiAnswerRaw.trim() ? "\n\n---\n\n" : ""}**Tú:** ${question}\n\n**Assistant:** `;
   renderAiAnswer();
   aiAbortController = new AbortController();
   try {
@@ -1783,6 +1786,70 @@ function buildReflowControls() {
   document.querySelectorAll("[data-reflow-spacing]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-spacing", button.dataset.reflowSpacing); applyReflowPreferences(); }));
   document.querySelectorAll("[data-reflow-columns]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-columns", button.dataset.reflowColumns); applyReflowPreferences(); }));
 }
+function configureAiWindow() {
+  const panel = $("aiPanel");
+  const card = panel.querySelector(".ai-card");
+  const header = card.querySelector("header");
+  card.id = "aiCard";
+  header.id = "aiDragHandle";
+  $("aiTitle").textContent = "Assistant";
+  if (!$("newAiChat")) {
+    const controls = document.createElement("div");
+    controls.className = "tool-row";
+    controls.innerHTML = '<select class="field" id="aiScope" aria-label="Ámbito de la consulta"><option value="selection">Selección</option><option value="document">Documento</option></select><button class="btn" id="newAiChat">＋ Nueva</button>';
+    header.insertBefore(controls, $("closeAiPanel"));
+  }
+  $("aiScope").onchange = (event) => {
+    aiScope = event.target.value;
+    if (aiScope === "document") {
+      aiImage = "";
+      aiSelection = "";
+      $("aiSelectionLabel").textContent = "Documento";
+      $("aiQuote").textContent = "Consulta sobre el documento; se usará el contexto de la página actual.";
+      $("aiImagePreview").hidden = true;
+      $("aiPanel").hidden = false;
+    }
+  };
+  const saved = JSON.parse(localStorage.getItem("paper.ai-window") || "null");
+  if (saved) {
+    card.style.left = `${Math.max(8, saved.left)}px`;
+    card.style.top = `${Math.max(8, saved.top)}px`;
+    if (saved.width) card.style.width = `${saved.width}px`;
+    if (saved.height) card.style.height = `${saved.height}px`;
+  }
+  let drag = null;
+  header.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button,select,input")) return;
+    const box = card.getBoundingClientRect();
+    drag = { x: event.clientX - box.left, y: event.clientY - box.top };
+    header.setPointerCapture(event.pointerId);
+  });
+  header.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    card.style.left = `${Math.max(8, Math.min(window.innerWidth - 120, event.clientX - drag.x))}px`;
+    card.style.top = `${Math.max(8, Math.min(window.innerHeight - 80, event.clientY - drag.y))}px`;
+  });
+  header.addEventListener("pointerup", () => {
+    drag = null;
+    const box = card.getBoundingClientRect();
+    localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
+  });
+  new ResizeObserver(() => {
+    const box = card.getBoundingClientRect();
+    localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
+  }).observe(card);
+  $("newAiChat").onclick = () => {
+    aiAnswerRaw = "";
+    aiSelection = "";
+    aiImage = "";
+    $("aiQuote").textContent = "Selecciona texto, un recorte o consulta el documento.";
+    $("aiImagePreview").hidden = true;
+    $("aiQuestion").value = "";
+    renderAiAnswer();
+    aiStatus("Nueva conversación local.");
+    $("aiQuestion").focus();
+  };
+}
 document.querySelectorAll("[data-color]").forEach(
   (b) =>
     (b.onclick = () => {
@@ -1954,6 +2021,7 @@ window.addEventListener("resize", () => {
 
 (async function init() {
   buildReflowControls();
+  configureAiWindow();
   setTheme(localStorage.getItem("paper.theme") || "dark");
   setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
   document.querySelector('[data-color="yellow"]').classList.add("active");
