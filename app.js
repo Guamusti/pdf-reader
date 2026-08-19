@@ -269,6 +269,12 @@ async function renderPage(num) {
   $("pageJump").value = currentPage;
   $("pageJump").max = pdfDoc.numPages;
   $("pageJump").hidden = false;
+  $("toolbarPage").value = currentPage;
+  $("toolbarPage").max = pdfDoc.numPages;
+  $("toolbarPage").disabled = false;
+  $("toolbarPageCount").textContent = `/ ${pdfDoc.numPages}`;
+  $("toolbarPrev").disabled = currentPage === 1;
+  $("toolbarNext").disabled = currentPage === pdfDoc.numPages;
   $("pageScrubber").max = pdfDoc.numPages;
   $("pageScrubber").value = currentPage;
   $("pageScrubber").disabled = false;
@@ -600,6 +606,10 @@ function annotationStyle(color) {
       yellow: "rgba(255,213,75,.48)",
       green: "rgba(122,205,142,.44)",
       pink: "rgba(244,131,177,.42)",
+      blue: "rgba(89,151,255,.42)",
+      orange: "rgba(246,157,73,.45)",
+      purple: "rgba(166,117,224,.4)",
+      red: "rgba(232,96,96,.42)",
     }[color] || "rgba(255,213,75,.48)"
   );
 }
@@ -646,7 +656,7 @@ function renderAnnotationList() {
     ? marks
         .map(
           (mark) =>
-            `<div class="annotation-entry"><button class="bookmark" data-annotation-page="${mark.page}"><strong>${mark.type === "note" ? "Nota" : mark.type === "underline" ? "Subrayado" : "Resaltado"} · página ${mark.page}</strong><small>${escapeHtml(mark.note || mark.text || "Fragmento seleccionado")}</small></button><button class="btn icon annotation-remove" data-remove-annotation="${mark.id}" aria-label="Eliminar anotación">×</button></div>`,
+            `<div class="annotation-entry"><button class="bookmark" data-annotation-page="${mark.page}"><strong>${mark.type === "note" ? "Nota" : mark.type === "underline" ? "Subrayado" : mark.type === "strike" ? "Tachado" : "Resaltado"} · página ${mark.page}</strong><small>${escapeHtml(mark.note || mark.text || "Fragmento seleccionado")}</small></button><button class="btn icon annotation-remove" data-remove-annotation="${mark.id}" aria-label="Eliminar anotación">×</button></div>`,
         )
         .join("")
     : `<span style="color:var(--muted);font-size:13px">${all.length ? "No hay anotaciones de este tipo." : "Aún no hay anotaciones."}</span>`;
@@ -747,7 +757,13 @@ function saveAnnotation(type, quiet = false) {
   renderAnnotations();
   renderAnnotationList();
   if (!quiet)
-    toast(type === "highlight" ? "Texto resaltado" : "Texto subrayado");
+    toast(
+      type === "highlight"
+        ? "Texto resaltado"
+        : type === "strike"
+          ? "Texto tachado"
+          : "Texto subrayado",
+    );
   return true;
 }
 function toggleMarkerMode() {
@@ -1341,6 +1357,12 @@ function showEmpty() {
   $("docMeta").textContent = "Tus documentos se quedan en este dispositivo";
   $("pageStatus").textContent = "Sin documento";
   $("pageJump").hidden = true;
+  $("toolbarPage").value = 1;
+  $("toolbarPage").max = 1;
+  $("toolbarPage").disabled = true;
+  $("toolbarPageCount").textContent = "/ —";
+  $("toolbarPrev").disabled = true;
+  $("toolbarNext").disabled = true;
   $("pageScrubber").value = 1;
   $("pageScrubber").max = 1;
   $("pageScrubber").disabled = true;
@@ -1454,9 +1476,17 @@ function toggleSidebar() {
 $("fileInput").onchange = (e) => addFile(e.target.files?.[0]);
 $("prevBtn").onclick = () => renderPage(currentPage - 1);
 $("nextBtn").onclick = () => renderPage(currentPage + 1);
+$("toolbarPrev").onclick = () => renderPage(currentPage - 1);
+$("toolbarNext").onclick = () => renderPage(currentPage + 1);
+$("toolbarPage").onchange = (e) => {
+  const page = Number(e.target.value);
+  if (Number.isInteger(page) && pdfDoc) renderPage(page);
+  else e.target.value = currentPage;
+};
 $("zoomIn").onclick = () => zoom(0.15);
 $("zoomOut").onclick = () => zoom(-0.15);
 $("fitBtn").onclick = fitWidth;
+$("toolbarFitBtn").onclick = fitWidth;
 $("bookmarkBtn").onclick = toggleBookmark;
 $("searchBtn").onclick = () => search($("searchInput").value);
 $("searchInput").onkeydown = (e) => {
@@ -1531,7 +1561,16 @@ document.querySelectorAll("[data-color]").forEach(
       document
         .querySelectorAll("[data-color]")
         .forEach((x) => x.classList.toggle("active", x === b));
-      toast(`Color ${b.textContent.toLowerCase()} seleccionado`);
+      const colorNames = {
+        yellow: "amarillo",
+        green: "verde",
+        blue: "azul",
+        pink: "rosa",
+        orange: "naranja",
+        purple: "morado",
+        red: "rojo",
+      };
+      toast(`Color ${colorNames[annotationColor] || annotationColor} seleccionado`);
     }),
 );
 document.querySelectorAll("[data-annotation-filter]").forEach(
