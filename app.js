@@ -23,6 +23,7 @@ let db = null,
   inkTool = "highlight",
   markerMode = false,
   eraserMode = false,
+  reflowMode = false,
   captureStart = null,
   aiImage = "",
   localAiEngine = null,
@@ -286,10 +287,43 @@ async function renderPage(num) {
   $("viewer").scrollTo({ top: 0, left: 0 });
   await renderTextLayer(page, viewport);
   if (token !== renderToken) return;
+  if (reflowMode) await renderReflowPage(page);
+  $("canvasWrap").hidden = reflowMode;
+  $("reflowReader").hidden = !reflowMode;
   renderAnnotations();
   updateThumbSelection();
   updateOutlineSelection();
   prefetchAdjacentPages(currentPage);
+}
+function reflowParagraphs(items) {
+  const lines = [];
+  for (const item of items.filter((entry) => entry.str?.trim())) {
+    const x = item.transform?.[4] || 0,
+      y = item.transform?.[5] || 0;
+    const line = lines.find((entry) => Math.abs(entry.y - y) < 3);
+    if (line) line.items.push({ x, text: item.str });
+    else lines.push({ y, items: [{ x, text: item.str }] });
+  }
+  return lines
+    .sort((a, b) => b.y - a.y)
+    .map((line) => line.items.sort((a, b) => a.x - b.x).map((item) => item.text).join(" "))
+    .filter(Boolean);
+}
+async function renderReflowPage(page) {
+  const reader = $("reflowReader");
+  const content = await page.getTextContent();
+  const lines = reflowParagraphs(content.items);
+  if (!lines.length) {
+    reader.innerHTML = "<p>Esta página no contiene texto extraíble, así que no se puede maquetar.</p>";
+    return;
+  }
+  reader.replaceChildren(
+    ...lines.map((line) => {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = line;
+      return paragraph;
+    }),
+  );
 }
 function prefetchAdjacentPages(pageNumber) {
   if (!pdfDoc) return;
@@ -493,7 +527,6 @@ function buildThumbnails() {
     card.className = "thumb";
     card.dataset.page = page;
     card.innerHTML = `<span class="thumb-number">${page}</span>`;
-    card.onclick = () => renderPage(page);
     list.appendChild(card);
   }
   thumbObserver = new IntersectionObserver(
@@ -538,6 +571,10 @@ function buildThumbnails() {
     },
     true,
   );
+  list.addEventListener("click", (event) => {
+    const card = event.target.closest(".thumb");
+    if (card) renderPage(Number(card.dataset.page));
+  });
   updateThumbSelection();
 }
 function toggleThumbnails() {
@@ -1035,6 +1072,7 @@ async function openAiAssistantLegacy(fromCapture = false) {
   const text = window.getSelection()?.toString().trim();
   if (!fromCapture && !text)
     return toast("Selecciona un fragmento para consultarlo");
+  if (!fromCapture) aiImage = "";
   aiSelection = (text || "").slice(0, 5000);
   aiAnswerRaw = "";
   renderAiAnswer();
@@ -1409,6 +1447,7 @@ async function search(query) {
 function showEmpty() {
   $("emptyState").hidden = false;
   $("canvasWrap").hidden = true;
+  $("reflowReader").hidden = true;
   $("docTitle").textContent = "Paper Reader";
   $("docMeta").textContent = "Tus documentos se quedan en este dispositivo";
   $("pageStatus").textContent = "Sin documento";
@@ -1634,6 +1673,41 @@ document.querySelectorAll("[data-reader-margin]").forEach(
         .forEach((item) => item.classList.toggle("active", item === button));
     }),
 );
+function applyReflowPreferences() {
+  const reader = $("reflowReader");
+  const size = Number(localStorage.getItem("paper.reflow-size") || 20);
+  const spacing = localStorage.getItem("paper.reflow-spacing") || "normal";
+  const font = localStorage.getItem("paper.reflow-font") || "sans";
+  const columns = localStorage.getItem("paper.reflow-columns") || "1";
+  reader.style.setProperty("--reflow-size", `${size}px`);
+  reader.style.setProperty("--reflow-leading", spacing === "compact" ? "1.35" : spacing === "relaxed" ? "1.95" : "1.65");
+  reader.classList.toggle("font-serif", font === "serif");
+  reader.classList.toggle("font-mono", font === "mono");
+  reader.classList.toggle("columns-2", columns === "2");
+  $("reflowFont").value = font;
+  document.querySelectorAll("[data-reflow-spacing]").forEach((button) => button.classList.toggle("active", button.dataset.reflowSpacing === spacing));
+  document.querySelectorAll("[data-reflow-columns]").forEach((button) => button.classList.toggle("active", button.dataset.reflowColumns === columns));
+}
+async function setReadingMode(mode) {
+  reflowMode = mode === "reflow";
+  localStorage.setItem("paper.reading-mode", mode);
+  $("reflowControls").hidden = !reflowMode;
+  document.querySelectorAll("[data-reading-mode]").forEach((button) => button.classList.toggle("active", button.dataset.readingMode === mode));
+  if (reflowMode) applyReflowPreferences();
+  if (pdfDoc) await renderPage(currentPage);
+  if (reflowMode) toast("Modo lectura: texto recompuesto de la página actual.");
+}
+function buildReflowControls() {
+  const popover = $("appearancePopover");
+  if (!popover || $("reflowControls")) return;
+  popover.insertAdjacentHTML("beforeend", `<div class="label">Modo</div><div class="tool-row"><button class="btn" data-reading-mode="pdf">PDF</button><button class="btn" data-reading-mode="reflow">Lectura</button></div><div class="reflow-controls" id="reflowControls" hidden><div class="label">Fuente y tamaño</div><div class="tool-row"><select class="field" id="reflowFont"><option value="sans">Sans</option><option value="serif">Serif</option><option value="mono">Mono</option></select><button class="btn" id="reflowSmaller">A−</button><button class="btn" id="reflowLarger">A+</button></div><div class="label">Espaciado</div><div class="tool-row"><button class="btn" data-reflow-spacing="compact">Compacto</button><button class="btn" data-reflow-spacing="normal">Normal</button><button class="btn" data-reflow-spacing="relaxed">Amplio</button></div><div class="label">Columnas</div><div class="tool-row"><button class="btn" data-reflow-columns="1">Una</button><button class="btn" data-reflow-columns="2">Dos</button></div></div>`);
+  document.querySelectorAll("[data-reading-mode]").forEach((button) => (button.onclick = () => setReadingMode(button.dataset.readingMode)));
+  $("reflowFont").onchange = (event) => { localStorage.setItem("paper.reflow-font", event.target.value); applyReflowPreferences(); };
+  $("reflowSmaller").onclick = () => { localStorage.setItem("paper.reflow-size", Math.max(14, Number(localStorage.getItem("paper.reflow-size") || 20) - 1)); applyReflowPreferences(); };
+  $("reflowLarger").onclick = () => { localStorage.setItem("paper.reflow-size", Math.min(34, Number(localStorage.getItem("paper.reflow-size") || 20) + 1)); applyReflowPreferences(); };
+  document.querySelectorAll("[data-reflow-spacing]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-spacing", button.dataset.reflowSpacing); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-columns]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-columns", button.dataset.reflowColumns); applyReflowPreferences(); }));
+}
 document.querySelectorAll("[data-color]").forEach(
   (b) =>
     (b.onclick = () => {
@@ -1804,10 +1878,12 @@ window.addEventListener("resize", () => {
 });
 
 (async function init() {
+  buildReflowControls();
   setTheme(localStorage.getItem("paper.theme") || "dark");
   setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
   document.querySelector('[data-color="yellow"]').classList.add("active");
   setInkTool("highlight");
+  await setReadingMode(localStorage.getItem("paper.reading-mode") || "pdf");
   const margin = localStorage.getItem("paper.reader-margin") || "normal";
   $("viewer").classList.toggle("margin-compact", margin === "compact");
   $("viewer").classList.toggle("margin-wide", margin === "wide");
