@@ -48,6 +48,8 @@ let db = null,
   thumbScrubStart = null,
   thumbWasDragged = false;
 
+let annotationRedo = [];
+
 function toast(msg) {
   const e = $("toast");
   e.textContent = msg;
@@ -730,6 +732,17 @@ function annotationStyle(color) {
     }[color] || "rgba(255,213,75,.48)"
   );
 }
+function annotationLabel(type) {
+  return type === "note"
+    ? "Nota"
+    : type === "underline"
+      ? "Subrayado"
+      : type === "wavy"
+        ? "Subrayado ondulado"
+        : type === "strike"
+          ? "Tachado"
+          : "Resaltado";
+}
 function renderAnnotations() {
   const layer = $("annotationLayer");
   layer.innerHTML = "";
@@ -743,7 +756,7 @@ function renderAnnotations() {
       el.style.width = `${rect.w * 100}%`;
       el.style.height = `${rect.h * 100}%`;
       el.style.setProperty("--ink-color", annotationStyle(mark.color));
-      if (mark.type === "underline")
+      if (mark.type === "underline" || mark.type === "wavy")
         el.style.top = `calc(${(rect.y + rect.h) * 100}% - 3px)`;
       if (mark.type === "highlight")
         el.style.background = annotationStyle(mark.color);
@@ -776,7 +789,7 @@ function renderAnnotationList() {
     ? marks
         .map(
           (mark) =>
-            `<div class="annotation-entry"><button class="bookmark" data-annotation-page="${mark.page}"><strong>${mark.type === "note" ? "Nota" : mark.type === "underline" ? "Subrayado" : mark.type === "strike" ? "Tachado" : "Resaltado"} · página ${mark.page}</strong><small>${escapeHtml(mark.note || mark.text || "Fragmento seleccionado")}</small></button><button class="btn icon annotation-remove" data-remove-annotation="${mark.id}" aria-label="Eliminar anotación">×</button></div>`,
+            `<div class="annotation-entry"><button class="bookmark" data-annotation-page="${mark.page}"><strong>${annotationLabel(mark.type)} · página ${mark.page}</strong><small>${escapeHtml(mark.note || mark.text || "Fragmento seleccionado")}</small></button><button class="btn icon annotation-remove" data-remove-annotation="${mark.id}" aria-label="Eliminar anotación">×</button></div>`,
         )
         .join("")
     : `<span style="color:var(--muted);font-size:13px">${all.length ? "No hay anotaciones de este tipo." : "Aún no hay anotaciones."}</span>`;
@@ -838,7 +851,7 @@ function paintLiveHighlight() {
     el.style.width = `${rect.w * 100}%`;
     el.style.height = `${rect.h * 100}%`;
     el.style.setProperty("--ink-color", annotationStyle(annotationColor));
-    if (inkTool === "underline")
+    if (inkTool === "underline" || inkTool === "wavy")
       el.style.top = `calc(${(rect.y + rect.h) * 100}% - 3px)`;
     layer.appendChild(el);
   }
@@ -873,6 +886,7 @@ function saveAnnotation(type, quiet = false) {
     rects,
     createdAt: Date.now(),
   });
+  annotationRedo = [];
   setAnnotations(items);
   window.getSelection().removeAllRanges();
   hideAnnotationActions();
@@ -885,7 +899,9 @@ function saveAnnotation(type, quiet = false) {
         ? "Texto resaltado"
         : type === "strike"
           ? "Texto tachado"
-          : "Texto subrayado",
+          : type === "wavy"
+            ? "Subrayado ondulado aplicado"
+            : "Texto subrayado",
     );
   return true;
 }
@@ -898,7 +914,7 @@ function toggleMarkerMode() {
   if (!markerMode) clearLiveHighlight();
   toast(
     markerMode
-      ? `${inkTool === "highlight" ? "Marcador" : inkTool === "underline" ? "Subrayador" : "Tachado"} directo activado: selecciona texto y suelta.`
+      ? `${inkTool === "highlight" ? "Marcador" : inkTool === "underline" ? "Subrayador" : inkTool === "wavy" ? "Subrayador ondulado" : "Tachado"} directo activado: selecciona texto y suelta.`
       : "Rotulador directo desactivado",
   );
 }
@@ -907,7 +923,7 @@ function setInkTool(tool) {
   document
     .querySelectorAll("[data-ink-tool]")
     .forEach((button) => button.classList.toggle("active", button.dataset.inkTool === tool));
-  const label = tool === "highlight" ? "Marcador" : tool === "underline" ? "Subrayador" : "Tachado";
+  const label = tool === "highlight" ? "Marcador" : tool === "underline" ? "Subrayador" : tool === "wavy" ? "Subrayador ondulado" : "Tachado";
   $("markerModeBtn").title = `Aplicar ${label.toLowerCase()} directamente`;
   $("markerModeBtn").setAttribute("aria-label", $("markerModeBtn").title);
   if (markerMode) toast(`${label} seleccionado`);
@@ -920,6 +936,30 @@ function refreshInkPreview() {
   const color = annotationStyle(annotationColor);
   preview.className = `ink-preview ${inkTool}`;
   preview.style.setProperty("--ink-preview", color);
+}
+function undoAnnotation() {
+  if (!currentBook) return;
+  const items = annotations();
+  let index = -1;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i].page === currentPage) { index = i; break; }
+  }
+  if (index < 0) return toast("No hay anotaciones que deshacer");
+  annotationRedo.push(items.splice(index, 1)[0]);
+  setAnnotations(items);
+  renderAnnotations();
+  renderAnnotationList();
+  toast("Anotación deshecha");
+}
+function redoAnnotation() {
+  const mark = annotationRedo.pop();
+  if (!mark) return toast("No hay anotaciones que rehacer");
+  const items = annotations();
+  items.push(mark);
+  setAnnotations(items);
+  renderAnnotations();
+  renderAnnotationList();
+  toast("Anotación rehecha");
 }
 function buildInkPalette() {
   const popover = $("toolPopover");
@@ -947,22 +987,25 @@ function buildInkPalette() {
     strip.className = "ink-strip";
     strip.id = "inkStrip";
     strip.hidden = true;
-    strip.innerHTML = '<button data-strip-tool="highlight" title="Marcador">▰</button><button data-strip-tool="underline" title="Subrayado recto">U̲</button><button data-strip-tool="strike" title="Tachado">S̶</button><button data-strip-eraser title="Goma">⌫</button><button data-strip-color title="Cambiar color"><i class="ink-dot"></i></button><button data-strip-close title="Cerrar">⌃</button>';
+    strip.innerHTML = '<div class="ink-strip-inner"><button data-strip-tool="highlight" title="Marcador"><span class="tool-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-eraser title="Goma"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Color y opacidad"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
     $("openSidebar").closest(".toolbar").append(strip);
     const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
     const colorCard = document.createElement("div");
     colorCard.className = "ink-color-card";
     colorCard.id = "inkColorCard";
     colorCard.hidden = true;
-    colorCard.innerHTML = `<div class="label">Color de tinta</div><div class="ink-color-preview"><i></i></div><div class="ink-color-list">${colors.map((color) => `<button data-strip-palette="${color}" style="background:${annotationStyle(color)}" aria-label="${color}"></button>`).join("")}</div>`;
+    colorCard.innerHTML = `<div class="ink-card-title">Color de tinta</div><div class="ink-color-preview"><i></i></div><div class="ink-color-list strong">${colors.map((color) => `<button data-strip-palette="${color}" style="background:${annotationStyle(color).replace(/\.[0-9]+\)/, '.95)')}" aria-label="${color}"></button>`).join("")}</div><div class="ink-color-list soft">${colors.map((color) => `<button data-strip-palette="${color}" style="background:${annotationStyle(color)}" aria-label="${color} suave"></button>`).join("")}</div>`;
     $("openSidebar").closest(".toolbar").append(colorCard);
     const updateStrip = () => {
+      strip.style.setProperty("--ink-dot", annotationStyle(annotationColor));
       strip.querySelector(".ink-dot").style.setProperty("--ink-dot", annotationStyle(annotationColor));
       strip.querySelectorAll("[data-strip-tool]").forEach((button) => button.classList.toggle("active", button.dataset.stripTool === inkTool && markerMode));
     };
     strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => { setInkTool(button.dataset.stripTool); if (!markerMode) toggleMarkerMode(); updateStrip(); }));
     strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
     strip.querySelector("[data-strip-color]").onclick = () => { colorCard.hidden = !colorCard.hidden; };
+    strip.querySelector("[data-strip-undo]").onclick = undoAnnotation;
+    strip.querySelector("[data-strip-redo]").onclick = redoAnnotation;
     colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => (button.onclick = () => { annotationColor = button.dataset.stripPalette; colorCard.hidden = true; refreshInkPreview(); updateStrip(); toast("Color de tinta actualizado"); }));
     const updateInkColorCard = () => {
       colorCard.querySelector(".ink-color-preview i").style.setProperty("--ink-card-color", annotationStyle(annotationColor));
@@ -970,7 +1013,7 @@ function buildInkPalette() {
     };
     updateInkColorCard();
     strip.addEventListener("click", updateInkColorCard);
-    strip.querySelector("[data-strip-close]").onclick = () => { strip.hidden = true; colorCard.hidden = true; };
+    strip.querySelector("[data-strip-close]").onclick = () => { strip.hidden = true; colorCard.hidden = true; document.body.classList.remove("ink-toolbar-open"); };
   }
   refreshInkPreview();
 }
@@ -1268,7 +1311,7 @@ function closeAiAssistant() {
 }
 async function openAssistantForDocument() {
   if (!currentBook) return toast("Abre un documento primero");
-  $("aiCard").classList.remove("ai-minimized");
+  $("aiCard")._expandAi?.();
   aiScope = "document";
   aiSelection = "";
   aiImage = "";
@@ -1906,11 +1949,41 @@ function configureAiWindow() {
   spark.setAttribute("role", "button");
   spark.setAttribute("tabindex", "0");
   spark.title = "Contraer Assistant";
-  const toggleAiIsland = (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    card.classList.toggle("ai-minimized");
+  const savedWindow = JSON.parse(localStorage.getItem("paper.ai-window") || "null");
+  const savedIsland = JSON.parse(localStorage.getItem("paper.ai-island") || "null");
+  const expandAi = () => {
+    card.classList.remove("ai-minimized");
+    const saved = JSON.parse(localStorage.getItem("paper.ai-window") || "null") || savedWindow;
+    card.style.right = "auto";
+    card.style.bottom = "auto";
+    if (saved) {
+      card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - 140, saved.left))}px`, "important");
+      card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 90, saved.top))}px`, "important");
+      if (saved.width) card.style.width = `${saved.width}px`;
+      if (saved.height) card.style.height = `${saved.height}px`;
+    }
   };
+  const minimizeAi = () => {
+    if (!card.classList.contains("ai-minimized")) {
+      const box = card.getBoundingClientRect();
+      localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
+    }
+    card.classList.add("ai-minimized");
+    card.style.width = "58px";
+    card.style.height = "58px";
+    card.style.right = "auto";
+    card.style.bottom = "auto";
+    const position = JSON.parse(localStorage.getItem("paper.ai-island") || "null") || savedIsland;
+    card.style.setProperty("left", `${position?.left ?? Math.max(12, window.innerWidth - 82)}px`, "important");
+    card.style.setProperty("top", `${position?.top ?? Math.max(72, window.innerHeight - 152)}px`, "important");
+    $("captureBtn").classList.add("assistant-on");
+  };
+  const toggleAiIsland = (event) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    card.classList.contains("ai-minimized") ? expandAi() : minimizeAi();
+  };
+  card._expandAi = expandAi;
   spark.addEventListener("pointerdown", (event) => event.stopPropagation());
   spark.addEventListener("click", toggleAiIsland);
   spark.addEventListener("keydown", (event) => {
@@ -1929,17 +2002,8 @@ function configureAiWindow() {
     minimize.title = "Contraer Assistant";
     minimize.textContent = "−";
     $("closeAiPanel").before(minimize);
-    minimize.onclick = () => {
-      card.classList.add("ai-minimized");
-      $("captureBtn").classList.add("assistant-on");
-    };
+    minimize.onclick = minimizeAi;
   }
-  card.addEventListener("click", (event) => {
-    if (card.classList.contains("ai-minimized")) {
-      event.stopPropagation();
-      card.classList.remove("ai-minimized");
-    }
-  });
   $("aiScope").onchange = (event) => {
     aiScope = event.target.value;
     if (aiScope === "document") {
@@ -1951,16 +2015,15 @@ function configureAiWindow() {
       $("aiPanel").hidden = false;
     }
   };
-  const saved = JSON.parse(localStorage.getItem("paper.ai-window") || "null");
-  if (saved) {
-    card.style.left = `${Math.max(8, saved.left)}px`;
-    card.style.top = `${Math.max(8, saved.top)}px`;
-    if (saved.width) card.style.width = `${saved.width}px`;
-    if (saved.height) card.style.height = `${saved.height}px`;
+  if (savedWindow) {
+    card.style.left = `${Math.max(8, savedWindow.left)}px`;
+    card.style.top = `${Math.max(8, savedWindow.top)}px`;
+    if (savedWindow.width) card.style.width = `${savedWindow.width}px`;
+    if (savedWindow.height) card.style.height = `${savedWindow.height}px`;
   }
   let drag = null;
   header.addEventListener("pointerdown", (event) => {
-    if (event.target.closest("button,select,input")) return;
+    if (card.classList.contains("ai-minimized") || event.target.closest("button,select,input")) return;
     const box = card.getBoundingClientRect();
     drag = { x: event.clientX - box.left, y: event.clientY - box.top };
     header.setPointerCapture(event.pointerId);
@@ -1975,7 +2038,30 @@ function configureAiWindow() {
     const box = card.getBoundingClientRect();
     localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
   });
+  let islandDrag = null;
+  card.addEventListener("pointerdown", (event) => {
+    if (!card.classList.contains("ai-minimized")) return;
+    const box = card.getBoundingClientRect();
+    islandDrag = { id: event.pointerId, x: event.clientX - box.left, y: event.clientY - box.top, startX: event.clientX, startY: event.clientY, moved: false };
+    card.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  card.addEventListener("pointermove", (event) => {
+    if (!islandDrag || islandDrag.id !== event.pointerId) return;
+    if (Math.hypot(event.clientX - islandDrag.startX, event.clientY - islandDrag.startY) > 4) islandDrag.moved = true;
+    card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - 66, event.clientX - islandDrag.x))}px`, "important");
+    card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 66, event.clientY - islandDrag.y))}px`, "important");
+  });
+  card.addEventListener("pointerup", (event) => {
+    if (!islandDrag || islandDrag.id !== event.pointerId) return;
+    const moved = islandDrag.moved;
+    islandDrag = null;
+    const box = card.getBoundingClientRect();
+    localStorage.setItem("paper.ai-island", JSON.stringify({ left: box.left, top: box.top }));
+    if (!moved) expandAi();
+  });
   new ResizeObserver(() => {
+    if (card.classList.contains("ai-minimized")) return;
     const box = card.getBoundingClientRect();
     localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
   }).observe(card);
@@ -2003,6 +2089,32 @@ function configureAiWindow() {
       openCapture();
     };
   }
+}
+function configureFooterIsland() {
+  const footer = document.querySelector(".footer");
+  if (!footer || $("footerCollapse")) return;
+  const collapse = document.createElement("button");
+  collapse.id = "footerCollapse";
+  collapse.className = "btn footer-collapse";
+  collapse.title = "Contraer navegador de páginas";
+  collapse.setAttribute("aria-label", collapse.title);
+  collapse.textContent = "⌄";
+  footer.append(collapse);
+  const setMinimized = (minimized) => {
+    footer.classList.toggle("footer-minimized", minimized);
+    localStorage.setItem("paper.footer-minimized", String(minimized));
+    collapse.textContent = minimized ? "⌃" : "⌄";
+    collapse.title = minimized ? "Expandir navegador de páginas" : "Contraer navegador de páginas";
+    collapse.setAttribute("aria-label", collapse.title);
+  };
+  collapse.onclick = (event) => {
+    event.stopPropagation();
+    setMinimized(!footer.classList.contains("footer-minimized"));
+  };
+  footer.addEventListener("click", () => {
+    if (footer.classList.contains("footer-minimized")) setMinimized(false);
+  });
+  setMinimized(localStorage.getItem("paper.footer-minimized") === "true");
 }
 document.querySelectorAll("[data-color]").forEach(
   (b) =>
@@ -2034,7 +2146,8 @@ document.querySelectorAll("[data-annotation-filter]").forEach(
 $("markerModeBtn").onclick = () => {
   const strip = $("inkStrip");
   strip.hidden = !strip.hidden;
-  $("inkColorCard").hidden = strip.hidden;
+  $("inkColorCard").hidden = true;
+  document.body.classList.toggle("ink-toolbar-open", !strip.hidden);
 };
 $("eraserModeBtn").onclick = () => toggleEraserMode();
 $("captureBtn").onclick = openAssistantForDocument;
@@ -2191,6 +2304,7 @@ window.addEventListener("resize", () => {
   buildPageColorControls();
   buildInkPalette();
   configureAiWindow();
+  configureFooterIsland();
   setTheme(localStorage.getItem("paper.theme") || "dark");
   setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
   document.querySelector('[data-color="yellow"]').classList.add("active");
