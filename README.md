@@ -13,3 +13,4 @@ Incluye:
 - Asistente de lectura con IA local: pregunta sobre una selección sin enviar el PDF ni el fragmento a una API. Requiere un navegador con WebGPU y descarga un modelo de aproximadamente 900 MB en el primer uso.
 - Previsualización de subrayado al seleccionar texto, índice navegable cuando el PDF lo ofrece, salto directo de página y exportación de anotaciones en JSON.
 - Modo enfoque, búsqueda cíclica entre todas las coincidencias y renderizado cancelable para una navegación más fluida.
+- Índice editorial con jerarquía y página activa, más una tira inferior de miniaturas con carga diferida para recorrer el documento visualmente.
