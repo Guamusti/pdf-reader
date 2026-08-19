@@ -146,7 +146,8 @@ async function renderLibrary() {
         .map((b) => {
           const page = Number(localStorage.getItem(key(b.id, "page")) || 1),
             progress = b.pages ? Math.round((page / b.pages) * 100) : 0;
-          return `<div class="book-entry"><button class="book ${currentBook?.id === b.id ? "active" : ""}" data-id="${encodeURIComponent(b.id)}"><strong>${escapeHtml(b.name)}</strong><small>${b.pages ? `Página ${page} de ${b.pages} · ${progress}%` : new Date(b.openedAt).toLocaleDateString()}</small></button><button class="btn icon book-remove" data-remove-book="${encodeURIComponent(b.id)}" aria-label="Eliminar ${escapeHtml(b.name)}">×</button></div>`;
+          const type = b.kind === "markdown" ? "MD" : "PDF";
+          return `<div class="book-entry"><button class="book ${currentBook?.id === b.id ? "active" : ""}" data-id="${encodeURIComponent(b.id)}"><span class="book-cover ${type === "MD" ? "markdown" : ""}">${type}</span><span class="book-copy"><strong>${escapeHtml(b.name)}</strong><small>${b.pages ? `Página ${page} de ${b.pages}` : new Date(b.openedAt).toLocaleDateString()}</small><i class="book-progress"><b style="width:${progress}%"></b></i></span><em>${progress}%</em></button><button class="btn icon book-remove" data-remove-book="${encodeURIComponent(b.id)}" aria-label="Eliminar ${escapeHtml(b.name)}">×</button></div>`;
         })
         .join("")
     : '<span style="color:var(--muted);font-size:13px">Aún no hay PDFs guardados.</span>';
@@ -949,13 +950,26 @@ function buildInkPalette() {
     strip.innerHTML = '<button data-strip-tool="highlight" title="Marcador">▰</button><button data-strip-tool="underline" title="Subrayado recto">U̲</button><button data-strip-tool="strike" title="Tachado">S̶</button><button data-strip-eraser title="Goma">⌫</button><button data-strip-color title="Cambiar color"><i class="ink-dot"></i></button><button data-strip-close title="Cerrar">⌃</button>';
     $("openSidebar").closest(".toolbar").append(strip);
     const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
+    const colorCard = document.createElement("div");
+    colorCard.className = "ink-color-card";
+    colorCard.id = "inkColorCard";
+    colorCard.hidden = true;
+    colorCard.innerHTML = `<div class="label">Color de tinta</div><div class="ink-color-preview"><i></i></div><div class="ink-color-list">${colors.map((color) => `<button data-strip-palette="${color}" style="background:${annotationStyle(color)}" aria-label="${color}"></button>`).join("")}</div>`;
+    $("openSidebar").closest(".toolbar").append(colorCard);
     const updateStrip = () => {
       strip.querySelector(".ink-dot").style.setProperty("--ink-dot", annotationStyle(annotationColor));
       strip.querySelectorAll("[data-strip-tool]").forEach((button) => button.classList.toggle("active", button.dataset.stripTool === inkTool && markerMode));
     };
     strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => { setInkTool(button.dataset.stripTool); if (!markerMode) toggleMarkerMode(); updateStrip(); }));
     strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
-    strip.querySelector("[data-strip-color]").onclick = () => { annotationColor = colors[(colors.indexOf(annotationColor) + 1) % colors.length]; refreshInkPreview(); updateStrip(); toast("Color de tinta actualizado"); };
+    strip.querySelector("[data-strip-color]").onclick = () => { colorCard.hidden = !colorCard.hidden; };
+    colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => (button.onclick = () => { annotationColor = button.dataset.stripPalette; colorCard.hidden = true; refreshInkPreview(); updateStrip(); toast("Color de tinta actualizado"); }));
+    const updateInkColorCard = () => {
+      colorCard.querySelector(".ink-color-preview i").style.setProperty("--ink-card-color", annotationStyle(annotationColor));
+      colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => button.classList.toggle("active", button.dataset.stripPalette === annotationColor));
+    };
+    updateInkColorCard();
+    strip.addEventListener("click", updateInkColorCard);
     strip.querySelector("[data-strip-close]").onclick = () => { strip.hidden = true; };
   }
   refreshInkPreview();
@@ -1888,6 +1902,10 @@ function configureAiWindow() {
   card.id = "aiCard";
   header.id = "aiDragHandle";
   $("aiTitle").textContent = "Assistant";
+  card.querySelector(".ai-spark").onclick = (event) => {
+    event.stopPropagation();
+    card.classList.toggle("ai-minimized");
+  };
   if (!$("newAiChat")) {
     const controls = document.createElement("div");
     controls.className = "tool-row";
