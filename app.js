@@ -932,6 +932,15 @@ function buildInkPalette() {
   popover.querySelectorAll("[data-ink-tool]").forEach((button) => {
     button.innerHTML = `<b>${icons[button.dataset.inkTool]}</b><span>${button.textContent}</span>`;
   });
+  const eraser = document.createElement("button");
+  eraser.className = "btn";
+  eraser.id = "inkEraserTool";
+  eraser.innerHTML = "<b>⌫</b><span>Goma</span>";
+  popover.querySelector(".tool-row")?.append(eraser);
+  eraser.onclick = () => {
+    toggleEraserMode();
+    popover.classList.remove("open");
+  };
   refreshInkPreview();
 }
 function selectionOverlaps(annotation, rects) {
@@ -1228,6 +1237,7 @@ function closeAiAssistant() {
 }
 async function openAssistantForDocument() {
   if (!currentBook) return toast("Abre un documento primero");
+  $("aiCard").classList.remove("ai-minimized");
   aiScope = "document";
   aiSelection = "";
   aiImage = "";
@@ -1867,6 +1877,24 @@ function configureAiWindow() {
     controls.innerHTML = '<select class="field" id="aiScope" aria-label="Ámbito de la consulta"><option value="selection">Selección</option><option value="document">Documento</option></select><button class="btn" id="newAiChat">＋ Nueva</button>';
     header.insertBefore(controls, $("closeAiPanel"));
   }
+  if (!$("minimizeAi")) {
+    const minimize = document.createElement("button");
+    minimize.className = "btn icon";
+    minimize.id = "minimizeAi";
+    minimize.title = "Contraer Assistant";
+    minimize.textContent = "−";
+    $("closeAiPanel").before(minimize);
+    minimize.onclick = () => {
+      card.classList.add("ai-minimized");
+      $("captureBtn").classList.add("assistant-on");
+    };
+  }
+  card.addEventListener("click", (event) => {
+    if (card.classList.contains("ai-minimized")) {
+      event.stopPropagation();
+      card.classList.remove("ai-minimized");
+    }
+  });
   $("aiScope").onchange = (event) => {
     aiScope = event.target.value;
     if (aiScope === "document") {
@@ -1958,7 +1986,10 @@ document.querySelectorAll("[data-annotation-filter]").forEach(
       renderAnnotationList();
     }),
 );
-$("markerModeBtn").onclick = toggleMarkerMode;
+$("markerModeBtn").onclick = () => {
+  const pop = $("toolPopover"), isOpen = pop.classList.toggle("open");
+  $("toolsBtn").setAttribute("aria-expanded", String(isOpen));
+};
 $("eraserModeBtn").onclick = () => toggleEraserMode();
 $("captureBtn").onclick = openAssistantForDocument;
 $("captureOverlay").addEventListener("pointerdown", (e) => {
@@ -1981,7 +2012,11 @@ document
   .forEach((b) => (b.onclick = () => saveAnnotation(b.dataset.annotation)));
 document
   .querySelectorAll("[data-ink-tool]")
-  .forEach((b) => (b.onclick = () => setInkTool(b.dataset.inkTool)));
+  .forEach((b) => (b.onclick = () => {
+    setInkTool(b.dataset.inkTool);
+    if (!markerMode) toggleMarkerMode();
+    $("toolPopover").classList.remove("open");
+  }));
 $("clearPageNotes").onclick = clearPageAnnotations;
 $("noteBtn").onclick = openNotePanel;
 $("closeNotePanel").onclick = closeNotePanel;
@@ -2102,6 +2137,10 @@ window.addEventListener("resize", () => {
 });
 
 (async function init() {
+  $("toolbarPrev").textContent = "‹";
+  $("toolbarNext").textContent = "›";
+  $("prevBtn").textContent = "‹";
+  $("nextBtn").textContent = "›";
   buildReflowControls();
   buildPageColorControls();
   buildInkPalette();
