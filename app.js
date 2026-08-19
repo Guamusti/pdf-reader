@@ -12,6 +12,7 @@ let db = null,
   currentPage = 1,
   scale = 1.25,
   rotation = 0,
+  pageColor = "paper",
   renderTask = null,
   isRotating = false,
   searchToken = 0,
@@ -314,6 +315,7 @@ async function renderPage(num) {
   }
   hideAnnotationActions();
   currentPage = Math.max(1, Math.min(pdfDoc.numPages, num));
+  updatePageColor();
   const page = await pdfDoc.getPage(currentPage);
   if (token !== renderToken) return;
   const viewport = page.getViewport({ scale, rotation });
@@ -1786,6 +1788,30 @@ function buildReflowControls() {
   document.querySelectorAll("[data-reflow-spacing]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-spacing", button.dataset.reflowSpacing); applyReflowPreferences(); }));
   document.querySelectorAll("[data-reflow-columns]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-columns", button.dataset.reflowColumns); applyReflowPreferences(); }));
 }
+function pageColorStorageKey() {
+  return currentBook ? key(currentBook.id, `page-color-${currentPage}`) : "paper.page-color";
+}
+function updatePageColor() {
+  pageColor = localStorage.getItem(pageColorStorageKey()) || "paper";
+  const wrap = $("canvasWrap");
+  wrap.classList.remove("page-color-warm", "page-color-sepia", "page-color-gray", "page-color-night");
+  if (pageColor !== "paper") wrap.classList.add(`page-color-${pageColor}`);
+  document.querySelectorAll("[data-page-color]").forEach((button) => button.classList.toggle("active", button.dataset.pageColor === pageColor));
+}
+function setPageColor(color) {
+  pageColor = color;
+  localStorage.setItem(pageColorStorageKey(), color);
+  updatePageColor();
+}
+function buildPageColorControls() {
+  const popover = $("appearancePopover");
+  if (!popover || $("pageColors")) return;
+  const section = document.createElement("div");
+  section.id = "pageColors";
+  section.innerHTML = '<div class="label">Color de página</div><div class="page-colors"><button data-page-color="paper" title="Blanco" aria-label="Blanco"></button><button data-page-color="warm" title="Cálido" aria-label="Cálido"></button><button data-page-color="sepia" title="Sepia" aria-label="Sepia"></button><button data-page-color="gray" title="Gris" aria-label="Gris"></button><button data-page-color="night" title="Noche" aria-label="Noche"></button></div><p class="reader-hint">Solo cambia la visualización de esta página.</p>';
+  popover.append(section);
+  section.querySelectorAll("[data-page-color]").forEach((button) => (button.onclick = () => setPageColor(button.dataset.pageColor)));
+}
 function configureAiWindow() {
   const panel = $("aiPanel");
   const card = panel.querySelector(".ai-card");
@@ -2021,6 +2047,7 @@ window.addEventListener("resize", () => {
 
 (async function init() {
   buildReflowControls();
+  buildPageColorControls();
   configureAiWindow();
   setTheme(localStorage.getItem("paper.theme") || "dark");
   setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
