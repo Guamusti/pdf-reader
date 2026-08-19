@@ -36,7 +36,11 @@ let db = null,
   aiAbortController = null,
   thumbObserver = null,
   thumbQueue = [],
-  thumbRunning = 0;
+  thumbRunning = 0,
+  scrubFrame = 0,
+  scrubTarget = 1,
+  thumbScrubStart = null,
+  thumbWasDragged = false;
 
 function toast(msg) {
   const e = $("toast");
@@ -265,6 +269,9 @@ async function renderPage(num) {
   $("pageJump").value = currentPage;
   $("pageJump").max = pdfDoc.numPages;
   $("pageJump").hidden = false;
+  $("pageScrubber").max = pdfDoc.numPages;
+  $("pageScrubber").value = currentPage;
+  $("pageScrubber").disabled = false;
   $("progressBar").style.width = `${(currentPage / pdfDoc.numPages) * 100}%`;
   $("prevBtn").disabled = currentPage === 1;
   $("nextBtn").disabled = currentPage === pdfDoc.numPages;
@@ -274,6 +281,21 @@ async function renderPage(num) {
   renderAnnotations();
   updateThumbSelection();
   updateOutlineSelection();
+  prefetchAdjacentPages(currentPage);
+}
+function prefetchAdjacentPages(pageNumber) {
+  if (!pdfDoc) return;
+  for (const page of [pageNumber - 1, pageNumber + 1]) {
+    if (page >= 1 && page <= pdfDoc.numPages) pdfDoc.getPage(page).catch(() => {});
+  }
+}
+function scheduleScrubPage(pageNumber) {
+  scrubTarget = pageNumber;
+  if (scrubFrame) return;
+  scrubFrame = requestAnimationFrame(() => {
+    scrubFrame = 0;
+    if (scrubTarget !== currentPage) renderPage(scrubTarget);
+  });
 }
 async function renderTextLayer(page, viewport) {
   const layer = $("textLayer");
@@ -479,6 +501,35 @@ function buildThumbnails() {
   document
     .querySelectorAll(".thumb")
     .forEach((card) => thumbObserver.observe(card));
+  list.addEventListener("pointerdown", (event) => {
+    thumbScrubStart = { x: event.clientX, page: currentPage };
+    thumbWasDragged = false;
+    list.setPointerCapture(event.pointerId);
+  });
+  list.addEventListener("pointermove", (event) => {
+    if (!thumbScrubStart) return;
+    const delta = event.clientX - thumbScrubStart.x;
+    if (Math.abs(delta) < 10) return;
+    thumbWasDragged = true;
+    const target = Math.max(
+      1,
+      Math.min(pdfDoc.numPages, thumbScrubStart.page + Math.round(-delta / 72)),
+    );
+    scheduleScrubPage(target);
+  });
+  list.addEventListener("pointerup", () => {
+    thumbScrubStart = null;
+  });
+  list.addEventListener(
+    "click",
+    (event) => {
+      if (!thumbWasDragged) return;
+      event.preventDefault();
+      event.stopPropagation();
+      thumbWasDragged = false;
+    },
+    true,
+  );
   updateThumbSelection();
 }
 function toggleThumbnails() {
@@ -1290,6 +1341,9 @@ function showEmpty() {
   $("docMeta").textContent = "Tus documentos se quedan en este dispositivo";
   $("pageStatus").textContent = "Sin documento";
   $("pageJump").hidden = true;
+  $("pageScrubber").value = 1;
+  $("pageScrubber").max = 1;
+  $("pageScrubber").disabled = true;
   $("progressBar").style.width = "0";
   $("outlineList").innerHTML = "";
   $("annotationList").innerHTML = "";
@@ -1462,6 +1516,7 @@ $("pageJump").onchange = (e) => {
   if (Number.isInteger(page) && pdfDoc) renderPage(page);
   else if (pdfDoc) e.target.value = currentPage;
 };
+$("pageScrubber").oninput = (e) => scheduleScrubPage(Number(e.target.value));
 $("exportNotes").onclick = exportAnnotations;
 $("exportMarkdown").onclick = exportMarkdown;
 $("toolsBtn").onclick = () => {
