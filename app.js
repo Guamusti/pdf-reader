@@ -144,16 +144,25 @@ async function deleteBook(id) {
 }
 async function renderLibrary() {
   const books = (await dbAll()).sort((a, b) => b.openedAt - a.openedAt);
-  $("library").innerHTML = books.length
-    ? books
+  const query = ($("librarySearch")?.value || "").trim().toLocaleLowerCase();
+  const visibleBooks = query
+    ? books.filter((book) => book.name.toLocaleLowerCase().includes(query))
+    : books;
+  if ($("librarySummary")) {
+    const pdfs = books.filter((book) => book.kind !== "markdown").length;
+    const markdown = books.length - pdfs;
+    $("librarySummary").innerHTML = `<strong>${books.length}</strong> documento${books.length === 1 ? "" : "s"}<span>${pdfs} PDF · ${markdown} Markdown</span>`;
+  }
+  $("library").innerHTML = visibleBooks.length
+    ? visibleBooks
         .map((b) => {
           const page = Number(localStorage.getItem(key(b.id, "page")) || 1),
             progress = b.pages ? Math.round((page / b.pages) * 100) : 0;
           const type = b.kind === "markdown" ? "MD" : "PDF";
-          return `<div class="book-entry"><button class="book ${currentBook?.id === b.id ? "active" : ""}" data-id="${encodeURIComponent(b.id)}"><span class="book-cover ${type === "MD" ? "markdown" : ""}">${type}</span><span class="book-copy"><strong>${escapeHtml(b.name)}</strong><small>${b.pages ? `Página ${page} de ${b.pages}` : new Date(b.openedAt).toLocaleDateString()}</small><i class="book-progress"><b style="width:${progress}%"></b></i></span><em>${progress}%</em></button><button class="btn icon book-remove" data-remove-book="${encodeURIComponent(b.id)}" aria-label="Eliminar ${escapeHtml(b.name)}">×</button></div>`;
+          return `<article class="book-entry ${currentBook?.id === b.id ? "current" : ""}"><button class="book ${currentBook?.id === b.id ? "active" : ""}" data-id="${encodeURIComponent(b.id)}"><span class="book-cover ${type === "MD" ? "markdown" : ""}"><i>${type}</i><b></b><b></b><b></b></span><span class="book-copy"><span class="book-type">${type === "MD" ? "Documento Markdown" : "Documento PDF"}</span><strong>${escapeHtml(b.name)}</strong><small>${b.pages ? `Página ${page} de ${b.pages}` : new Date(b.openedAt).toLocaleDateString()}</small><i class="book-progress"><b style="width:${progress}%"></b></i><span class="book-continue">${currentBook?.id === b.id ? "Abierto ahora" : progress ? "Continuar leyendo →" : "Abrir documento →"}</span></span><em>${progress}%</em></button><button class="btn icon book-remove" data-remove-book="${encodeURIComponent(b.id)}" aria-label="Eliminar ${escapeHtml(b.name)}" title="Eliminar documento">×</button></article>`;
         })
         .join("")
-    : '<span style="color:var(--muted);font-size:13px">Aún no hay PDFs guardados.</span>';
+    : `<div class="library-empty"><span>${query ? "⌕" : "＋"}</span><strong>${query ? "No hay coincidencias" : "Tu biblioteca está vacía"}</strong><p>${query ? "Prueba con otro nombre de archivo." : "Añade un PDF o Markdown para empezar a leer."}</p></div>`;
   document
     .querySelectorAll(".book[data-id]")
     .forEach(
@@ -600,7 +609,9 @@ function buildThumbnails() {
     const card = document.createElement("button");
     card.className = "thumb";
     card.dataset.page = page;
-    card.innerHTML = `<span class="thumb-number">${page}</span>`;
+    card.setAttribute("aria-label", `Ir a la página ${page}`);
+    card.title = `Página ${page}`;
+    card.innerHTML = `<span class="thumb-number"><small>Página</small>${page}</span>`;
     list.appendChild(card);
   }
   thumbObserver = new IntersectionObserver(
@@ -987,6 +998,7 @@ function buildInkPalette() {
     const strip = document.createElement("div");
     strip.className = "ink-strip";
     strip.id = "inkStrip";
+    strip.dataset.activeTool = "Marcador";
     strip.hidden = true;
     strip.innerHTML = '<div class="ink-strip-inner"><button data-strip-tool="highlight" title="Marcador"><span class="tool-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-eraser title="Goma"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Color y opacidad"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
     $("openSidebar").closest(".toolbar").append(strip);
@@ -1001,6 +1013,7 @@ function buildInkPalette() {
       strip.style.setProperty("--ink-dot", annotationStyle(annotationColor));
       strip.querySelector(".ink-dot").style.setProperty("--ink-dot", annotationStyle(annotationColor));
       strip.querySelectorAll("[data-strip-tool]").forEach((button) => button.classList.toggle("active", button.dataset.stripTool === inkTool && markerMode));
+      strip.dataset.activeTool = ({ highlight: "Marcador", underline: "Subrayado", wavy: "Ondulado", strike: "Tachado" })[inkTool] || "Ink";
     };
     strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => { setInkTool(button.dataset.stripTool); if (!markerMode) toggleMarkerMode(); updateStrip(); }));
     strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
@@ -1941,6 +1954,7 @@ function setTheme(theme) {
   localStorage.setItem("paper.theme", theme);
   $("themeSelect").value = theme;
   $("appearanceTheme").value = theme;
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => button.classList.toggle("active", button.dataset.themeChoice === theme));
 }
 $("themeSelect").onchange = (e) => setTheme(e.target.value);
 $("appearanceTheme").onchange = (e) => setTheme(e.target.value);
@@ -1953,6 +1967,7 @@ $("homeBtn").onclick = () => {
   $("libraryPanel").hidden = false;
   renderLibrary();
 };
+$("emptyLibraryBtn").onclick = $("homeBtn").onclick;
 $("closeLibrary").onclick = () => {
   $("libraryPanel").hidden = true;
 };
@@ -1962,6 +1977,7 @@ $("libraryPanel").onclick = (e) => {
 $("library").addEventListener("click", (e) => {
   if (e.target.closest(".book")) $("libraryPanel").hidden = true;
 });
+$("librarySearch").addEventListener("input", renderLibrary);
 $("rotateBtn").onclick = async () => {
   if (!pdfDoc || isRotating) return;
   isRotating = true;
@@ -2081,6 +2097,21 @@ function buildPageColorControls() {
   popover.append(section);
   section.querySelectorAll("[data-page-color]").forEach((button) => (button.onclick = () => setPageColor(button.dataset.pageColor)));
 }
+function buildThemeChoices() {
+  const select = $("appearanceTheme");
+  if (!select || $("themeChoices")) return;
+  const choices = document.createElement("div");
+  choices.id = "themeChoices";
+  choices.className = "theme-choices";
+  choices.setAttribute("aria-label", "Tema de la interfaz");
+  choices.innerHTML = '<button data-theme-choice="light"><i></i><span>Claro</span></button><button data-theme-choice="sepia"><i></i><span>Sepia</span></button><button data-theme-choice="dark"><i></i><span>Oscuro</span></button>';
+  select.insertAdjacentElement("afterend", choices);
+  select.hidden = true;
+  choices.querySelectorAll("[data-theme-choice]").forEach((button) => {
+    button.onclick = () => setTheme(button.dataset.themeChoice);
+    button.classList.toggle("active", button.dataset.themeChoice === document.documentElement.dataset.theme);
+  });
+}
 function configureAiWindow() {
   const panel = $("aiPanel");
   const card = panel.querySelector(".ai-card");
@@ -2103,13 +2134,17 @@ function configureAiWindow() {
     const saved = JSON.parse(localStorage.getItem("paper.ai-window") || "null") || savedWindow;
     card.style.right = "auto";
     card.style.bottom = "auto";
-    if (window.innerWidth <= 700) {
-      ["left", "top", "right", "bottom", "width", "height"].forEach((property) => card.style.removeProperty(property));
-    } else if (saved) {
+    if (saved) {
+      card.classList.add("ai-positioned");
       card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - 140, saved.left))}px`, "important");
       card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 90, saved.top))}px`, "important");
-      if (saved.width) card.style.width = `${saved.width}px`;
-      if (saved.height) card.style.height = `${saved.height}px`;
+      card.style.setProperty("right", "auto", "important");
+      card.style.setProperty("bottom", "auto", "important");
+      if (saved.width) card.style.setProperty("width", `${Math.min(saved.width, window.innerWidth - 16)}px`, "important");
+      if (saved.height) card.style.setProperty("height", `${Math.min(saved.height, window.innerHeight - 16)}px`, "important");
+    } else if (window.innerWidth <= 700) {
+      card.classList.remove("ai-positioned");
+      ["left", "top", "right", "bottom", "width", "height"].forEach((property) => card.style.removeProperty(property));
     }
   };
   const minimizeAi = () => {
@@ -2165,24 +2200,35 @@ function configureAiWindow() {
     }
   };
   if (savedWindow && window.innerWidth > 700) {
-    card.style.left = `${Math.max(8, savedWindow.left)}px`;
-    card.style.top = `${Math.max(8, savedWindow.top)}px`;
+    card.classList.add("ai-positioned");
+    card.style.setProperty("left", `${Math.max(8, savedWindow.left)}px`, "important");
+    card.style.setProperty("top", `${Math.max(8, savedWindow.top)}px`, "important");
+    card.style.setProperty("right", "auto", "important");
+    card.style.setProperty("bottom", "auto", "important");
     if (savedWindow.width) card.style.width = `${savedWindow.width}px`;
     if (savedWindow.height) card.style.height = `${savedWindow.height}px`;
   }
   let drag = null;
   header.addEventListener("pointerdown", (event) => {
-    if (window.innerWidth <= 700 || card.classList.contains("ai-minimized") || event.target.closest("button,select,input")) return;
+    if (card.classList.contains("ai-minimized") || event.target.closest("button,select,input")) return;
     const box = card.getBoundingClientRect();
-    drag = { x: event.clientX - box.left, y: event.clientY - box.top };
+    drag = { id: event.pointerId, x: event.clientX - box.left, y: event.clientY - box.top };
+    card.classList.add("ai-positioned");
+    card.style.setProperty("width", `${box.width}px`, "important");
+    card.style.setProperty("height", `${box.height}px`, "important");
+    card.style.setProperty("right", "auto", "important");
+    card.style.setProperty("bottom", "auto", "important");
     header.setPointerCapture(event.pointerId);
+    event.preventDefault();
   });
   header.addEventListener("pointermove", (event) => {
-    if (!drag) return;
-    card.style.left = `${Math.max(8, Math.min(window.innerWidth - 120, event.clientX - drag.x))}px`;
-    card.style.top = `${Math.max(8, Math.min(window.innerHeight - 80, event.clientY - drag.y))}px`;
+    if (!drag || drag.id !== event.pointerId) return;
+    const box = card.getBoundingClientRect();
+    card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - box.width - 8, event.clientX - drag.x))}px`, "important");
+    card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 64, event.clientY - drag.y))}px`, "important");
   });
-  header.addEventListener("pointerup", () => {
+  header.addEventListener("pointerup", (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
     drag = null;
     const box = card.getBoundingClientRect();
     localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
@@ -2474,6 +2520,7 @@ window.addEventListener("resize", () => {
   $("nextBtn").textContent = "›";
   buildReflowControls();
   buildPageColorControls();
+  buildThemeChoices();
   buildInkPalette();
   configureAiWindow();
   configureFooterIsland();
