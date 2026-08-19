@@ -21,6 +21,8 @@ let db = null,
   searchQuery = "",
   searchIndex = -1,
   annotationColor = "yellow",
+  inkOpacity = Number(localStorage.getItem("paper.ink-opacity") || 0.82),
+  inkWidth = Number(localStorage.getItem("paper.ink-width") || 3),
   annotationFilter = "all",
   inkTool = "highlight",
   markerMode = false,
@@ -48,6 +50,8 @@ let db = null,
   scrubTarget = 1,
   thumbScrubStart = null,
   thumbWasDragged = false;
+
+let inkStroke = null;
 
 let annotationRedo = [];
 
@@ -731,22 +735,28 @@ function annotations() {
 function setAnnotations(items) {
   if (currentBook) setJSON(key(currentBook.id, "annotations"), items);
 }
-function annotationStyle(color) {
-  return (
-    {
-      yellow: "rgba(255,213,75,.48)",
-      green: "rgba(122,205,142,.44)",
-      pink: "rgba(244,131,177,.42)",
-      blue: "rgba(89,151,255,.42)",
-      orange: "rgba(246,157,73,.45)",
-      purple: "rgba(166,117,224,.4)",
-      red: "rgba(232,96,96,.42)",
-    }[color] || "rgba(255,213,75,.48)"
-  );
+function annotationStyle(color, opacity) {
+  const rgb = {
+    yellow: "255,193,7",
+    green: "46,160,88",
+    pink: "229,72,134",
+    blue: "47,112,224",
+    orange: "239,123,38",
+    purple: "137,74,204",
+    red: "218,64,64",
+  }[color] || "255,193,7";
+  const alpha = Number.isFinite(opacity) ? opacity : 0.48;
+  return `rgba(${rgb},${alpha})`;
 }
 function annotationLabel(type) {
   return type === "note"
     ? "Nota"
+    : type === "pen"
+      ? "Trazo libre"
+      : type === "box"
+        ? "Recuadro"
+        : type === "arrow"
+          ? "Flecha"
     : type === "underline"
       ? "Subrayado"
       : type === "wavy"
@@ -760,18 +770,42 @@ function renderAnnotations() {
   layer.innerHTML = "";
   if (!currentBook) return;
   for (const mark of annotations().filter((a) => a.page === currentPage)) {
+    if ((mark.type === "pen" || mark.type === "arrow") && mark.points?.length) {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 1 1");
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.classList.add("annotation-vector");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", mark.points.map((point, index) => `${index ? "L" : "M"}${point.x} ${point.y}`).join(" "));
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", annotationStyle(mark.color, mark.opacity ?? 0.82));
+      path.setAttribute("stroke-width", String(mark.width || 3));
+      path.setAttribute("vector-effect", "non-scaling-stroke");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      path.dataset.annotationId = mark.id;
+      const arrowId = `ink-arrow-${String(mark.id).replace(/[^a-z0-9_-]/gi, "")}`;
+      if (mark.type === "arrow") path.setAttribute("marker-end", `url(#${arrowId})`);
+      const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+      defs.innerHTML = `<marker id="${arrowId}" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="${annotationStyle(mark.color, mark.opacity ?? 0.82)}"></path></marker>`;
+      svg.append(defs, path);
+      layer.appendChild(svg);
+      continue;
+    }
     for (const rect of mark.rects) {
       const el = document.createElement("i");
       el.className = `annotation ${mark.type}`;
+      el.dataset.annotationId = mark.id;
       el.style.left = `${rect.x * 100}%`;
       el.style.top = `${rect.y * 100}%`;
       el.style.width = `${rect.w * 100}%`;
       el.style.height = `${rect.h * 100}%`;
-      el.style.setProperty("--ink-color", annotationStyle(mark.color));
+      el.style.setProperty("--ink-color", annotationStyle(mark.color, mark.opacity));
+      el.style.setProperty("--ink-width", `${mark.width || 2}px`);
       if (mark.type === "underline" || mark.type === "wavy")
         el.style.top = `calc(${(rect.y + rect.h) * 100}% - 3px)`;
       if (mark.type === "highlight")
-        el.style.background = annotationStyle(mark.color);
+        el.style.background = annotationStyle(mark.color, mark.opacity);
       layer.appendChild(el);
     }
   }
@@ -796,7 +830,9 @@ function renderAnnotationList() {
     marks =
       annotationFilter === "all"
         ? all
-        : all.filter((mark) => mark.type === annotationFilter);
+        : annotationFilter === "drawing"
+          ? all.filter((mark) => ["pen", "box", "arrow"].includes(mark.type))
+          : all.filter((mark) => mark.type === annotationFilter);
   list.innerHTML = marks.length
     ? marks
         .map(
@@ -871,6 +907,101 @@ function paintLiveHighlight() {
 function clearLiveHighlight() {
   $("liveHighlightLayer").innerHTML = "";
 }
+function isDrawingTool(tool = inkTool) {
+  return tool === "pen" || tool === "box" || tool === "arrow";
+}
+function syncInkInteractionMode() {
+  document.body.classList.toggle("ink-drawing-mode", markerMode && isDrawingTool());
+  document.body.classList.toggle("ink-eraser-mode", eraserMode);
+  $("inkDrawingLayer").style.setProperty("--draw-color", annotationStyle(annotationColor, inkOpacity));
+  $("inkDrawingLayer").style.setProperty("--draw-width", String(inkWidth));
+}
+function pageInkPoint(event) {
+  const box = $("canvasWrap").getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)),
+    y: Math.max(0, Math.min(1, (event.clientY - box.top) / box.height)),
+  };
+}
+function paintLiveStroke() {
+  const layer = $("inkDrawingLayer");
+  layer.replaceChildren();
+  if (!inkStroke) return;
+  const color = annotationStyle(annotationColor, inkOpacity);
+  if (inkStroke.type === "box") {
+    const [start, end] = inkStroke.points;
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", String(Math.min(start.x, end.x)));
+    rect.setAttribute("y", String(Math.min(start.y, end.y)));
+    rect.setAttribute("width", String(Math.abs(end.x - start.x)));
+    rect.setAttribute("height", String(Math.abs(end.y - start.y)));
+    rect.setAttribute("fill", "none");
+    rect.setAttribute("stroke", color);
+    rect.setAttribute("stroke-width", String(inkWidth));
+    rect.setAttribute("vector-effect", "non-scaling-stroke");
+    rect.setAttribute("rx", ".006");
+    layer.append(rect);
+    return;
+  }
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", inkStroke.points.map((point, index) => `${index ? "L" : "M"}${point.x} ${point.y}`).join(" "));
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", color);
+  path.setAttribute("stroke-width", String(inkWidth));
+  path.setAttribute("vector-effect", "non-scaling-stroke");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  if (inkStroke.type === "arrow") {
+    const end = inkStroke.points.at(-1), previous = inkStroke.points.at(-2) || inkStroke.points[0];
+    const angle = Math.atan2(end.y - previous.y, end.x - previous.x);
+    const size = 0.018;
+    const arrow = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    arrow.setAttribute("d", `M${end.x} ${end.y} L${end.x - Math.cos(angle - .55) * size} ${end.y - Math.sin(angle - .55) * size} M${end.x} ${end.y} L${end.x - Math.cos(angle + .55) * size} ${end.y - Math.sin(angle + .55) * size}`);
+    arrow.setAttribute("fill", "none");
+    arrow.setAttribute("stroke", color);
+    arrow.setAttribute("stroke-width", String(inkWidth));
+    arrow.setAttribute("vector-effect", "non-scaling-stroke");
+    layer.append(path, arrow);
+    return;
+  }
+  layer.append(path);
+}
+function saveInkStroke() {
+  if (!inkStroke || !currentBook) return;
+  const points = inkStroke.points;
+  const distance = Math.hypot(points.at(-1).x - points[0].x, points.at(-1).y - points[0].y);
+  if (points.length < 2 || distance < 0.004) {
+    inkStroke = null;
+    paintLiveStroke();
+    return;
+  }
+  const mark = {
+    id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+    page: currentPage,
+    type: inkStroke.type,
+    color: annotationColor,
+    opacity: inkOpacity,
+    width: inkWidth,
+    createdAt: Date.now(),
+    text: "",
+  };
+  if (inkStroke.type === "box") {
+    const [start, end] = points;
+    mark.rects = [{ x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), w: Math.abs(end.x - start.x), h: Math.abs(end.y - start.y) }];
+  } else {
+    mark.points = inkStroke.type === "arrow" ? [points[0], points.at(-1)] : points;
+    mark.rects = [];
+  }
+  const items = annotations();
+  items.push(mark);
+  annotationRedo = [];
+  setAnnotations(items);
+  inkStroke = null;
+  paintLiveStroke();
+  renderAnnotations();
+  renderAnnotationList();
+  toast(mark.type === "pen" ? "Trazo guardado" : mark.type === "box" ? "Recuadro guardado" : "Flecha guardada");
+}
 function showAnnotationActions() {
   const rects = selectedRects();
   if (!rects || markerMode || eraserMode) {
@@ -894,6 +1025,7 @@ function saveAnnotation(type, quiet = false) {
     page: currentPage,
     type,
     color: annotationColor,
+    opacity: inkOpacity,
     text: text?.slice(0, 500) || "",
     rects,
     createdAt: Date.now(),
@@ -924,9 +1056,11 @@ function toggleMarkerMode() {
   $("markerModeBtn").classList.toggle("active", markerMode);
   $("markerModeBtn").setAttribute("aria-pressed", String(markerMode));
   if (!markerMode) clearLiveHighlight();
+  syncInkInteractionMode();
+  const toolLabels = { highlight: "Marcador", underline: "Subrayador", wavy: "Subrayador ondulado", strike: "Tachado", pen: "Pluma", box: "Recuadro", arrow: "Flecha" };
   toast(
     markerMode
-      ? `${inkTool === "highlight" ? "Marcador" : inkTool === "underline" ? "Subrayador" : inkTool === "wavy" ? "Subrayador ondulado" : "Tachado"} directo activado: selecciona texto y suelta.`
+      ? `${toolLabels[inkTool] || "Ink"} activado: ${isDrawingTool() ? "dibuja directamente sobre la página." : "selecciona texto y suelta."}`
       : "Rotulador directo desactivado",
   );
 }
@@ -935,12 +1069,13 @@ function setInkTool(tool) {
   document
     .querySelectorAll("[data-ink-tool]")
     .forEach((button) => button.classList.toggle("active", button.dataset.inkTool === tool));
-  const label = tool === "highlight" ? "Marcador" : tool === "underline" ? "Subrayador" : tool === "wavy" ? "Subrayador ondulado" : "Tachado";
+  const label = ({ highlight: "Marcador", underline: "Subrayador", wavy: "Subrayador ondulado", strike: "Tachado", pen: "Pluma", box: "Recuadro", arrow: "Flecha" })[tool] || "Ink";
   $("markerModeBtn").title = `Aplicar ${label.toLowerCase()} directamente`;
   $("markerModeBtn").setAttribute("aria-label", $("markerModeBtn").title);
   if (markerMode) toast(`${label} seleccionado`);
   refreshInkPreview();
   paintLiveHighlight();
+  syncInkInteractionMode();
 }
 function refreshInkPreview() {
   const preview = $("inkPreview");
@@ -1000,30 +1135,34 @@ function buildInkPalette() {
     strip.id = "inkStrip";
     strip.dataset.activeTool = "Marcador";
     strip.hidden = true;
-    strip.innerHTML = '<div class="ink-strip-inner"><button data-strip-tool="highlight" title="Marcador"><span class="tool-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-eraser title="Goma"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Color y opacidad"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
+    strip.innerHTML = '<div class="ink-strip-inner"><button data-strip-tool="pen" title="Pluma libre"><span class="tool-glyph pen-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="highlight" title="Marcador de texto"><span class="tool-glyph marker-glyph">▰</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-tool="box" title="Dibujar recuadro"><span class="tool-glyph">□</span></button><button data-strip-tool="arrow" title="Dibujar flecha"><span class="tool-glyph">↗</span></button><button data-strip-note title="Añadir nota al texto"><span class="tool-glyph note-glyph">T+</span></button><button data-strip-eraser title="Goma: toca una anotación"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Color, opacidad y grosor"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
     $("openSidebar").closest(".toolbar").append(strip);
     const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
     const colorCard = document.createElement("div");
     colorCard.className = "ink-color-card";
     colorCard.id = "inkColorCard";
     colorCard.hidden = true;
-    colorCard.innerHTML = `<div class="ink-card-title">Color de tinta</div><div class="ink-color-preview"><i></i></div><div class="ink-color-list strong">${colors.map((color) => `<button data-strip-palette="${color}" style="background:${annotationStyle(color).replace(/\.[0-9]+\)/, '.95)')}" aria-label="${color}"></button>`).join("")}</div><div class="ink-color-list soft">${colors.map((color) => `<button data-strip-palette="${color}" style="background:${annotationStyle(color)}" aria-label="${color} suave"></button>`).join("")}</div>`;
+    colorCard.innerHTML = `<div class="ink-card-title">Estilo de tinta</div><div class="ink-color-preview"><i></i></div><span class="ink-control-label">Color sólido</span><div class="ink-color-list strong">${colors.map((color) => `<button data-strip-palette="${color}" data-strip-opacity=".88" style="background:${annotationStyle(color, .88)}" aria-label="${color}"></button>`).join("")}</div><span class="ink-control-label">Color translúcido</span><div class="ink-color-list soft">${colors.map((color) => `<button data-strip-palette="${color}" data-strip-opacity=".42" style="background:${annotationStyle(color, .42)}" aria-label="${color} suave"></button>`).join("")}</div><span class="ink-control-label">Grosor del trazo</span><div class="ink-width-list"><button data-ink-width="1"><i></i><span>Fino</span></button><button data-ink-width="3"><i></i><span>Medio</span></button><button data-ink-width="6"><i></i><span>Grueso</span></button></div>`;
     $("openSidebar").closest(".toolbar").append(colorCard);
     const updateStrip = () => {
-      strip.style.setProperty("--ink-dot", annotationStyle(annotationColor));
-      strip.querySelector(".ink-dot").style.setProperty("--ink-dot", annotationStyle(annotationColor));
+      strip.style.setProperty("--ink-dot", annotationStyle(annotationColor, inkOpacity));
+      strip.querySelector(".ink-dot").style.setProperty("--ink-dot", annotationStyle(annotationColor, inkOpacity));
       strip.querySelectorAll("[data-strip-tool]").forEach((button) => button.classList.toggle("active", button.dataset.stripTool === inkTool && markerMode));
-      strip.dataset.activeTool = ({ highlight: "Marcador", underline: "Subrayado", wavy: "Ondulado", strike: "Tachado" })[inkTool] || "Ink";
+      strip.dataset.activeTool = ({ pen: "Pluma", highlight: "Marcador", underline: "Subrayado", wavy: "Ondulado", strike: "Tachado", box: "Recuadro", arrow: "Flecha" })[inkTool] || "Ink";
     };
     strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => { setInkTool(button.dataset.stripTool); if (!markerMode) toggleMarkerMode(); updateStrip(); }));
     strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
+    strip.querySelector("[data-strip-note]").onclick = () => { if (markerMode) toggleMarkerMode(); toast("Selecciona texto y pulsa Nota en el menú contextual."); };
     strip.querySelector("[data-strip-color]").onclick = () => { colorCard.hidden = !colorCard.hidden; };
     strip.querySelector("[data-strip-undo]").onclick = undoAnnotation;
     strip.querySelector("[data-strip-redo]").onclick = redoAnnotation;
-    colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => (button.onclick = () => { annotationColor = button.dataset.stripPalette; colorCard.hidden = true; refreshInkPreview(); updateStrip(); toast("Color de tinta actualizado"); }));
+    colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => (button.onclick = () => { annotationColor = button.dataset.stripPalette; inkOpacity = Number(button.dataset.stripOpacity); localStorage.setItem("paper.ink-opacity", String(inkOpacity)); refreshInkPreview(); updateStrip(); updateInkColorCard(); syncInkInteractionMode(); toast("Color de tinta actualizado"); }));
+    colorCard.querySelectorAll("[data-ink-width]").forEach((button) => (button.onclick = () => { inkWidth = Number(button.dataset.inkWidth); localStorage.setItem("paper.ink-width", String(inkWidth)); updateInkColorCard(); syncInkInteractionMode(); toast(`Trazo ${inkWidth === 1 ? "fino" : inkWidth === 3 ? "medio" : "grueso"}`); }));
     const updateInkColorCard = () => {
-      colorCard.querySelector(".ink-color-preview i").style.setProperty("--ink-card-color", annotationStyle(annotationColor));
-      colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => button.classList.toggle("active", button.dataset.stripPalette === annotationColor));
+      colorCard.querySelector(".ink-color-preview i").style.setProperty("--ink-card-color", annotationStyle(annotationColor, inkOpacity));
+      colorCard.querySelector(".ink-color-preview i").style.height = `${Math.max(3, inkWidth * 2)}px`;
+      colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => button.classList.toggle("active", button.dataset.stripPalette === annotationColor && Number(button.dataset.stripOpacity) === inkOpacity));
+      colorCard.querySelectorAll("[data-ink-width]").forEach((button) => button.classList.toggle("active", Number(button.dataset.inkWidth) === inkWidth));
     };
     updateInkColorCard();
     strip.addEventListener("click", updateInkColorCard);
@@ -1065,7 +1204,9 @@ function toggleEraserMode(force) {
   }
   $("eraserModeBtn").classList.toggle("active", eraserMode);
   $("eraserModeBtn").setAttribute("aria-pressed", String(eraserMode));
-  if (eraserMode) toast("Goma activada: selecciona una anotación para borrarla.");
+  syncInkInteractionMode();
+  $("inkStrip")?.querySelector("[data-strip-eraser]")?.classList.toggle("active", eraserMode);
+  if (eraserMode) toast("Goma activada: toca una anotación o selecciona texto marcado.");
 }
 function clearPageAnnotations() {
   if (!currentBook) return;
@@ -1365,8 +1506,19 @@ async function openAssistantForDocument() {
   $("aiPanel").hidden = false;
   $("captureBtn").classList.add("assistant-on");
   $("captureBtn").textContent = "✦ On";
-  aiStatus("Asistente listo. Usa el botón de recorte para añadir una zona.");
+  aiStatus("Comprobando la IA local de este dispositivo…");
   $("aiQuestion").focus();
+  const capability = await inspectAiCapability();
+  if ($("aiPanel").hidden) return;
+  aiStatus(
+    capability.kind === "builtin"
+      ? capability.availability === "available"
+        ? "IA integrada lista. Todo se procesa en este dispositivo."
+        : "IA integrada compatible. El navegador descargará su modelo al consultar."
+      : capability.kind === "webllm"
+        ? "IA local compatible mediante WebGPU · primera descarga aproximada: 900 MB."
+        : capability.reason,
+  );
 }
 async function inspectVisionCapability() {
   if (globalThis.LanguageModel?.availability) {
@@ -2368,6 +2520,41 @@ $("markerModeBtn").onclick = () => {
   document.body.classList.toggle("ink-toolbar-open", !strip.hidden);
 };
 $("eraserModeBtn").onclick = () => toggleEraserMode();
+$("inkDrawingLayer").addEventListener("pointerdown", (event) => {
+  if (!markerMode || !isDrawingTool() || !currentBook) return;
+  const point = pageInkPoint(event);
+  inkStroke = { id: event.pointerId, type: inkTool, points: inkTool === "box" || inkTool === "arrow" ? [point, point] : [point] };
+  $("inkDrawingLayer").setPointerCapture(event.pointerId);
+  paintLiveStroke();
+  event.preventDefault();
+});
+$("inkDrawingLayer").addEventListener("pointermove", (event) => {
+  if (!inkStroke || inkStroke.id !== event.pointerId) return;
+  const point = pageInkPoint(event);
+  if (inkStroke.type === "box" || inkStroke.type === "arrow") inkStroke.points[1] = point;
+  else {
+    const last = inkStroke.points.at(-1);
+    if (Math.hypot(point.x - last.x, point.y - last.y) > 0.0015) inkStroke.points.push(point);
+  }
+  paintLiveStroke();
+});
+$("inkDrawingLayer").addEventListener("pointerup", (event) => {
+  if (!inkStroke || inkStroke.id !== event.pointerId) return;
+  saveInkStroke();
+});
+$("inkDrawingLayer").addEventListener("pointercancel", () => {
+  inkStroke = null;
+  paintLiveStroke();
+});
+$("annotationLayer").addEventListener("click", (event) => {
+  if (!eraserMode) return;
+  const id = event.target.closest("[data-annotation-id]")?.dataset.annotationId;
+  if (!id) return;
+  setAnnotations(annotations().filter((mark) => mark.id !== id));
+  renderAnnotations();
+  renderAnnotationList();
+  toast("Anotación borrada");
+});
 $("captureBtn").onclick = openAssistantForDocument;
 $("captureOverlay").addEventListener("pointerdown", (e) => {
   captureStart = { x: e.clientX, y: e.clientY };
@@ -2485,7 +2672,7 @@ window.addEventListener("keydown", (e) => {
 let sx = null;
 document.addEventListener(
   "touchstart",
-  (e) => (sx = e.changedTouches[0].clientX),
+  (e) => (sx = document.body.classList.contains("ink-drawing-mode") ? null : e.changedTouches[0].clientX),
   { passive: true },
 );
 document.addEventListener(

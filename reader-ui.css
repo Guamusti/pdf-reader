@@ -399,6 +399,24 @@ body.ink-toolbar-open .toolbar { margin-bottom: 67px !important; }
 .ink-color-preview i { height: 13px; transform: rotate(-1deg); }
 .ink-color-list { padding: 5px 4px; border-radius: 14px; background: var(--soft); }
 .ink-color-list button { transition: transform .15s; }.ink-color-list button:hover { transform: scale(1.12); }
+.ink-control-label { display: block; margin: 12px 4px 6px; color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.ink-width-list { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; }
+.ink-width-list button { display: grid; grid-template-columns: 26px 1fr; align-items: center; min-height: 40px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--text); cursor: pointer; font-size: 10px; text-align: left; }
+.ink-width-list button i { display: block; width: 22px; border-radius: 5px; background: var(--text); }
+.ink-width-list [data-ink-width="1"] i { height: 1px; }.ink-width-list [data-ink-width="3"] i { height: 3px; }.ink-width-list [data-ink-width="6"] i { height: 6px; }
+.ink-width-list button.active { border-color: var(--ui-blue); background: color-mix(in srgb,var(--ui-blue) 10%,transparent); }
+.note-glyph { font-size: 12px; letter-spacing: -.05em; }.marker-glyph { font-size: 14px; transform: rotate(-8deg); }
+
+/* Direct drawing lives above selectable text only while a drawing tool is active. */
+.ink-drawing-layer { position: absolute; z-index: 5; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; touch-action: none; }
+body.ink-drawing-mode .ink-drawing-layer { pointer-events: auto; cursor: crosshair; }
+.annotation-vector { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.annotation.box { box-sizing: border-box; border: max(2px,var(--ink-width,2px)) solid var(--ink-color); border-radius: 5px; background: color-mix(in srgb,var(--ink-color) 8%,transparent); }
+body.ink-eraser-mode .annotation-layer { z-index: 6; pointer-events: none; cursor: not-allowed; }
+body.ink-eraser-mode .annotation { pointer-events: auto; cursor: not-allowed; }
+body.ink-eraser-mode .annotation-vector { pointer-events: none; }
+body.ink-eraser-mode .annotation-vector path { pointer-events: stroke; cursor: not-allowed; }
+body.ink-eraser-mode .annotation:hover,body.ink-eraser-mode .annotation-vector path:hover { filter: drop-shadow(0 0 4px rgba(218,64,64,.9)); }
 
 /* Appearance — swatches and segmented controls instead of a settings dump. */
 .appearance-popover { width: 320px !important; padding: 16px !important; border-radius: 18px !important; background: color-mix(in srgb,var(--surface-solid) 98%,var(--soft)); box-shadow: 0 20px 55px rgba(0,0,0,.2) !important; }
@@ -443,8 +461,9 @@ body.ink-toolbar-open .toolbar { margin-bottom: 67px !important; }
   .thumb-rail-head { min-height: 40px; padding-bottom: 8px; }.thumb-rail-head > div small { display: none; }
   .thumb { flex-basis: 88px; }
   body.ink-toolbar-open .toolbar { margin-bottom: 61px !important; }
-  .ink-strip { height: 61px !important; padding: 6px !important; justify-content: flex-start; overflow-x: auto !important; }
-  .ink-strip-inner { min-width: max-content; }
+  .ink-strip { height: 61px !important; padding: 6px !important; justify-content: flex-start; overflow: hidden !important; }
+  .ink-strip-inner { width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; mask-image: linear-gradient(90deg,transparent,#000 10px,#000 calc(100% - 10px),transparent); }
+  .ink-strip-inner::-webkit-scrollbar { display: none; }
   .ink-color-card { top: auto !important; bottom: max(76px,env(safe-area-inset-bottom)) !important; }
   .appearance-popover { position: fixed !important; left: 8px !important; right: 8px !important; top: auto !important; bottom: max(8px,env(safe-area-inset-bottom)) !important; width: auto !important; max-height: 80dvh; overflow: auto; }
   #aiPanel .ai-card.ai-positioned:not(.ai-minimized) { position: fixed !important; inset: auto !important; resize: both !important; }
