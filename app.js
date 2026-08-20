@@ -57,6 +57,7 @@ let annotationRedo = [];
 let wheelZoomFrame = 0;
 let wheelZoomDelta = 0;
 let wheelZoomAnchor = null;
+let layoutRefitTimer = 0;
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 5;
@@ -1133,7 +1134,7 @@ function setInkTool(tool) {
     .querySelectorAll("[data-ink-tool]")
     .forEach((button) => button.classList.toggle("active", button.dataset.inkTool === tool));
   const label = ({ highlight: "Marcador", underline: "Subrayador", wavy: "Subrayador ondulado", strike: "Tachado", pen: "Pluma", box: "Recuadro", arrow: "Flecha" })[tool] || "Ink";
-  $("markerModeBtn").title = `Aplicar ${label.toLowerCase()} directamente`;
+  $("markerModeBtn").title = `Herramientas Ink · ${label}`;
   $("markerModeBtn").setAttribute("aria-label", $("markerModeBtn").title);
   if (markerMode) toast(`${label} seleccionado`);
   refreshInkPreview();
@@ -1198,7 +1199,7 @@ function buildInkPalette() {
     strip.id = "inkStrip";
     strip.dataset.activeTool = "Marcador";
     strip.hidden = true;
-    strip.innerHTML = '<div class="ink-strip-inner"><button data-strip-tool="pen" title="Pluma libre"><span class="tool-glyph pen-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="highlight" title="Marcador de texto"><span class="tool-glyph marker-glyph">▰</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-tool="box" title="Dibujar recuadro"><span class="tool-glyph">□</span></button><button data-strip-tool="arrow" title="Dibujar flecha"><span class="tool-glyph">↗</span></button><button data-strip-note title="Añadir nota al texto"><span class="tool-glyph note-glyph">T+</span></button><button data-strip-eraser title="Goma: toca una anotación"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Color, opacidad y grosor"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
+    strip.innerHTML = '<div class="ink-strip-inner"><button class="ink-drag-handle" data-strip-drag title="Mover barra Ink" aria-label="Mover barra Ink">⠿</button><button data-strip-tool="pen" title="Pluma libre"><span class="tool-glyph pen-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="highlight" title="Marcador de texto"><span class="tool-glyph marker-glyph">▰</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-tool="box" title="Dibujar recuadro"><span class="tool-glyph">□</span></button><button data-strip-tool="arrow" title="Dibujar flecha"><span class="tool-glyph">↗</span></button><button data-strip-note title="Añadir nota al texto"><span class="tool-glyph note-glyph">T+</span></button><button data-strip-eraser title="Goma: toca una anotación"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Color, opacidad y grosor"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
     $("openSidebar").closest(".toolbar").append(strip);
     const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
     const colorCard = document.createElement("div");
@@ -1207,6 +1208,80 @@ function buildInkPalette() {
     colorCard.hidden = true;
     colorCard.innerHTML = `<div class="ink-card-title">Estilo de tinta</div><div class="ink-color-preview"><i></i></div><span class="ink-control-label">Color sólido</span><div class="ink-color-list strong">${colors.map((color) => `<button data-strip-palette="${color}" data-strip-opacity=".88" style="background:${annotationStyle(color, .88)}" aria-label="${color}"></button>`).join("")}</div><span class="ink-control-label">Color translúcido</span><div class="ink-color-list soft">${colors.map((color) => `<button data-strip-palette="${color}" data-strip-opacity=".42" style="background:${annotationStyle(color, .42)}" aria-label="${color} suave"></button>`).join("")}</div><span class="ink-control-label">Grosor del trazo</span><div class="ink-width-list"><button data-ink-width="1"><i></i><span>Fino</span></button><button data-ink-width="3"><i></i><span>Medio</span></button><button data-ink-width="6"><i></i><span>Grueso</span></button></div>`;
     $("openSidebar").closest(".toolbar").append(colorCard);
+    const dragHandle = strip.querySelector("[data-strip-drag]");
+    let inkDrag = null;
+    const clampInkPosition = (left, top) => {
+      const width = strip.offsetWidth || Math.min(570, window.innerWidth - 16);
+      const height = strip.offsetHeight || 48;
+      return {
+        left: Math.max(8, Math.min(left, Math.max(8, window.innerWidth - width - 8))),
+        top: Math.max(8, Math.min(top, Math.max(8, window.innerHeight - height - 8))),
+      };
+    };
+    const positionInkColorCard = () => {
+      if (colorCard.hidden || !strip.classList.contains("ink-positioned")) {
+        colorCard.classList.remove("ink-positioned");
+        return;
+      }
+      const stripRect = strip.getBoundingClientRect();
+      const width = Math.min(430, window.innerWidth - 24);
+      const height = colorCard.offsetHeight || 330;
+      const left = Math.max(12, Math.min(stripRect.left, window.innerWidth - width - 12));
+      let top = stripRect.bottom + 9;
+      if (top + height > window.innerHeight - 12) top = Math.max(12, stripRect.top - height - 9);
+      colorCard.style.setProperty("--ink-card-left", `${left}px`);
+      colorCard.style.setProperty("--ink-card-top", `${top}px`);
+      colorCard.classList.add("ink-positioned");
+    };
+    const setInkPosition = (left, top, persist = false) => {
+      const next = clampInkPosition(left, top);
+      strip.style.setProperty("--ink-left", `${next.left}px`);
+      strip.style.setProperty("--ink-top", `${next.top}px`);
+      strip.classList.add("ink-positioned");
+      if (persist) localStorage.setItem("paper.ink-position", JSON.stringify(next));
+      positionInkColorCard();
+    };
+    const resetInkPosition = () => {
+      strip.classList.remove("ink-positioned");
+      colorCard.classList.remove("ink-positioned");
+      strip.style.removeProperty("--ink-left");
+      strip.style.removeProperty("--ink-top");
+      localStorage.removeItem("paper.ink-position");
+    };
+    dragHandle.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = strip.getBoundingClientRect();
+      inkDrag = { id: event.pointerId, dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+      dragHandle.setPointerCapture(event.pointerId);
+      strip.classList.add("ink-dragging");
+    });
+    dragHandle.addEventListener("pointermove", (event) => {
+      if (!inkDrag || inkDrag.id !== event.pointerId) return;
+      setInkPosition(event.clientX - inkDrag.dx, event.clientY - inkDrag.dy);
+    });
+    const finishInkDrag = (event) => {
+      if (!inkDrag || inkDrag.id !== event.pointerId) return;
+      const rect = strip.getBoundingClientRect();
+      inkDrag = null;
+      strip.classList.remove("ink-dragging");
+      setInkPosition(rect.left, rect.top, true);
+    };
+    dragHandle.addEventListener("pointerup", finishInkDrag);
+    dragHandle.addEventListener("pointercancel", finishInkDrag);
+    dragHandle.addEventListener("dblclick", resetInkPosition);
+    try {
+      const saved = JSON.parse(localStorage.getItem("paper.ink-position") || "null");
+      if (Number.isFinite(saved?.left) && Number.isFinite(saved?.top))
+        requestAnimationFrame(() => setInkPosition(saved.left, saved.top));
+    } catch {
+      localStorage.removeItem("paper.ink-position");
+    }
+    window.addEventListener("resize", () => {
+      if (!strip.classList.contains("ink-positioned")) return;
+      const rect = strip.getBoundingClientRect();
+      setInkPosition(rect.left, rect.top);
+    }, { passive: true });
     const updateStrip = () => {
       strip.style.setProperty("--ink-dot", annotationStyle(annotationColor, inkOpacity));
       strip.querySelector(".ink-dot").style.setProperty("--ink-dot", annotationStyle(annotationColor, inkOpacity));
@@ -1216,7 +1291,10 @@ function buildInkPalette() {
     strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => { setInkTool(button.dataset.stripTool); if (!markerMode) toggleMarkerMode(); updateStrip(); }));
     strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
     strip.querySelector("[data-strip-note]").onclick = () => { if (markerMode) toggleMarkerMode(); toast("Selecciona texto y pulsa Nota en el menú contextual."); };
-    strip.querySelector("[data-strip-color]").onclick = () => { colorCard.hidden = !colorCard.hidden; };
+    strip.querySelector("[data-strip-color]").onclick = () => {
+      colorCard.hidden = !colorCard.hidden;
+      requestAnimationFrame(positionInkColorCard);
+    };
     strip.querySelector("[data-strip-undo]").onclick = undoAnnotation;
     strip.querySelector("[data-strip-redo]").onclick = redoAnnotation;
     colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => (button.onclick = () => { annotationColor = button.dataset.stripPalette; inkOpacity = Number(button.dataset.stripOpacity); localStorage.setItem("paper.ink-opacity", String(inkOpacity)); refreshInkPreview(); updateStrip(); updateInkColorCard(); syncInkInteractionMode(); toast("Color de tinta actualizado"); }));
@@ -2143,11 +2221,19 @@ async function askLocalAi() {
   }
 }
 function toggleSidebar() {
-  if (window.innerWidth < 900) {
+  if (window.innerWidth <= 900) {
     document.body.classList.toggle("sidebar-open");
     return;
   }
   document.body.classList.toggle("sidebar-collapsed");
+  scheduleLayoutRefit();
+}
+function scheduleLayoutRefit() {
+  clearTimeout(layoutRefitTimer);
+  if (pdfDoc) requestAnimationFrame(fitWidth);
+  layoutRefitTimer = setTimeout(() => {
+    if (pdfDoc) fitWidth();
+  }, 240);
 }
 function setSidebarPanel(panel) {
   const notes = panel === "notes";
@@ -2191,8 +2277,11 @@ $("openSidebar").onclick = toggleSidebar;
 $("sidebarContentsTab").onclick = () => setSidebarPanel("contents");
 $("sidebarNotesTab").onclick = () => setSidebarPanel("notes");
 $("closeSidebar").onclick = () => {
-  if (window.innerWidth < 900) document.body.classList.remove("sidebar-open");
-  else document.body.classList.add("sidebar-collapsed");
+  if (window.innerWidth <= 900) document.body.classList.remove("sidebar-open");
+  else {
+    document.body.classList.add("sidebar-collapsed");
+    scheduleLayoutRefit();
+  }
 };
 $("homeBtn").onclick = () => {
   $("libraryPanel").hidden = false;
@@ -2619,6 +2708,7 @@ function configureResponsiveUi() {
   const syncViewport = () => {
     document.body.classList.toggle("is-mobile", window.innerWidth <= 700);
     document.body.classList.toggle("is-tablet", window.innerWidth > 700 && window.innerWidth < 1180);
+    if (window.innerWidth <= 900) document.body.classList.remove("sidebar-collapsed");
     if (window.innerWidth >= 1180) document.body.classList.remove("sidebar-open");
   };
   syncViewport();
