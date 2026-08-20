@@ -476,3 +476,185 @@ body.ink-eraser-mode .annotation:hover,body.ink-eraser-mode .annotation-vector p
   .appearance-popover { position: fixed !important; left: 8px !important; right: 8px !important; top: auto !important; bottom: max(8px,env(safe-area-inset-bottom)) !important; width: auto !important; max-height: 80dvh; overflow: auto; }
   #aiPanel .ai-card.ai-positioned:not(.ai-minimized) { position: fixed !important; inset: auto !important; resize: both !important; }
 }
+
+/* --------------------------------------------------------------------------
+   Paper system — one quiet hierarchy for reader, tools and navigation.
+   The reader is the primary surface; controls are deliberately secondary.
+   -------------------------------------------------------------------------- */
+:root {
+  --paper-radius: 12px;
+  --paper-radius-lg: 18px;
+  --paper-control-h: 36px;
+  --paper-sidebar: 276px;
+  --paper-shadow: 0 14px 40px rgba(27, 22, 15, .10);
+}
+
+html, body { background: var(--bg); }
+.app { grid-template-columns: var(--paper-sidebar) minmax(0, 1fr) !important; }
+.btn, .field { transition: background .16s var(--ui-ease), border-color .16s var(--ui-ease), color .16s var(--ui-ease), transform .16s var(--ui-ease), box-shadow .16s var(--ui-ease); }
+.btn:focus-visible, .field:focus-visible, button:focus-visible { outline: 2px solid var(--ui-blue); outline-offset: 2px; }
+
+/* 1. Navigation is a calm, narrow column — no duplicated appearance controls. */
+.sidebar {
+  width: var(--paper-sidebar) !important;
+  padding: 14px 12px 24px !important;
+  border-right: 1px solid var(--line);
+  background: var(--surface-solid) !important;
+}
+.sidebar .brand { min-height: 48px; padding: 2px 6px 14px; }
+.sidebar .brand h1 { margin: 0; font-size: 18px; font-weight: 750; letter-spacing: -.055em; }
+.sidebar .brand small { color: var(--muted); font-size: 9px; font-weight: 650; letter-spacing: .13em; }
+.sidebar .brand .btn { width: 30px; min-height: 30px; border-radius: 8px; color: var(--muted); }
+.sidebar .section { margin-top: 17px; }
+.sidebar .section > .label { display: block; margin: 0 7px 8px; color: var(--muted); font-size: 9px; font-weight: 750; letter-spacing: .13em; }
+.sidebar .section:last-child { display: none; }
+.annotation-filters { gap: 5px; padding: 0 2px 6px; }
+.annotation-filter { min-height: 27px; padding-inline: 9px !important; border-radius: 8px; font-size: 10px; }
+.annotation-filter.active { background: var(--text); color: var(--surface-solid); border-color: var(--text); }
+.bookmark, .outline-item { border: 0 !important; box-shadow: none !important; }
+.outline-list { gap: 1px; }
+.outline-list::before { display: none; }
+.outline-item { min-height: 32px; padding: 6px 6px !important; border-radius: 8px; }
+.outline-item .outline-name { font-size: 11px; line-height: 1.35; }
+.outline-item.active { background: color-mix(in srgb, var(--ui-blue) 10%, var(--soft)) !important; color: var(--text); }
+.outline-item.active .outline-dot { background: var(--ui-blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-blue) 13%, transparent); }
+.bookmark-list.annotation-list { padding-inline: 2px; }
+
+/* 2. One app bar: document context left, reading controls centred, modes right. */
+.toolbar {
+  min-height: 58px !important;
+  padding: 8px 14px !important;
+  gap: 7px !important;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-solid) 96%, transparent) !important;
+  box-shadow: none !important;
+}
+.toolbar > .grow { min-width: 150px; max-width: 300px; }
+.toolbar .title { font-size: 13px; font-weight: 700; }
+.toolbar .subtitle { margin-top: 1px; color: var(--muted); font-size: 9px; }
+.drawer-toggle, .library-link { min-height: var(--paper-control-h); border-radius: 9px !important; }
+.drawer-toggle { width: 36px !important; color: var(--muted); }
+.library-link { padding-inline: 9px; border: 0 !important; background: transparent !important; color: var(--muted); }
+.library-link:hover { color: var(--text); background: var(--soft) !important; }
+.toolbar-nav, .searchbox, .toolbar-group {
+  min-height: var(--paper-control-h) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px !important;
+  background: var(--soft) !important;
+  box-shadow: none !important;
+}
+.toolbar-nav { margin-left: auto; padding: 2px !important; }
+.toolbar-nav .btn { width: 30px; min-height: 30px; border-radius: 7px; }
+#toolbarPage { width: 36px; font-weight: 700; }
+#toolbarPageCount { color: var(--muted); font-size: 11px; }
+.searchbox { padding: 2px 3px 2px 8px !important; }
+.searchbox input { width: min(17vw, 210px); min-height: 30px; border: 0 !important; background: transparent !important; box-shadow: none !important; }
+.searchbox .btn { min-height: 30px; padding-inline: 8px; border-radius: 7px; font-size: 11px; }
+.toolbar-actions { gap: 5px !important; }
+.toolbar-group { gap: 3px; padding: 2px 4px !important; }
+.toolbar-group > span { margin: 0 3px; color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .13em; }
+.toolbar-group .btn { min-height: 30px; border-radius: 7px; }
+.toolbar-group .btn.icon { width: 30px; }
+.toolbar-group .btn:hover, .footer .btn:hover { background: var(--surface-solid); }
+.assistant-on { background: var(--text) !important; color: var(--surface-solid) !important; }
+
+/* 3. Reader and dock: page stays dominant; the dock is compact and predictable. */
+.viewer { padding: 30px clamp(18px, 4vw, 64px) 104px; background: color-mix(in srgb, var(--bg) 92%, var(--soft)); }
+.canvas-wrap { box-shadow: var(--paper-shadow); }
+.footer {
+  display: grid !important;
+  grid-template-columns: auto minmax(176px, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 50px;
+  max-width: min(680px, calc(100vw - var(--paper-sidebar) - 28px));
+  padding: 5px 7px !important;
+  border: 1px solid var(--line);
+  border-radius: var(--paper-radius-lg) !important;
+  background: color-mix(in srgb, var(--surface-solid) 97%, transparent) !important;
+  box-shadow: 0 12px 34px rgba(0,0,0,.14) !important;
+}
+.footer .left, .footer .right { display: flex; align-items: center; gap: 2px; }
+.footer .right { justify-content: flex-end; }
+.footer .btn { min-height: 32px; border-radius: 8px; font-size: 12px; }
+.footer .center { min-width: 0; padding: 0 5px; }
+.page-readout { justify-content: center; min-height: 18px; }
+#pageStatus { color: var(--muted); font-size: 10px; font-weight: 650; }
+.page-scrubber { height: 16px; }
+.footer .zoom-level { min-width: 50px; border-color: transparent; background: var(--soft); }
+
+/* 4. The thumbnail rail behaves like a focused navigator, not a second page. */
+.thumbnail-rail {
+  left: max(14px, calc(var(--paper-sidebar) + 18px)) !important;
+  right: 18px !important;
+  bottom: 76px;
+  padding: 12px 14px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--paper-radius-lg);
+  background: color-mix(in srgb, var(--surface-solid) 98%, transparent);
+  box-shadow: var(--paper-shadow);
+}
+.thumb-rail-head { min-height: 35px; padding: 0 2px 8px; }
+.thumb-rail-head > div strong { font-size: 12px; }
+.thumb-rail-head > div small { font-size: 10px; }
+#thumbProgress { padding: 5px 8px; border-radius: 7px; font-size: 10px; }
+.thumb-list { gap: 9px; padding: 4px 3px 6px; }
+.thumb { flex-basis: 92px; border-radius: 8px; opacity: .7; box-shadow: none; }
+.thumb.active { transform: translateY(-2px) scale(1.02); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-blue) 26%, transparent); }
+
+/* 5. Floating workspaces share the same clear, opaque treatment. */
+#aiPanel .ai-card:not(.ai-minimized), .note-card .ai-card {
+  border-radius: var(--paper-radius-lg) !important;
+  border-color: var(--line) !important;
+  background: var(--surface-solid) !important;
+  box-shadow: 0 24px 70px rgba(0,0,0,.24) !important;
+}
+#aiPanel .ai-card:not(.ai-minimized) > header, .note-card .ai-card > header {
+  min-height: 64px;
+  padding: 10px 14px 10px 16px;
+  background: var(--surface-solid);
+}
+.ai-spark { width: 34px; height: 34px; border-radius: 10px; }
+.ai-card h2 { font-size: 16px; }
+.ai-card-body { padding: 16px !important; }
+.selection-card, .ai-response { border-radius: 12px; }
+.ai-card textarea { border-radius: 10px; background: var(--soft); }
+.ai-shortcut { min-height: 30px; border-radius: 999px; font-size: 11px; }
+.ai-card footer { padding: 12px 16px 15px !important; }
+.library-card { background: var(--bg) !important; }
+.library-card header { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.library-card h2 { font-size: clamp(26px, 4vw, 42px); letter-spacing: -.055em; }
+.library-card .book-entry { border-radius: var(--paper-radius); }
+
+/* 6. Compact layouts retain hierarchy: one primary control per group. */
+@media (max-width: 1120px) {
+  .toolbar > .grow { max-width: 190px; }
+  .searchbox input { width: 128px; }
+  .toolbar-group > span { display: none; }
+}
+@media (max-width: 900px) {
+  .app { grid-template-columns: minmax(0,1fr) !important; }
+  .sidebar { width: min(310px, calc(100vw - 36px)) !important; }
+  .footer { max-width: calc(100vw - 26px); }
+  .thumbnail-rail { left: 13px !important; right: 13px !important; }
+}
+@media (max-width: 700px) {
+  .toolbar { min-height: 54px !important; padding-inline: 7px !important; }
+  .toolbar > .grow { overflow: hidden; }
+  .toolbar .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toolbar .subtitle, .library-link { display: none !important; }
+  .toolbar-actions { margin-left: auto; }
+  .toolbar-actions .toolbar-group { display: flex !important; }
+  .toolbar-actions .toolbar-group:last-child { display: none !important; }
+  .toolbar-nav { top: calc(100% + 6px); }
+  .viewer { padding: 56px 7px 88px; }
+  .footer { grid-template-columns: auto minmax(96px, 1fr) auto; width: calc(100vw - 14px); min-height: 46px; border-radius: 14px !important; }
+  .footer .left .btn { width: 30px; padding-inline: 0; }
+  .footer .right { gap: 0; }
+  .footer .right #rotateBtn, .footer .right #fitBtn, .footer .right #zoomLabel { display: none; }
+  .footer .right .btn { width: 30px; padding-inline: 0; }
+  .thumbnail-rail { left: 7px !important; right: 7px !important; bottom: 64px; border-radius: 14px; }
+  .thumb { flex-basis: 78px; }
+  .thumb-rail-head > div small { display: none; }
+  #aiPanel .ai-card:not(.ai-minimized), .note-card .ai-card { border-radius: 16px !important; }
+}
