@@ -69,7 +69,11 @@ let annotationRedo = [];
 let wheelZoomFrame = 0;
 let wheelZoomDelta = 0;
 let wheelZoomAnchor = null;
+let pinchGesture = null;
 let layoutRefitTimer = 0;
+let readingSession = { bookId: "", page: 1, lastTick: 0, active: false };
+let readingIdleTimer = 0;
+let readingStatsRefreshTimer = 0;
 let pageRenderPending = null;
 let pageRenderActive = false;
 let pageRenderRequestId = 0;
@@ -81,6 +85,8 @@ const textContentCache = new Map();
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.15;
+const READING_IDLE_MS = 75_000;
+const DEFAULT_PAGE_READING_MS = 105_000;
 const PAGE_CACHE_LIMIT = 12;
 const TEXT_CACHE_LIMIT = 8;
 const INK_TOOL_LABELS = {
@@ -161,6 +167,111 @@ function bookId(file) {
   return `${file.name}:${file.size}:${file.lastModified}`;
 }
 
+function getReadingStats(id) {
+  return getJSON(key(id, "reading-stats"), {
+    totalMs: 0,
+    pageMs: {},
+    pageChars: {},
+    sessions: 0,
+    lastReadAt: 0,
+  });
+}
+function saveReadingStats(id, stats) {
+  setJSON(key(id, "reading-stats"), stats);
+}
+function flushReadingSession(pause = false) {
+  if (!readingSession.active || !readingSession.bookId || !readingSession.lastTick) {
+    if (pause) readingSession.active = false;
+    return;
+  }
+  const now = Date.now();
+  const elapsed = Math.max(0, Math.min(30_000, now - readingSession.lastTick));
+  if (elapsed >= 250) {
+    const stats = getReadingStats(readingSession.bookId);
+    const page = String(readingSession.page || 1);
+    stats.totalMs = Number(stats.totalMs || 0) + elapsed;
+    stats.pageMs[page] = Number(stats.pageMs[page] || 0) + elapsed;
+    stats.lastReadAt = now;
+    saveReadingStats(readingSession.bookId, stats);
+  }
+  readingSession.lastTick = now;
+  if (pause) readingSession.active = false;
+}
+function canTrackReading() {
+  return Boolean(
+    currentBook &&
+    $("libraryPanel")?.hidden &&
+    document.visibilityState === "visible" &&
+    document.hasFocus(),
+  );
+}
+function markReadingActivity() {
+  if (!canTrackReading()) return;
+  if (readingSession.bookId !== currentBook.id) {
+    flushReadingSession(true);
+    readingSession = { bookId: currentBook.id, page: currentPage, lastTick: Date.now(), active: true };
+    const stats = getReadingStats(currentBook.id);
+    stats.sessions = Number(stats.sessions || 0) + 1;
+    stats.lastReadAt = Date.now();
+    saveReadingStats(currentBook.id, stats);
+  } else {
+    flushReadingSession(false);
+    readingSession.page = currentPage;
+    readingSession.lastTick = Date.now();
+    readingSession.active = true;
+  }
+  clearTimeout(readingIdleTimer);
+  readingIdleTimer = setTimeout(() => flushReadingSession(true), READING_IDLE_MS);
+}
+function recordPageDensity(pageNumber, textContent) {
+  if (!currentBook || !textContent?.items) return;
+  const chars = textContent.items.reduce((sum, item) => sum + (item.str?.trim().length || 0), 0);
+  if (!chars) return;
+  const stats = getReadingStats(currentBook.id);
+  if (Number(stats.pageChars?.[pageNumber]) === chars) return;
+  stats.pageChars ||= {};
+  stats.pageChars[pageNumber] = chars;
+  saveReadingStats(currentBook.id, stats);
+}
+function formatReadingDuration(ms, compact = false) {
+  const minutes = Math.max(0, Math.round(Number(ms || 0) / 60_000));
+  if (minutes < 1) return compact ? "<1 min" : "menos de 1 min";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60), rest = minutes % 60;
+  return compact ? `${hours} h${rest ? ` ${rest} min` : ""}` : `${hours} h${rest ? ` ${rest} min` : ""}`;
+}
+function readingEstimate(book) {
+  const stats = getReadingStats(book.id);
+  const page = Math.max(1, Math.min(Number(localStorage.getItem(key(book.id, "page")) || 1), book.pages || 1));
+  const pageTimes = Object.entries(stats.pageMs || {}).filter(([, ms]) => Number(ms) >= 5_000);
+  const knownChars = Object.values(stats.pageChars || {}).map(Number).filter((value) => value > 0);
+  const averageChars = knownChars.length ? knownChars.reduce((a, b) => a + b, 0) / knownChars.length : 1_900;
+  const observedMs = pageTimes.reduce((sum, [, ms]) => sum + Number(ms), 0);
+  const observedChars = pageTimes.reduce((sum, [p]) => sum + Number(stats.pageChars?.[p] || averageChars), 0);
+  const msPerChar = observedChars > 0 && pageTimes.length
+    ? Math.max(18, Math.min(220, observedMs / observedChars))
+    : DEFAULT_PAGE_READING_MS / averageChars;
+  const averagePageMs = pageTimes.length
+    ? Math.max(30_000, Math.min(600_000, observedMs / pageTimes.length))
+    : DEFAULT_PAGE_READING_MS;
+  let remainingMs = 0;
+  const totalPages = Number(book.pages || 1);
+  for (let p = page + 1; p <= totalPages; p++) {
+    const chars = Number(stats.pageChars?.[p] || averageChars);
+    const densityEstimate = chars * msPerChar;
+    remainingMs += pageTimes.length ? Math.max(averagePageMs * 0.45, Math.min(averagePageMs * 2.2, densityEstimate)) : densityEstimate;
+  }
+  if (page < totalPages) remainingMs += averagePageMs * 0.45;
+  return {
+    ...stats,
+    page,
+    progress: totalPages ? Math.round((page / totalPages) * 100) : 0,
+    averagePageMs,
+    averageChars,
+    remainingMs,
+  };
+}
+
 function openDb() {
   return new Promise((resolve, reject) => {
     const r = indexedDB.open(DB_NAME, 1);
@@ -211,6 +322,7 @@ async function deleteBook(id) {
   await dbDelete(id);
   localStorage.removeItem(key(id, "bookmarks"));
   localStorage.removeItem(key(id, "annotations"));
+  localStorage.removeItem(key(id, "reading-stats"));
   if (currentBook?.id === id) {
     resetRenderEngine();
     pdfDoc = null;
@@ -221,23 +333,40 @@ async function deleteBook(id) {
   toast("PDF eliminado de la biblioteca");
 }
 async function renderLibrary() {
-  const books = (await dbAll()).sort((a, b) => b.openedAt - a.openedAt);
+  flushReadingSession(false);
+  const books = await dbAll();
   const query = ($("librarySearch")?.value || "").trim().toLocaleLowerCase();
-  const visibleBooks = query
-    ? books.filter((book) => book.name.toLocaleLowerCase().includes(query))
-    : books;
+  const type = $("libraryType")?.value || "all";
+  const sort = $("librarySort")?.value || "recent";
+  const estimates = new Map(books.map((book) => [book.id, readingEstimate(book)]));
+  const visibleBooks = books
+    .filter((book) => (!query || book.name.toLocaleLowerCase().includes(query)) && (type === "all" || (book.kind || "pdf") === type))
+    .sort((a, b) => {
+      if (sort === "name") return a.name.localeCompare(b.name, "es", { sensitivity: "base" });
+      if (sort === "progress") return estimates.get(b.id).progress - estimates.get(a.id).progress;
+      if (sort === "remaining") return estimates.get(a.id).remainingMs - estimates.get(b.id).remainingMs;
+      return b.openedAt - a.openedAt;
+    });
   if ($("librarySummary")) {
     const pdfs = books.filter((book) => book.kind !== "markdown").length;
     const markdown = books.length - pdfs;
-    $("librarySummary").innerHTML = `<strong>${books.length}</strong> documento${books.length === 1 ? "" : "s"}<span>${pdfs} PDF · ${markdown} Markdown</span>`;
+    const totalMs = [...estimates.values()].reduce((sum, stats) => sum + Number(stats.totalMs || 0), 0);
+    const remainingMs = [...estimates.values()].reduce((sum, stats) => sum + Number(stats.remainingMs || 0), 0);
+    const pagesRead = books.reduce((sum, book) => sum + Math.min(book.pages || 1, estimates.get(book.id).page), 0);
+    const pagesTotal = books.reduce((sum, book) => sum + Number(book.pages || 1), 0);
+    $("librarySummary").innerHTML = `<div class="library-stat primary"><small>Biblioteca</small><strong>${books.length}</strong><span>${pdfs} PDF · ${markdown} MD</span></div><div class="library-stat"><small>Leído</small><strong>${formatReadingDuration(totalMs, true)}</strong><span>${pagesRead} de ${pagesTotal} páginas</span></div><div class="library-stat"><small>Tiempo restante</small><strong>${formatReadingDuration(remainingMs, true)}</strong><span>Estimación adaptativa</span></div>`;
   }
   $("library").innerHTML = visibleBooks.length
     ? visibleBooks
         .map((b) => {
-          const page = Number(localStorage.getItem(key(b.id, "page")) || 1),
-            progress = b.pages ? Math.round((page / b.pages) * 100) : 0;
+          const stats = estimates.get(b.id),
+            page = stats.page,
+            progress = stats.progress;
           const type = b.kind === "markdown" ? "MD" : "PDF";
-          return `<article class="book-entry ${currentBook?.id === b.id ? "current" : ""}"><button class="book ${currentBook?.id === b.id ? "active" : ""}" data-id="${encodeURIComponent(b.id)}"><span class="book-cover ${type === "MD" ? "markdown" : ""}"><i>${type}</i><b></b><b></b><b></b></span><span class="book-copy"><span class="book-type">${type === "MD" ? "Documento Markdown" : "Documento PDF"}</span><strong>${escapeHtml(b.name)}</strong><small>${b.pages ? `Página ${page} de ${b.pages}` : new Date(b.openedAt).toLocaleDateString()}</small><i class="book-progress"><b style="width:${progress}%"></b></i><span class="book-continue">${currentBook?.id === b.id ? "Abierto ahora" : progress ? "Continuar leyendo →" : "Abrir documento →"}</span></span><em>${progress}%</em></button><button class="btn icon book-remove" data-remove-book="${encodeURIComponent(b.id)}" aria-label="Eliminar ${escapeHtml(b.name)}" title="Eliminar documento">×</button></article>`;
+          const readingMeta = stats.totalMs >= 5_000
+            ? `${formatReadingDuration(stats.averagePageMs, true)}/pág. · ${Math.round(stats.averageChars / 100) / 10}k car./pág.`
+            : `Estimación por longitud · ${Math.round(stats.averageChars / 100) / 10}k car./pág.`;
+          return `<article class="book-entry ${currentBook?.id === b.id ? "current" : ""}"><button class="book ${currentBook?.id === b.id ? "active" : ""}" data-id="${encodeURIComponent(b.id)}"><span class="book-cover ${type === "MD" ? "markdown" : ""}"><i>${type}</i><b></b><b></b><b></b></span><span class="book-copy"><span class="book-type">${type === "MD" ? "Documento Markdown" : "Documento PDF"}</span><strong>${escapeHtml(b.name)}</strong><small>${b.pages ? `Página ${page} de ${b.pages}` : new Date(b.openedAt).toLocaleDateString()}</small><span class="book-reading"><b>${progress >= 100 ? "Completado" : `≈ ${formatReadingDuration(stats.remainingMs, true)} restantes`}</b><small>${readingMeta}</small></span><i class="book-progress"><b style="width:${progress}%"></b></i><span class="book-continue">${currentBook?.id === b.id ? "Abierto ahora" : progress ? "Continuar leyendo →" : "Abrir documento →"}</span></span><em>${progress}%</em></button><button class="btn icon book-remove" data-remove-book="${encodeURIComponent(b.id)}" aria-label="Eliminar ${escapeHtml(b.name)}" title="Eliminar documento">×</button></article>`;
         })
         .join("")
     : `<div class="library-empty"><span>${query ? "⌕" : "＋"}</span><strong>${query ? "No hay coincidencias" : "Tu biblioteca está vacía"}</strong><p>${query ? "Prueba con otro nombre de archivo." : "Añade un PDF o Markdown para empezar a leer."}</p></div>`;
@@ -315,6 +444,7 @@ function markdownToHtml(source) {
   return html.join("") || "<p>Documento Markdown vacío.</p>";
 }
 async function openMarkdownStored(rec) {
+  flushReadingSession(true);
   markdownContent = await rec.blob.text();
   resetRenderEngine();
   pdfDoc = null;
@@ -329,6 +459,9 @@ async function openMarkdownStored(rec) {
   rec.openedAt = Date.now();
   rec.pages = 1;
   await dbPut(rec);
+  const markdownStats = getReadingStats(rec.id);
+  markdownStats.pageChars[1] = markdownContent.replace(/[#*_`>\-]/g, "").length;
+  saveReadingStats(rec.id, markdownStats);
   $("emptyState").hidden = true;
   $("canvasWrap").hidden = true;
   $("reflowReader").hidden = false;
@@ -350,10 +483,12 @@ async function openMarkdownStored(rec) {
   renderAnnotationList();
   await renderLibrary();
   document.body.classList.remove("sidebar-open");
+  markReadingActivity();
 }
 async function openStored(id) {
   showLoader(true);
   try {
+    if (currentBook?.id !== id) flushReadingSession(true);
     const rec = await dbGet(id);
     if (!rec) throw new Error("Documento no encontrado");
     if (rec.kind === "markdown") {
@@ -400,6 +535,7 @@ async function openStored(id) {
     await renderOutline();
     renderLibrary();
     document.body.classList.remove("sidebar-open");
+    markReadingActivity();
   } catch (e) {
     console.error(e);
     toast("No se pudo abrir el PDF");
@@ -496,6 +632,7 @@ async function drainPageRenderQueue() {
 async function performPageRender(num, options = {}, requestId = pageRenderRequestId) {
   if (!pdfDoc) return;
   const previousPage = currentPage;
+  if (num !== previousPage) flushReadingSession(false);
   const { anchor = null, resetScroll = num !== previousPage } = options;
   const token = ++renderToken;
   if (renderTask) {
@@ -509,6 +646,7 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
     $("annotationEditor").hidden = true;
   }
   currentPage = Math.max(1, Math.min(pdfDoc.numPages, num));
+  readingSession.page = currentPage;
   if (currentPage !== previousPage) navigationDirection = currentPage > previousPage ? 1 : -1;
   updatePageColor();
   const page = await getCachedPage(currentPage);
@@ -716,8 +854,10 @@ async function renderTextLayer(page, viewport) {
   layer.style.height = `${viewport.height}px`;
   layer.style.setProperty("--scale-factor", String(viewport.scale));
   try {
+    const content = await getCachedTextContent(page);
+    recordPageDensity(page.pageNumber, content);
     const textLayer = new pdfjsLib.TextLayer({
-      textContentSource: await getCachedTextContent(page),
+      textContentSource: content,
       container: layer,
       viewport,
     });
@@ -778,13 +918,25 @@ function updateZoomLabel() {
   label.title = `Zoom ${percent}% · pulsar para ajustar a la ventana`;
   label.setAttribute("aria-label", label.title);
 }
-async function zoom(delta, anchor = null) {
+async function setZoom(nextScale, anchor = null) {
   if (!pdfDoc || reflowMode) return;
-  const next = Math.round(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale + delta)) * 100) / 100;
+  const next = Math.round(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextScale)) * 100) / 100;
   if (next === scale) return;
   scale = next;
   updateZoomLabel();
   await renderPage(currentPage, { anchor, resetScroll: false });
+}
+async function zoom(delta, anchor = null) {
+  return setZoom(scale + delta, anchor);
+}
+function changeReaderZoom(delta) {
+  if (!pdfDoc) return;
+  if (!reflowMode) return zoom(delta);
+  const next = Math.max(14, Math.min(36, Number(localStorage.getItem("paper.reflow-size") || 20) + Math.sign(delta)));
+  localStorage.setItem("paper.reflow-size", String(next));
+  applyReflowPreferences();
+  $("zoomLabel").textContent = `${next}px`;
+  $("zoomLabel").title = `Tamaño de lectura ${next}px`;
 }
 function renderBookmarks() {
   if (!currentBook) {
@@ -3018,8 +3170,8 @@ $("toolbarPage").onchange = (e) => {
   if (Number.isInteger(page) && pdfDoc) renderPage(page);
   else e.target.value = currentPage;
 };
-$("zoomIn").onclick = () => zoom(ZOOM_STEP);
-$("zoomOut").onclick = () => zoom(-ZOOM_STEP);
+$("zoomIn").onclick = () => changeReaderZoom(ZOOM_STEP);
+$("zoomOut").onclick = () => changeReaderZoom(-ZOOM_STEP);
 $("zoomLabel").onclick = fitWidth;
 $("fitBtn").onclick = fitWidth;
 $("toolbarFitBtn").onclick = fitWidth;
@@ -3048,20 +3200,27 @@ $("closeSidebar").onclick = () => {
   }
 };
 $("homeBtn").onclick = () => {
+  flushReadingSession(true);
   $("libraryPanel").hidden = false;
   renderLibrary();
 };
 $("emptyLibraryBtn").onclick = $("homeBtn").onclick;
 $("closeLibrary").onclick = () => {
   $("libraryPanel").hidden = true;
+  markReadingActivity();
 };
 $("libraryPanel").onclick = (e) => {
-  if (e.target === $("libraryPanel")) $("libraryPanel").hidden = true;
+  if (e.target === $("libraryPanel")) {
+    $("libraryPanel").hidden = true;
+    markReadingActivity();
+  }
 };
 $("library").addEventListener("click", (e) => {
   if (e.target.closest(".book")) $("libraryPanel").hidden = true;
 });
 $("librarySearch").addEventListener("input", renderLibrary);
+$("libraryType").addEventListener("change", renderLibrary);
+$("librarySort").addEventListener("change", renderLibrary);
 $("rotateBtn").onclick = async () => {
   if (!pdfDoc || isRotating) return;
   isRotating = true;
@@ -3198,8 +3357,8 @@ $("appearanceBtn").onclick = () => {
     isOpen = pop.classList.toggle("open");
   $("appearanceBtn").setAttribute("aria-expanded", String(isOpen));
 };
-$("appearanceZoomIn").onclick = () => zoom(ZOOM_STEP);
-$("appearanceZoomOut").onclick = () => zoom(-ZOOM_STEP);
+$("appearanceZoomIn").onclick = () => changeReaderZoom(ZOOM_STEP);
+$("appearanceZoomOut").onclick = () => changeReaderZoom(-ZOOM_STEP);
 $("appearanceFit").onclick = fitWidth;
 document.querySelectorAll("[data-reader-margin]").forEach(
   (button) =>
@@ -3235,6 +3394,10 @@ function applyReflowPreferences() {
   $("reflowFont").value = font;
   $("reflowSize").value = String(size);
   $("reflowSizeOutput").textContent = `${size}px`;
+  if (reflowMode && $("zoomLabel")) {
+    $("zoomLabel").textContent = `${size}px`;
+    $("zoomLabel").title = `Tamaño de lectura ${size}px`;
+  }
   document.querySelectorAll("[data-reflow-spacing]").forEach((button) => button.classList.toggle("active", button.dataset.reflowSpacing === spacing));
   document.querySelectorAll("[data-reflow-columns]").forEach((button) => button.classList.toggle("active", button.dataset.reflowColumns === columns));
   document.querySelectorAll("[data-reflow-width]").forEach((button) => button.classList.toggle("active", button.dataset.reflowWidth === width));
@@ -3251,6 +3414,7 @@ async function setReadingMode(mode) {
   $("reflowControls").hidden = !reflowMode;
   document.querySelectorAll("[data-reading-mode]").forEach((button) => button.classList.toggle("active", button.dataset.readingMode === mode));
   if (reflowMode) applyReflowPreferences();
+  else updateZoomLabel();
   if (pdfDoc) await renderPage(currentPage);
   if (reflowMode) {
     $("inkStrip")?.setAttribute("hidden", "");
@@ -3739,16 +3903,10 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Home") renderPage(1);
   if (e.key === "End" && pdfDoc) renderPage(pdfDoc.numPages);
   if (e.key === "+" || e.key === "=") {
-    if (reflowMode) {
-      localStorage.setItem("paper.reflow-size", Math.min(36, Number(localStorage.getItem("paper.reflow-size") || 20) + 1));
-      applyReflowPreferences();
-    } else zoom(ZOOM_STEP);
+    changeReaderZoom(ZOOM_STEP);
   }
   if (e.key === "-") {
-    if (reflowMode) {
-      localStorage.setItem("paper.reflow-size", Math.max(14, Number(localStorage.getItem("paper.reflow-size") || 20) - 1));
-      applyReflowPreferences();
-    } else zoom(-ZOOM_STEP);
+    changeReaderZoom(-ZOOM_STEP);
   }
   if (e.key === "b" || e.key === "B") toggleBookmark();
   if (e.key === "r" || e.key === "R") $("rotateBtn").click();
@@ -3763,15 +3921,66 @@ window.addEventListener("keydown", (e) => {
     $("toolPopover").classList.remove("open");
   }
 });
+function touchDistance(touches) {
+  return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+}
+function touchMidpoint(touches) {
+  return {
+    x: (touches[0].clientX + touches[1].clientX) / 2,
+    y: (touches[0].clientY + touches[1].clientY) / 2,
+  };
+}
 let sx = null;
 document.addEventListener(
   "touchstart",
-  (e) => (sx = document.body.classList.contains("ink-drawing-mode") ? null : e.changedTouches[0].clientX),
-  { passive: true },
+  (e) => {
+    markReadingActivity();
+    if (e.touches.length === 2 && pdfDoc && !reflowMode && e.target.closest("#viewer")) {
+      e.preventDefault();
+      const midpoint = touchMidpoint(e.touches);
+      pinchGesture = {
+        distance: Math.max(1, touchDistance(e.touches)),
+        startScale: scale,
+        nextScale: scale,
+        anchor: zoomAnchor(midpoint.x, midpoint.y),
+      };
+      sx = null;
+      const wrap = $("canvasWrap"), rect = wrap.getBoundingClientRect();
+      wrap.style.transformOrigin = `${midpoint.x - rect.left}px ${midpoint.y - rect.top}px`;
+      wrap.classList.add("pinch-preview");
+      document.body.classList.add("pdf-pinching");
+      return;
+    }
+    sx = e.touches.length === 1 && !document.body.classList.contains("ink-drawing-mode")
+      ? e.changedTouches[0].clientX
+      : null;
+  },
+  { passive: false },
 );
+document.addEventListener("touchmove", (e) => {
+  if (!pinchGesture || e.touches.length < 2) return;
+  e.preventDefault();
+  const ratio = touchDistance(e.touches) / pinchGesture.distance;
+  pinchGesture.nextScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, pinchGesture.startScale * ratio));
+  $("canvasWrap").style.transform = `scale(${pinchGesture.nextScale / pinchGesture.startScale})`;
+  $("zoomLabel").textContent = `${Math.round(pinchGesture.nextScale * 100)}%`;
+}, { passive: false });
 document.addEventListener(
   "touchend",
   (e) => {
+    if (pinchGesture && e.touches.length < 2) {
+      e.preventDefault();
+      const gesture = pinchGesture;
+      pinchGesture = null;
+      const wrap = $("canvasWrap");
+      wrap.style.transform = "";
+      wrap.style.transformOrigin = "";
+      wrap.classList.remove("pinch-preview");
+      document.body.classList.remove("pdf-pinching");
+      sx = null;
+      setZoom(gesture.nextScale, gesture.anchor);
+      return;
+    }
     if (sx == null || !pdfDoc) return;
     const dx = e.changedTouches[0].clientX - sx;
     if (Math.abs(dx) > 110) {
@@ -3779,8 +3988,16 @@ document.addEventListener(
     }
     sx = null;
   },
-  { passive: true },
+  { passive: false },
 );
+document.addEventListener("touchcancel", () => {
+  pinchGesture = null;
+  sx = null;
+  $("canvasWrap").style.transform = "";
+  $("canvasWrap").style.transformOrigin = "";
+  $("canvasWrap").classList.remove("pinch-preview");
+  document.body.classList.remove("pdf-pinching");
+});
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
@@ -3793,6 +4010,17 @@ window.addEventListener("resize", () => {
       fitWidth();
   }, 140);
 });
+for (const eventName of ["pointerdown", "wheel", "keydown"]) {
+  document.addEventListener(eventName, markReadingActivity, { passive: true });
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushReadingSession(true);
+  else markReadingActivity();
+});
+window.addEventListener("blur", () => flushReadingSession(true));
+window.addEventListener("focus", markReadingActivity);
+window.addEventListener("pagehide", () => flushReadingSession(true));
+readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000);
 
 (async function init() {
   if (localStorage.getItem("paper.design-version") !== "4") {
