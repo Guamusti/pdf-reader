@@ -46,6 +46,9 @@ let db = null,
   thumbObserver = null,
   thumbQueue = [],
   thumbRunning = 0,
+  thumbGeneration = 0,
+  thumbRenderTasks = new Set(),
+  lastThumbPage = 0,
   scrubFrame = 0,
   scrubTarget = 1,
   thumbScrubStart = null,
@@ -58,10 +61,19 @@ let wheelZoomFrame = 0;
 let wheelZoomDelta = 0;
 let wheelZoomAnchor = null;
 let layoutRefitTimer = 0;
+let pageRenderPending = null;
+let pageRenderActive = false;
+let pageRenderRequestId = 0;
+let navigationDirection = 1;
+let prefetchHandle = 0;
+const pageProxyCache = new Map();
+const textContentCache = new Map();
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.15;
+const PAGE_CACHE_LIMIT = 12;
+const TEXT_CACHE_LIMIT = 8;
 
 function toast(msg) {
   const e = $("toast");
@@ -147,6 +159,7 @@ async function deleteBook(id) {
   localStorage.removeItem(key(id, "bookmarks"));
   localStorage.removeItem(key(id, "annotations"));
   if (currentBook?.id === id) {
+    resetRenderEngine();
     pdfDoc = null;
     currentBook = null;
     showEmpty();
@@ -250,6 +263,7 @@ function markdownToHtml(source) {
 }
 async function openMarkdownStored(rec) {
   markdownContent = await rec.blob.text();
+  resetRenderEngine();
   pdfDoc = null;
   currentBook = rec;
   currentPage = 1;
@@ -294,6 +308,7 @@ async function openStored(id) {
     document.querySelectorAll("[data-reading-mode]").forEach((button) =>
       button.classList.toggle("active", button.dataset.readingMode === (reflowMode ? "reflow" : "pdf")),
     );
+    resetRenderEngine();
     const bytes = new Uint8Array(await rec.blob.arrayBuffer());
     pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
     rec.pages = pdfDoc.numPages;
@@ -330,7 +345,92 @@ async function openStored(id) {
   }
 }
 
-async function renderPage(num, options = {}) {
+function cancelScheduledPrefetch() {
+  if (!prefetchHandle) return;
+  if ("cancelIdleCallback" in window) window.cancelIdleCallback(prefetchHandle);
+  else clearTimeout(prefetchHandle);
+  prefetchHandle = 0;
+}
+function trimLruCache(cache, limit) {
+  while (cache.size > limit) cache.delete(cache.keys().next().value);
+}
+function touchCache(cache, cacheKey, value, limit) {
+  cache.delete(cacheKey);
+  cache.set(cacheKey, value);
+  trimLruCache(cache, limit);
+  return value;
+}
+function getCachedPage(pageNumber) {
+  if (!pdfDoc) return Promise.reject(new Error("No hay PDF abierto"));
+  if (pageProxyCache.has(pageNumber)) {
+    const cached = pageProxyCache.get(pageNumber);
+    return touchCache(pageProxyCache, pageNumber, cached, PAGE_CACHE_LIMIT);
+  }
+  const documentRef = pdfDoc;
+  const request = documentRef.getPage(pageNumber).catch((error) => {
+    if (pageProxyCache.get(pageNumber) === request) pageProxyCache.delete(pageNumber);
+    throw error;
+  });
+  touchCache(pageProxyCache, pageNumber, request, PAGE_CACHE_LIMIT);
+  return request;
+}
+function getCachedTextContent(page) {
+  const pageNumber = page.pageNumber;
+  if (textContentCache.has(pageNumber)) {
+    const cached = textContentCache.get(pageNumber);
+    return touchCache(textContentCache, pageNumber, cached, TEXT_CACHE_LIMIT);
+  }
+  const request = page.getTextContent().catch((error) => {
+    if (textContentCache.get(pageNumber) === request) textContentCache.delete(pageNumber);
+    throw error;
+  });
+  touchCache(textContentCache, pageNumber, request, TEXT_CACHE_LIMIT);
+  return request;
+}
+function resetRenderEngine() {
+  pageRenderRequestId++;
+  cancelScheduledPrefetch();
+  cancelThumbnailWork();
+  if (renderTask) {
+    try { renderTask.cancel(); } catch {}
+  }
+  renderTask = null;
+  if (pageRenderPending) pageRenderPending.resolve(false);
+  pageRenderPending = null;
+  pageProxyCache.clear();
+  textContentCache.clear();
+}
+function renderPage(num, options = {}) {
+  if (!pdfDoc) return Promise.resolve(false);
+  const pageNumber = Math.max(1, Math.min(pdfDoc.numPages, Number(num) || 1));
+  const requestId = ++pageRenderRequestId;
+  return new Promise((resolve) => {
+    if (pageRenderPending) pageRenderPending.resolve(false);
+    pageRenderPending = { pageNumber, options, requestId, resolve };
+    cancelScheduledPrefetch();
+    if (renderTask) {
+      try { renderTask.cancel(); } catch {}
+    }
+    drainPageRenderQueue();
+  });
+}
+async function drainPageRenderQueue() {
+  if (pageRenderActive) return;
+  pageRenderActive = true;
+  while (pageRenderPending) {
+    const request = pageRenderPending;
+    pageRenderPending = null;
+    let completed = false;
+    try {
+      completed = await performPageRender(request.pageNumber, request.options, request.requestId);
+    } catch (error) {
+      if (error?.name !== "RenderingCancelledException") console.error("No se pudo renderizar la página", error);
+    }
+    request.resolve(completed);
+  }
+  pageRenderActive = false;
+}
+async function performPageRender(num, options = {}, requestId = pageRenderRequestId) {
   if (!pdfDoc) return;
   const previousPage = currentPage;
   const { anchor = null, resetScroll = num !== previousPage } = options;
@@ -342,9 +442,10 @@ async function renderPage(num, options = {}) {
   }
   hideAnnotationActions();
   currentPage = Math.max(1, Math.min(pdfDoc.numPages, num));
+  if (currentPage !== previousPage) navigationDirection = currentPage > previousPage ? 1 : -1;
   updatePageColor();
-  const page = await pdfDoc.getPage(currentPage);
-  if (token !== renderToken) return;
+  const page = await getCachedPage(currentPage);
+  if (token !== renderToken || requestId !== pageRenderRequestId) return false;
   const viewport = page.getViewport({ scale, rotation });
   // PDF.js vuelve a dibujar el vector en cada nivel de zoom. El lienzo se
   // prepara a densidad de pantalla (hasta 3x), así que no ampliamos un bitmap
@@ -367,8 +468,15 @@ async function renderPage(num, options = {}) {
     viewport,
     transform: [dpr, 0, 0, dpr, 0, 0],
   });
-  await renderTask.promise.catch(() => {});
-  if (token !== renderToken) return;
+  try {
+    await renderTask.promise;
+  } catch (error) {
+    renderTask = null;
+    if (error?.name !== "RenderingCancelledException") throw error;
+    return false;
+  }
+  renderTask = null;
+  if (token !== renderToken || requestId !== pageRenderRequestId) return false;
   localStorage.setItem(key(currentBook.id, "page"), String(currentPage));
   localStorage.setItem(key(currentBook.id, "scale"), String(scale));
   localStorage.setItem(key(currentBook.id, "rotation"), String(rotation));
@@ -392,7 +500,7 @@ async function renderPage(num, options = {}) {
   if (anchor) restoreZoomAnchor(anchor);
   else if (resetScroll) $("viewer").scrollTo({ top: 0, left: 0 });
   await renderTextLayer(page, viewport);
-  if (token !== renderToken) return;
+  if (token !== renderToken || requestId !== pageRenderRequestId) return false;
   if (reflowMode) await renderReflowPage(page);
   $("canvasWrap").hidden = reflowMode;
   $("reflowReader").hidden = !reflowMode;
@@ -400,6 +508,7 @@ async function renderPage(num, options = {}) {
   updateThumbSelection();
   updateOutlineSelection();
   prefetchAdjacentPages(currentPage);
+  return true;
 }
 function reflowParagraphs(items) {
   const lines = [];
@@ -417,7 +526,7 @@ function reflowParagraphs(items) {
 }
 async function renderReflowPage(page) {
   const reader = $("reflowReader");
-  const content = await page.getTextContent();
+  const content = await getCachedTextContent(page);
   const lines = reflowParagraphs(content.items);
   if (!lines.length) {
     reader.innerHTML = "<p>Esta página no contiene texto extraíble, así que no se puede maquetar.</p>";
@@ -433,9 +542,24 @@ async function renderReflowPage(page) {
 }
 function prefetchAdjacentPages(pageNumber) {
   if (!pdfDoc) return;
-  for (const page of [pageNumber - 1, pageNumber + 1]) {
-    if (page >= 1 && page <= pdfDoc.numPages) pdfDoc.getPage(page).catch(() => {});
-  }
+  cancelScheduledPrefetch();
+  const direction = navigationDirection || 1;
+  const candidates = [pageNumber + direction, pageNumber + direction * 2, pageNumber - direction]
+    .filter((page, index, pages) => page >= 1 && page <= pdfDoc.numPages && pages.indexOf(page) === index);
+  const run = async (deadline) => {
+    prefetchHandle = 0;
+    for (const candidate of candidates) {
+      if (pageRenderPending || (deadline?.timeRemaining && deadline.timeRemaining() < 4)) break;
+      try {
+        const page = await getCachedPage(candidate);
+        if (!pageRenderPending && Math.abs(candidate - currentPage) === 1)
+          getCachedTextContent(page).catch(() => {});
+      } catch {}
+    }
+  };
+  prefetchHandle = "requestIdleCallback" in window
+    ? window.requestIdleCallback(run, { timeout: 500 })
+    : setTimeout(() => run(), 80);
 }
 function scheduleScrubPage(pageNumber) {
   scrubTarget = pageNumber;
@@ -453,7 +577,7 @@ async function renderTextLayer(page, viewport) {
   layer.style.setProperty("--scale-factor", String(viewport.scale));
   try {
     const textLayer = new pdfjsLib.TextLayer({
-      textContentSource: await page.getTextContent(),
+      textContentSource: await getCachedTextContent(page),
       container: layer,
       viewport,
     });
@@ -477,7 +601,7 @@ function paintSearchHits() {
 
 async function fitWidth() {
   if (!pdfDoc) return;
-  const p = await pdfDoc.getPage(currentPage);
+  const p = await getCachedPage(currentPage);
   const base = p.getViewport({ scale: 1, rotation });
   const available = $("viewer").clientWidth - 24;
   scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, available / base.width));
@@ -601,11 +725,20 @@ function updateOutlineSelection() {
     if (Number(item.dataset.page) <= currentPage) active = item;
   items.forEach((item) => item.classList.toggle("active", item === active));
 }
+function cancelThumbnailWork() {
+  thumbGeneration++;
+  thumbRenderTasks.forEach((task) => {
+    try { task.cancel(); } catch {}
+  });
+  thumbRenderTasks.clear();
+  thumbQueue.forEach((card) => delete card.dataset.queued);
+  thumbQueue = [];
+}
 function resetThumbnails() {
   thumbObserver?.disconnect();
   thumbObserver = null;
-  thumbQueue = [];
-  thumbRunning = 0;
+  cancelThumbnailWork();
+  lastThumbPage = 0;
   $("thumbnailRail").hidden = true;
   $("thumbList").innerHTML = "";
   $("thumbProgress").textContent = "";
@@ -619,17 +752,23 @@ function updateThumbSelection() {
   $("thumbProgress").textContent =
     `Página ${currentPage} de ${pdfDoc.numPages}`;
   const active = document.querySelector(".thumb.active");
-  if (active && !$("thumbnailRail").hidden)
+  if (active && !$("thumbnailRail").hidden) {
+    const nearby = lastThumbPage > 0 && Math.abs(currentPage - lastThumbPage) <= 4;
     active.scrollIntoView({
       block: "nearest",
       inline: "center",
-      behavior: "smooth",
+      behavior: nearby ? "smooth" : "auto",
     });
+    lastThumbPage = currentPage;
+  }
 }
 function enqueueThumbnail(card) {
   if (card.dataset.ready || card.dataset.queued) return;
   card.dataset.queued = "1";
   thumbQueue.push(card);
+  thumbQueue.sort(
+    (a, b) => Math.abs(Number(a.dataset.page) - currentPage) - Math.abs(Number(b.dataset.page) - currentPage),
+  );
   drainThumbnailQueue();
 }
 async function drainThumbnailQueue() {
@@ -643,20 +782,25 @@ async function drainThumbnailQueue() {
   }
 }
 async function renderThumbnail(card) {
+  const generation = thumbGeneration;
   try {
     if (!pdfDoc || card.dataset.ready) return;
     card.classList.add("loading");
-    const page = await pdfDoc.getPage(Number(card.dataset.page));
+    const page = await getCachedPage(Number(card.dataset.page));
+    if (generation !== thumbGeneration) return;
     const viewport = page.getViewport({ scale: 0.19, rotation });
     const canvas = document.createElement("canvas");
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport })
-      .promise;
+    const task = page.render({ canvasContext: canvas.getContext("2d"), viewport });
+    thumbRenderTasks.add(task);
+    try { await task.promise; } finally { thumbRenderTasks.delete(task); }
+    if (generation !== thumbGeneration || card.dataset.ready) return;
     card.prepend(canvas);
     card.dataset.ready = "1";
   } catch {
   } finally {
+    delete card.dataset.queued;
     card.classList.remove("loading");
   }
 }
@@ -743,7 +887,10 @@ function toggleThumbnails() {
   rail.hidden = !rail.hidden;
   if (!rail.hidden) {
     buildThumbnails();
+    document.querySelectorAll(".thumb:not([data-ready])").forEach((card) => thumbObserver?.observe(card));
     requestAnimationFrame(updateThumbSelection);
+  } else {
+    cancelThumbnailWork();
   }
   $("thumbBtn").classList.toggle("active", !rail.hidden);
 }
@@ -1911,7 +2058,7 @@ async function openAiAssistant(fromCapture = false) {
 }
 async function pageContext() {
   if (!pdfDoc) return "";
-  const page = await pdfDoc.getPage(currentPage);
+  const page = await getCachedPage(currentPage);
   const content = await page.getTextContent();
   return content.items
     .map((item) => item.str)

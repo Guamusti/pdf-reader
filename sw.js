@@ -1,5 +1,5 @@
-const CACHE='paper-reader-v62';
-const CORE=['/','/index.html','/reader-ui.css?v=22','/app.js?v=51','/ai-worker.js?v=1','/manifest.json','/icon-192.png','/icon-512.png'];
+const CACHE='paper-reader-v65';
+const CORE=['/','/index.html','/reader-ui.css?v=23','/app.js?v=54','/ai-worker.js?v=1','/manifest.json','/icon-192.png','/icon-512.png'];
 const PDFJS=['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs','https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs'];
 self.addEventListener('install',event=>{event.waitUntil((async()=>{const c=await caches.open(CACHE);await c.addAll(CORE);for(const url of PDFJS){try{await c.add(url)}catch{}}})());self.skipWaiting()});
 self.addEventListener('activate',event=>{event.waitUntil((async()=>{for(const k of await caches.keys())if(k!==CACHE)await caches.delete(k);await self.clients.claim()})())});

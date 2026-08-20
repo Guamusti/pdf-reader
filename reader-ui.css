@@ -915,7 +915,7 @@ body.ink-toolbar-open .toolbar { margin-bottom: 0 !important; }
   border-radius: 14px !important;
   background: var(--surface-solid) !important;
 }
-.thumb { opacity: .58; border: 1px solid var(--line); border-radius: 6px; }
+.thumb { opacity: .58; border: 1px solid var(--line); border-radius: 6px; content-visibility: auto; contain-intrinsic-size: 92px 128px; }
 .thumb.active { opacity: 1; transform: translateY(-2px); border: 2px solid var(--text); box-shadow: none; }
 
 /* Assistant, appearance and library: monochrome surfaces with identical rules. */
