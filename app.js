@@ -32,6 +32,7 @@ let db = null,
   reflowMode = false,
   captureStart = null,
   aiImage = "",
+  aiImagePage = 0,
   localAiEngine = null,
   localAiLoading = null,
   localAiWorker = null,
@@ -45,6 +46,11 @@ let db = null,
   pendingNote = null,
   aiAbortController = null,
   aiScope = "selection",
+  aiMessages = [],
+  aiSourcePages = [],
+  documentContextIndex = null,
+  documentContextIndexId = "",
+  documentIndexLoading = null,
   thumbObserver = null,
   thumbQueue = [],
   thumbRunning = 0,
@@ -313,6 +319,7 @@ async function openMarkdownStored(rec) {
   resetRenderEngine();
   pdfDoc = null;
   currentBook = rec;
+  resetAiDocumentState();
   resetAnnotationHistory();
   currentPage = 1;
   reflowMode = true;
@@ -369,6 +376,7 @@ async function openStored(id) {
     rec.openedAt = Date.now();
     await dbPut(rec);
     currentBook = rec;
+    resetAiDocumentState();
     resetAnnotationHistory();
     resetThumbnails();
     searchQuery = "";
@@ -1981,8 +1989,9 @@ function closeCapture() {
   $("captureOverlay").setAttribute("aria-hidden", "true");
   $("captureBox").hidden = true;
 }
-function openCapture() {
+async function openCapture() {
   if (!pdfDoc) return toast("Abre un PDF primero");
+  if (reflowMode) await setReadingMode("pdf");
   closeCapture();
   $("captureOverlay").classList.add("show");
   $("captureOverlay").setAttribute("aria-hidden", "false");
@@ -2021,6 +2030,7 @@ function cropPdfCapture(a, b) {
     .getContext("2d")
     .drawImage(source, sx, sy, sw, sh, 0, 0, out.width, out.height);
   aiImage = out.toDataURL("image/jpeg", 0.9);
+  aiImagePage = currentPage;
   closeCapture();
   setAssistantButton(true);
   openAiAssistant(true);
@@ -2117,6 +2127,143 @@ function renderAiAnswer() {
 function appendAiChunk(chunk) {
   aiAnswerRaw += chunk;
   renderAiAnswer();
+}
+async function streamBuiltInAnswer(session, prompt, signal) {
+  let previous = "";
+  for await (const chunk of session.promptStreaming(prompt, { signal })) {
+    const value = String(chunk || "");
+    const delta = previous && value.startsWith(previous) ? value.slice(previous.length) : value;
+    appendAiChunk(delta);
+    previous = value.startsWith(previous) ? value : `${previous}${value}`;
+  }
+}
+const AI_STOP_WORDS = new Set("a al algo ante bajo con contra cual cuando de del desde donde el ella ellas ellos en entre era es esa ese eso esta este esto fue ha hay la las lo los más me mi muy no o para pero por porque que se si sin sobre su sus te tu un una y ya the of to in is it for on with as at by from or an be this that".split(" "));
+function aiTokens(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .match(/[a-z0-9]{3,}/g)
+    ?.filter((token) => !AI_STOP_WORDS.has(token)) || [];
+}
+function chunkAiText(text, page, size = 1450, overlap = 180) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+  const chunks = [];
+  for (let start = 0; start < normalized.length; start += size - overlap) {
+    let end = Math.min(normalized.length, start + size);
+    if (end < normalized.length) {
+      const boundary = normalized.lastIndexOf(". ", end);
+      if (boundary > start + size * .58) end = boundary + 1;
+    }
+    const content = normalized.slice(start, end).trim();
+    if (content) chunks.push({ page, content, tokens: aiTokens(content) });
+    if (end >= normalized.length) break;
+  }
+  return chunks;
+}
+function aiConversationKey() {
+  return currentBook ? key(currentBook.id, "ai-conversation-v2") : "";
+}
+function saveAiConversation() {
+  const storageKey = aiConversationKey();
+  if (!storageKey) return;
+  try {
+    setJSON(storageKey, aiMessages.slice(-30));
+  } catch {
+    toast("No se pudo guardar la conversación local");
+  }
+}
+function renderAiConversation() {
+  const conversation = $("aiConversation");
+  if (!conversation) return;
+  conversation.hidden = !aiMessages.length;
+  conversation.innerHTML = aiMessages.map((message) => {
+    const sources = message.sources?.length
+      ? `<small>${message.sources.map((page) => `p. ${page}`).join(" · ")}</small>`
+      : "";
+    return `<article class="ai-message ${message.role}"><header><strong>${message.role === "user" ? "Tú" : "Paper AI"}</strong>${sources}</header><div>${message.role === "assistant" ? formatAiAnswer(message.content) : `<p>${escapeHtml(message.content)}</p>`}</div></article>`;
+  }).join("");
+  conversation.scrollTop = conversation.scrollHeight;
+}
+function resetAiDocumentState() {
+  documentContextIndex = null;
+  documentContextIndexId = currentBook?.id || "";
+  documentIndexLoading = null;
+  aiSourcePages = [];
+  aiMessages = currentBook ? getJSON(aiConversationKey(), []).filter((message) => message?.role && message?.content).slice(-30) : [];
+  renderAiConversation();
+}
+function renderAiSources(pages = []) {
+  aiSourcePages = [...new Set(pages)].sort((a, b) => a - b);
+  const sources = $("aiSources");
+  if (!sources) return;
+  sources.hidden = !aiSourcePages.length;
+  sources.innerHTML = aiSourcePages.map((page) => `<button type="button" data-ai-source-page="${page}">p. ${page}</button>`).join("");
+  sources.querySelectorAll("[data-ai-source-page]").forEach((button) => {
+    button.onclick = () => renderPage(Number(button.dataset.aiSourcePage));
+  });
+}
+async function ensureDocumentContextIndex(signal) {
+  if (!currentBook) return [];
+  if (documentContextIndex && documentContextIndexId === currentBook.id) return documentContextIndex;
+  if (documentIndexLoading && documentContextIndexId === currentBook.id) return documentIndexLoading;
+  documentContextIndexId = currentBook.id;
+  documentIndexLoading = (async () => {
+    if (currentBook.kind === "markdown") return chunkAiText(markdownContent, 1);
+    if (!pdfDoc) return [];
+    const chunks = [];
+    const order = [currentPage, ...Array.from({ length: pdfDoc.numPages }, (_, index) => index + 1).filter((page) => page !== currentPage)];
+    for (let index = 0; index < order.length; index++) {
+      signal?.throwIfAborted?.();
+      const pageNumber = order[index];
+      aiStatus(`Preparando contexto local · página ${index + 1} de ${order.length}`);
+      const page = await getCachedPage(pageNumber);
+      const content = await getCachedTextContent(page);
+      chunks.push(...chunkAiText(content.items.map((item) => item.str).join(" "), pageNumber));
+      if (index % 5 === 4) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    return chunks;
+  })();
+  try {
+    documentContextIndex = await documentIndexLoading;
+    return documentContextIndex;
+  } finally {
+    documentIndexLoading = null;
+  }
+}
+function rankAiChunks(chunks, query) {
+  const terms = [...new Set(aiTokens(query))];
+  return chunks.map((chunk) => {
+    const counts = new Map();
+    chunk.tokens.forEach((token) => counts.set(token, (counts.get(token) || 0) + 1));
+    let score = chunk.page === currentPage ? .45 : 0;
+    terms.forEach((term) => {
+      const count = counts.get(term) || 0;
+      if (count) score += 1 + Math.log1p(count);
+      else if (chunk.content.toLowerCase().includes(term)) score += .35;
+    });
+    return { ...chunk, score };
+  }).sort((a, b) => b.score - a.score || Math.abs(a.page - currentPage) - Math.abs(b.page - currentPage));
+}
+async function buildAiContext(question, signal) {
+  if (aiScope === "selection" && aiSelection) {
+    const page = await pageContext();
+    renderAiSources([currentPage]);
+    return `SELECCIÓN (p. ${currentPage}):\n${aiSelection}\n\nCONTEXTO DE PÁGINA (p. ${currentPage}):\n${page}`.slice(0, 7500);
+  }
+  if (aiScope === "page") {
+    const page = await pageContext();
+    renderAiSources([currentPage]);
+    return `PÁGINA ${currentPage}:\n${page}`.slice(0, 7500);
+  }
+  const chunks = await ensureDocumentContextIndex(signal);
+  const ranked = rankAiChunks(chunks, `${question} ${aiSelection}`);
+  const selected = ranked.filter((chunk) => chunk.score > 0).slice(0, 6);
+  const fallback = selected.length ? selected : ranked.slice(0, 4);
+  const pages = fallback.map((chunk) => chunk.page);
+  renderAiSources(pages);
+  return fallback.map((chunk) => `[PÁGINA ${chunk.page}]\n${chunk.content}`).join("\n\n").slice(0, 9000);
 }
 async function inspectAiCapability() {
   if (globalThis.LanguageModel?.availability) {
@@ -2223,10 +2370,13 @@ async function openAssistantForDocument() {
   aiScope = "document";
   aiSelection = "";
   aiImage = "";
+  aiImagePage = 0;
   $("aiScope").value = "document";
   $("aiSelectionLabel").textContent = "Documento";
-  $("aiQuote").textContent = "Pregunta sobre el documento; se usará el contexto de la página actual.";
+  $("aiQuote").textContent = "Paper buscará localmente las páginas más relevantes para cada pregunta.";
   $("aiImagePreview").hidden = true;
+  renderAiSources([]);
+  renderAiConversation();
   $("aiQuestion").placeholder = "Pregunta sobre este documento…";
   $("aiPanel").hidden = false;
   setAssistantButton(true);
@@ -2281,7 +2431,9 @@ async function inspectVisionCapability() {
         reason:
           "La visión local necesita aproximadamente 4,5 GB libres en este dispositivo.",
       };
-    return { ok: true, kind: "webllm", availability: "downloadable" };
+    const webllm = await import("https://esm.run/@mlc-ai/web-llm@0.2.84");
+    const model = chooseWebLlmModel(webllm, true);
+    return { ok: true, kind: "webllm", availability: "downloadable", model };
   } catch (error) {
     console.error("No se pudo preparar WebGPU para visión", error);
     return {
@@ -2315,7 +2467,7 @@ function friendlyAiError(error, vision = false) {
     : `No se pudo iniciar la IA${vision ? " visual" : ""}. Comprueba WebGPU, memoria y espacio disponible.`;
 }
 async function copyAiAnswer() {
-  const answer = aiAnswerRaw.trim();
+  const answer = aiAnswerRaw.trim() || [...aiMessages].reverse().find((message) => message.role === "assistant")?.content || "";
   if (!answer) return;
   try {
     await navigator.clipboard.writeText(answer);
@@ -2375,16 +2527,34 @@ async function getBuiltInVisionAi() {
   });
   return builtInVisionSession;
 }
+function chooseWebLlmModel(webllm, vision = false) {
+  const models = webllm.prebuiltAppConfig?.model_list || [];
+  const entries = models.map((entry) => ({ ...entry, id: entry.model_id || "" })).filter((entry) => entry.id);
+  const visionModels = entries.filter((entry) => /vision|llava|smolvlm|qwen[^/]*vl|vlm/i.test(`${entry.id} ${entry.model_type || ""}`));
+  if (vision) {
+    const preferred = visionModels
+      .filter((entry) => /q4|q3|q0f16/i.test(entry.id))
+      .sort((a, b) => a.id.localeCompare(b.id))[0] || visionModels[0];
+    if (!preferred)
+      throw new DOMException("La versión local del motor no publica un modelo visual compatible. Prueba la IA integrada de Chrome o Edge.", "NotSupportedError");
+    return preferred.id;
+  }
+  const preferred = entries.find((entry) => entry.id === "Llama-3.2-1B-Instruct-q4f16_1-MLC")
+    || entries.find((entry) => /(?:1B|2B|3B).*Instruct.*q4f16_1/i.test(entry.id) && !visionModels.includes(entry))
+    || entries.find((entry) => /Instruct.*q4/i.test(entry.id) && !visionModels.includes(entry));
+  return preferred?.id || "Llama-3.2-1B-Instruct-q4f16_1-MLC";
+}
 async function getWebLlmAi() {
   if (localAiEngine) return localAiEngine;
   if (localAiLoading) return localAiLoading;
   localAiLoading = (async () => {
     aiStatus("Preparando motor de IA local…");
     const webllm = await import("https://esm.run/@mlc-ai/web-llm@0.2.84");
+    const model = chooseWebLlmModel(webllm);
     localAiWorker = new Worker("/ai-worker.js?v=1", { type: "module" });
     localAiEngine = await webllm.CreateWebWorkerMLCEngine(
       localAiWorker,
-      "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+      model,
       {
         initProgressCallback: (p) =>
           aiStatus(p.text || "Descargando modelo local…"),
@@ -2410,10 +2580,11 @@ async function getVisionAi() {
     if (!capability.ok) throw new Error(capability.reason);
     aiStatus("Descargando modelo visual local (aprox. 4 GB)…");
     const webllm = await import("https://esm.run/@mlc-ai/web-llm@0.2.84");
+    const model = chooseWebLlmModel(webllm, true);
     visionAiWorker = new Worker("/ai-worker.js?v=1", { type: "module" });
     visionAiEngine = await webllm.CreateWebWorkerMLCEngine(
       visionAiWorker,
-      "Phi-3.5-vision-instruct-q4f16_1-MLC",
+      model,
       {
         initProgressCallback: (p) =>
           aiStatus(p.text || "Preparando visión local…"),
@@ -2435,8 +2606,11 @@ async function openAiAssistant(fromCapture = false) {
   const text = window.getSelection()?.toString().trim();
   if (!fromCapture && !text)
     return toast("Selecciona un fragmento para consultarlo");
-  if (!fromCapture) aiImage = "";
-  aiSelection = (text || "").slice(0, 5000);
+  if (!fromCapture) {
+    aiImage = "";
+    aiImagePage = 0;
+  }
+  aiSelection = fromCapture ? "" : (text || "").slice(0, 5000);
   aiScope = "selection";
   $("aiScope").value = aiScope;
   $("aiSelectionLabel").textContent = fromCapture
@@ -2447,6 +2621,8 @@ async function openAiAssistant(fromCapture = false) {
     : aiSelection;
   $("aiImagePreview").hidden = !fromCapture;
   $("aiImagePreview").src = fromCapture ? aiImage : "";
+  renderAiSources([fromCapture ? aiImagePage || currentPage : currentPage]);
+  renderAiConversation();
   $("aiQuestion").value = fromCapture
     ? "Describe la información visible en esta captura y señala los elementos importantes."
     : "Explícame este fragmento de forma clara y señala las ideas principales.";
@@ -2489,9 +2665,10 @@ async function openAiAssistant(fromCapture = false) {
   $("aiQuestion").focus();
 }
 async function pageContext() {
+  if (currentBook?.kind === "markdown") return markdownContent.slice(0, 7500);
   if (!pdfDoc) return "";
   const page = await getCachedPage(currentPage);
-  const content = await page.getTextContent();
+  const content = await getCachedTextContent(page);
   return content.items
     .map((item) => item.str)
     .join(" ")
@@ -2520,10 +2697,7 @@ async function askLocalAiLegacy() {
     if (capability.kind === "builtin") {
       const session = await getBuiltInAi();
       aiStatus("Pensando en tu dispositivo…");
-      for await (const chunk of session.promptStreaming(prompt, {
-        signal: aiAbortController.signal,
-      }))
-        appendAiChunk(chunk);
+      await streamBuiltInAnswer(session, prompt, aiAbortController.signal);
     } else {
       const engine = await getWebLlmAi();
       aiStatus("Pensando en tu dispositivo…");
@@ -2696,22 +2870,26 @@ function showEmpty() {
 }
 
 async function askLocalAi() {
-  const isVision = Boolean(aiImage && !aiSelection),
+  const isVision = Boolean(aiImage && aiScope === "selection"),
     button = $("askAiSubmit"),
-    question =
-      $("aiQuestion").value.trim() ||
-      (isVision ? "Describe esta captura." : "Explica este texto.");
-  if (!isVision && !aiSelection && aiScope !== "document") return;
-  const answerBeforeRequest = aiAnswerRaw;
+    question = $("aiQuestion").value.trim() || (isVision ? "Describe esta captura." : "Explica este contenido.");
+  if (!isVision && aiScope === "selection" && !aiSelection)
+    return toast("Selecciona texto, añade un recorte o cambia el ámbito de la consulta");
+  const messagesBeforeRequest = structuredClone(aiMessages);
   button.disabled = true;
   $("cancelAi").hidden = false;
-  aiAnswerRaw += `${aiAnswerRaw.trim() ? "\n\n---\n\n" : ""}**Tú:** ${question}\n\n**Assistant:** `;
+  aiAnswerRaw = "";
+  aiMessages.push({ role: "user", content: question, createdAt: Date.now() });
+  renderAiConversation();
   renderAiAnswer();
   aiAbortController = new AbortController();
   try {
     if (isVision) {
       const vision = await inspectVisionCapability();
       if (!vision.ok) throw new Error(vision.reason);
+      renderAiSources([aiImagePage || currentPage]);
+      const history = messagesBeforeRequest.slice(-6).map((message) => `${message.role === "user" ? "Usuario" : "Asistente"}: ${message.content}`).join("\n");
+      const visionQuestion = `${history ? `Conversación previa:\n${history}\n\n` : ""}${question}`;
       if (vision.kind === "builtin") {
         try {
           const session = await getBuiltInVisionAi();
@@ -2723,15 +2901,12 @@ async function askLocalAi() {
             {
               role: "user",
               content: [
-                { type: "text", value: question },
+                { type: "text", value: visionQuestion },
                 { type: "image", value: imageBlob },
               ],
             },
           ];
-          for await (const chunk of session.promptStreaming(prompt, {
-            signal: aiAbortController.signal,
-          }))
-            appendAiChunk(chunk);
+          await streamBuiltInAnswer(session, prompt, aiAbortController.signal);
         } catch (builtInError) {
           builtInVisionSession = null;
           console.warn(
@@ -2739,23 +2914,21 @@ async function askLocalAi() {
             builtInError,
           );
           aiStatus("La visión integrada no respondió. Probando WebGPU…");
-          await streamWebLlmVision(question);
+          await streamWebLlmVision(visionQuestion);
         }
       } else {
-        await streamWebLlmVision(question);
+        await streamWebLlmVision(visionQuestion);
       }
     } else {
       const capability = await inspectAiCapability();
       if (capability.kind === "none") throw new Error(capability.reason);
-      const context = await pageContext();
-      const prompt = `Actúa como un asistente de lectura riguroso y responde siempre en español. Usa solo el texto proporcionado; si falta información, indícalo.\n\nFragmento seleccionado:\n---\n${aiSelection}\n---\n\nContexto de la página:\n---\n${context}\n---\n\nPregunta: ${question}`;
+      const context = await buildAiContext(question, aiAbortController.signal);
+      const history = messagesBeforeRequest.slice(-6).map((message) => `${message.role === "user" ? "Usuario" : "Asistente"}: ${message.content}`).join("\n\n");
+      const prompt = `Actúa como un asistente documental riguroso. Responde siempre en español y usa exclusivamente el contexto incluido. Si la respuesta no está en él, dilo claramente. Cuando el contexto indique páginas, cita las afirmaciones como [p. N].\n\nCONTEXTO LOCAL:\n---\n${context}\n---\n${history ? `\nCONVERSACIÓN PREVIA:\n${history}\n` : ""}\nPREGUNTA: ${question}`;
       if (capability.kind === "builtin") {
         const session = await getBuiltInAi();
         aiStatus("Pensando en tu dispositivo…");
-        for await (const chunk of session.promptStreaming(prompt, {
-          signal: aiAbortController.signal,
-        }))
-          appendAiChunk(chunk);
+        await streamBuiltInAnswer(session, prompt, aiAbortController.signal);
       } else {
         const engine = await getWebLlmAi();
         aiStatus("Pensando en tu dispositivo…");
@@ -2764,12 +2937,13 @@ async function askLocalAi() {
             {
               role: "system",
               content:
-                "Eres un asistente de lectura riguroso. Responde siempre en español y usa únicamente el texto proporcionado.",
+                "Eres un asistente documental riguroso. Responde en español, no inventes información y cita las páginas del contexto como [p. N].",
             },
+            ...messagesBeforeRequest.slice(-6).map((message) => ({ role: message.role, content: message.content })),
             { role: "user", content: prompt },
           ],
           temperature: 0.3,
-          max_tokens: 450,
+          max_tokens: 700,
           stream: true,
         });
         for await (const chunk of stream) {
@@ -2778,19 +2952,30 @@ async function askLocalAi() {
         }
       }
     }
+    const answer = aiAnswerRaw.trim();
+    if (!answer) throw new Error("El modelo no devolvió una respuesta.");
+    aiMessages.push({ role: "assistant", content: answer, sources: [...aiSourcePages], createdAt: Date.now() });
+    saveAiConversation();
+    renderAiConversation();
+    aiAnswerRaw = "";
+    renderAiAnswer();
     aiStatus(
       "Respuesta generada localmente. El documento no ha salido de tu navegador.",
     );
-    $("copyAiAnswer").hidden = !aiAnswerRaw.trim();
+    $("copyAiAnswer").hidden = false;
   } catch (e) {
     if (e.name === "AbortError") {
-      aiAnswerRaw = answerBeforeRequest;
+      aiMessages = messagesBeforeRequest;
+      aiAnswerRaw = "";
+      renderAiConversation();
       renderAiAnswer();
       aiStatus("Consulta detenida.");
       return;
     }
     console.error(e);
-    aiAnswerRaw = answerBeforeRequest;
+    aiMessages = messagesBeforeRequest;
+    aiAnswerRaw = "";
+    renderAiConversation();
     renderAiAnswer();
     aiStatus(friendlyAiError(e, isVision));
   } finally {
@@ -3154,7 +3339,7 @@ function configureAiWindow() {
     const saved = JSON.parse(localStorage.getItem("paper.ai-window") || "null") || savedWindow;
     card.style.right = "auto";
     card.style.bottom = "auto";
-    if (saved) {
+    if (saved && window.innerWidth > 700) {
       card.classList.add("ai-positioned");
       card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - 140, saved.left))}px`, "important");
       card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 90, saved.top))}px`, "important");
@@ -3196,7 +3381,7 @@ function configureAiWindow() {
   if (!$("newAiChat")) {
     const controls = document.createElement("div");
     controls.className = "tool-row ai-head-controls";
-    controls.innerHTML = '<select class="field" id="aiScope" aria-label="Ámbito de la consulta"><option value="selection">Selección</option><option value="document">Documento</option></select><button class="btn" id="newAiChat" title="Nueva conversación">＋ <span>Nueva</span></button>';
+    controls.innerHTML = '<select class="field" id="aiScope" aria-label="Ámbito de la consulta"><option value="selection">Selección</option><option value="page">Página actual</option><option value="document">Documento completo</option></select><button class="btn" id="newAiChat" title="Nueva conversación">＋ <span>Nueva</span></button>';
     header.insertBefore(controls, $("closeAiPanel"));
   }
   if (!$("minimizeAi")) {
@@ -3210,13 +3395,21 @@ function configureAiWindow() {
   }
   $("aiScope").onchange = (event) => {
     aiScope = event.target.value;
-    if (aiScope === "document") {
+    if (aiScope === "document" || aiScope === "page") {
       aiImage = "";
+      aiImagePage = 0;
       aiSelection = "";
-      $("aiSelectionLabel").textContent = "Documento";
-      $("aiQuote").textContent = "Consulta sobre el documento; se usará el contexto de la página actual.";
+      $("aiSelectionLabel").textContent = aiScope === "document" ? "Documento completo" : `Página ${currentPage}`;
+      $("aiQuote").textContent = aiScope === "document"
+        ? "Paper buscará localmente las páginas más relevantes para cada pregunta."
+        : "La respuesta usará únicamente el texto extraíble de la página actual.";
       $("aiImagePreview").hidden = true;
+      renderAiSources(aiScope === "page" ? [currentPage] : []);
       $("aiPanel").hidden = false;
+    } else {
+      $("aiSelectionLabel").textContent = aiSelection ? "Fragmento seleccionado" : "Selección";
+      $("aiQuote").textContent = aiSelection || "Selecciona texto o usa el recorte para añadir contexto.";
+      renderAiSources(aiSelection ? [currentPage] : []);
     }
   };
   if (savedWindow && window.innerWidth > 700) {
@@ -3286,13 +3479,26 @@ function configureAiWindow() {
     if (box.width < 420 || box.height < 300) return;
     localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
   }).observe(card);
+  window.addEventListener("resize", () => {
+    if (card.classList.contains("ai-minimized")) return;
+    if (window.innerWidth <= 700) {
+      card.classList.remove("ai-positioned");
+      ["left", "top", "right", "bottom", "width", "height"].forEach((property) => card.style.removeProperty(property));
+    }
+  }, { passive: true });
   $("newAiChat").onclick = () => {
     aiAnswerRaw = "";
+    aiMessages = [];
     aiSelection = "";
     aiImage = "";
+    aiImagePage = 0;
+    const storageKey = aiConversationKey();
+    if (storageKey) localStorage.removeItem(storageKey);
     $("aiQuote").textContent = "Selecciona texto, un recorte o consulta el documento.";
     $("aiImagePreview").hidden = true;
     $("aiQuestion").value = "";
+    renderAiSources([]);
+    renderAiConversation();
     renderAiAnswer();
     aiStatus("Nueva conversación local.");
     $("aiQuestion").focus();

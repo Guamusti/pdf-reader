@@ -1008,6 +1008,37 @@ body.reflow-mode #markerModeBtn, body.reflow-mode #eraserModeBtn { opacity: .38;
   body.reflow-mode .viewer { padding-inline: 0 !important; }
 }
 
+/* Local document assistant: visible context and persistent conversation. */
+.ai-sources { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.ai-sources[hidden] { display: none; }
+.ai-sources::before { content: "Contexto"; align-self: center; margin-right: 2px; color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .11em; text-transform: uppercase; }
+.ai-sources button { min-height: 24px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-solid); color: var(--text); cursor: pointer; font-size: 9px; font-variant-numeric: tabular-nums; }
+.ai-sources button:hover { background: var(--text); color: var(--surface-solid); }
+.ai-conversation { display: grid; gap: 10px; max-height: min(310px,36dvh); margin: 0 0 15px; padding: 4px 3px 8px; overflow: auto; scrollbar-width: thin; }
+.ai-conversation[hidden] { display: none; }
+.ai-message { width: min(91%,560px); padding: 11px 13px; border: 1px solid var(--line); border-radius: 14px 14px 14px 4px; background: var(--soft); font-size: 12px; line-height: 1.52; }
+.ai-message.user { justify-self: end; border-radius: 14px 14px 4px 14px; background: var(--text); color: var(--surface-solid); }
+.ai-message > header { display: flex !important; justify-content: space-between !important; min-height: 0 !important; margin: 0 0 6px; padding: 0 !important; border: 0 !important; color: inherit; font-size: 9px; letter-spacing: .09em; text-transform: uppercase; opacity: .65; cursor: default !important; }
+.ai-message p { margin: 0 0 8px; }.ai-message p:last-child { margin-bottom: 0; }
+.ai-message h3 { margin: 11px 0 5px; font-size: 12px; }.ai-message h3:first-child { margin-top: 0; }
+.ai-message ul { margin: 5px 0 8px; padding-left: 17px; }
+.ai-card.ai-busy .ai-conversation { opacity: .72; }
+.ai-status.is-loading::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border: 1px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+@media (max-width: 700px) {
+  .ai-conversation { max-height: 29dvh; }
+  .ai-message { width: 94%; font-size: 11px; }
+  .ai-sources { overflow-x: auto; flex-wrap: nowrap; }
+  .ai-sources button { flex: 0 0 auto; }
+  #aiPanel .ai-card.ai-positioned:not(.ai-minimized) {
+    inset: auto 6px max(6px,env(safe-area-inset-bottom)) 6px !important;
+    width: auto !important;
+    height: calc(100dvh - 72px) !important;
+    max-width: none !important;
+    max-height: calc(100dvh - 12px) !important;
+    resize: none !important;
+  }
+}
+
 /* Reading dock and page previews follow the same island geometry. */
 .footer {
   grid-template-columns: auto minmax(150px,1fr) auto !important;
