@@ -821,6 +821,19 @@ html[data-theme="dark"] {
 .canvas-wrap { border-radius: 1px !important; box-shadow: 0 20px 58px rgba(0,0,0,.20) !important; }
 html[data-theme="dark"] .canvas-wrap { box-shadow: 0 20px 68px rgba(0,0,0,.75) !important; }
 
+/* Immersive reading: tap empty paper to hide/reveal chrome; fullscreen uses it too. */
+body.reader-chrome-hidden .app { grid-template-columns: minmax(0,1fr) !important; }
+body.reader-chrome-hidden .main { grid-template-rows: minmax(0,1fr) !important; }
+body.reader-chrome-hidden .sidebar,
+body.reader-chrome-hidden .toolbar,
+body.reader-chrome-hidden .footer,
+body.reader-chrome-hidden .thumbnail-rail,
+body.reader-chrome-hidden .ink-strip,
+body.reader-chrome-hidden .ink-color-card { display: none !important; }
+body.reader-chrome-hidden .viewer { padding: 16px !important; }
+body.reader-chrome-hidden .canvas-wrap { margin: auto !important; }
+body.focus-mode { background: var(--bg); }
+
 /* Ink is a compact contextual island over the document, never another header. */
 body.ink-toolbar-open .toolbar { margin-bottom: 0 !important; }
 .ink-strip {
@@ -893,7 +906,7 @@ body.ink-toolbar-open .toolbar { margin-bottom: 0 !important; }
   .toolbar { grid-template-columns: minmax(170px,1fr) auto auto; }
   .searchbox { width: 38px; overflow: hidden; padding-inline: 10px !important; }
   .searchbox input, .searchbox .btn { display: none; }
-  .view-group #focusBtn, .view-group #bookmarkBtn, #toolbarFitBtn { display: none; }
+  .view-group #bookmarkBtn, #toolbarFitBtn { display: none; }
 }
 @media (max-width: 900px) {
   :root { --paper-sidebar: 0px; }
@@ -914,6 +927,8 @@ body.ink-toolbar-open .toolbar { margin-bottom: 0 !important; }
   .assistant-group .mode-button span, .ink-group .mode-button span { display: none; }
   .mode-button { width: 32px; padding: 0 !important; }
   .searchbox, .view-group { display: none !important; }
+  .toolbar .toolbar-end .toolbar-actions .view-group { display: flex !important; }
+  .toolbar .toolbar-end .view-group > :not(#focusBtn) { display: none !important; }
   .viewer { padding: 54px 6px 86px !important; }
   .ink-strip { top: 61px !important; }
   .footer { grid-template-columns: auto minmax(82px,1fr) auto !important; width: calc(100vw - 12px) !important; min-height: 46px !important; }

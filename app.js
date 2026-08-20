@@ -2228,14 +2228,82 @@ $("rotateBtn").onclick = async () => {
 };
 $("thumbBtn").onclick = toggleThumbnails;
 $("closeThumbs").onclick = toggleThumbnails;
-function toggleFocusMode() {
-  const enabled = document.body.classList.toggle("focus-mode");
-  $("focusBtn").textContent = enabled ? "×" : "⛶";
-  $("focusBtn").title = enabled ? "Salir del modo enfoque" : "Modo enfoque";
-  $("focusBtn").setAttribute("aria-label", $("focusBtn").title);
-  if (enabled && pdfDoc) fitWidth();
+function fullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+function updateFocusButton(active = Boolean(fullscreenElement())) {
+  const button = $("focusBtn");
+  button.textContent = active ? "×" : "⛶";
+  button.title = active ? "Salir de pantalla completa" : "Pantalla completa";
+  button.setAttribute("aria-label", button.title);
+  button.setAttribute("aria-pressed", String(active));
+}
+function setReaderChromeHidden(hidden, refit = true) {
+  document.body.classList.toggle("reader-chrome-hidden", hidden);
+  if (hidden) {
+    document.body.classList.remove("sidebar-open");
+    $("toolPopover").classList.remove("open");
+    $("appearancePopover").classList.remove("open");
+    $("inkColorCard")?.setAttribute("hidden", "");
+    hideAnnotationActions();
+  }
+  if (refit && pdfDoc) requestAnimationFrame(fitWidth);
+}
+async function toggleFocusMode() {
+  const nativeFullscreen = Boolean(fullscreenElement());
+  const active = nativeFullscreen || document.body.classList.contains("focus-mode");
+  if (active) {
+    const exit = nativeFullscreen && (document.exitFullscreen || document.webkitExitFullscreen);
+    if (exit) await exit.call(document);
+    else {
+      document.body.classList.remove("focus-mode");
+      setReaderChromeHidden(false);
+      updateFocusButton(false);
+    }
+    return;
+  }
+  document.body.classList.add("focus-mode");
+  setReaderChromeHidden(true, false);
+  updateFocusButton(true);
+  const request = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
+  try {
+    if (request) await request.call(document.documentElement, { navigationUI: "hide" });
+    else toast("Modo inmersivo activado");
+  } catch {
+    toast("Modo inmersivo activado");
+  }
+  if (pdfDoc) requestAnimationFrame(fitWidth);
+}
+function syncFullscreenState() {
+  const active = Boolean(fullscreenElement());
+  document.body.classList.toggle("focus-mode", active);
+  if (!active) setReaderChromeHidden(false, false);
+  updateFocusButton(active);
+  if (pdfDoc) requestAnimationFrame(fitWidth);
 }
 $("focusBtn").onclick = toggleFocusMode;
+document.addEventListener("fullscreenchange", syncFullscreenState);
+document.addEventListener("webkitfullscreenchange", syncFullscreenState);
+
+let paperTap = null;
+$("canvasWrap").addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || document.body.classList.contains("ink-drawing-mode")) return;
+  paperTap = { id: event.pointerId, x: event.clientX, y: event.clientY };
+});
+$("canvasWrap").addEventListener("pointercancel", () => { paperTap = null; });
+$("canvasWrap").addEventListener("pointerup", (event) => {
+  if (!paperTap || paperTap.id !== event.pointerId) return;
+  const moved = Math.hypot(event.clientX - paperTap.x, event.clientY - paperTap.y);
+  paperTap = null;
+  if (
+    moved > 8 || markerMode || eraserMode ||
+    document.body.classList.contains("ink-drawing-mode") ||
+    event.target.closest(".textLayer span, a, button, input, textarea, select")
+  ) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+  setReaderChromeHidden(!document.body.classList.contains("reader-chrome-hidden"));
+});
 $("pageJump").onchange = (e) => {
   const page = Number(e.target.value);
   if (Number.isInteger(page) && pdfDoc) renderPage(page);
@@ -2760,7 +2828,8 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "r" || e.key === "R") $("rotateBtn").click();
   if (e.key === "f" || e.key === "F") toggleFocusMode();
   if (e.key === "Escape") {
-    if (document.body.classList.contains("focus-mode")) toggleFocusMode();
+    if (document.body.classList.contains("reader-chrome-hidden") && !fullscreenElement())
+      setReaderChromeHidden(false);
     hideAnnotationActions();
     $("toolPopover").classList.remove("open");
   }
@@ -2808,6 +2877,7 @@ window.addEventListener("resize", () => {
   buildReflowControls();
   buildPageColorControls();
   buildThemeChoices();
+  updateFocusButton();
   buildInkPalette();
   configureAiWindow();
   configureFooterIsland();
