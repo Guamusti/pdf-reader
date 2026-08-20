@@ -54,6 +54,13 @@ let db = null,
 let inkStroke = null;
 
 let annotationRedo = [];
+let wheelZoomFrame = 0;
+let wheelZoomDelta = 0;
+let wheelZoomAnchor = null;
+
+const MIN_ZOOM = 0.35;
+const MAX_ZOOM = 5;
+const ZOOM_STEP = 0.15;
 
 function toast(msg) {
   const e = $("toast");
@@ -322,8 +329,10 @@ async function openStored(id) {
   }
 }
 
-async function renderPage(num) {
+async function renderPage(num, options = {}) {
   if (!pdfDoc) return;
+  const previousPage = currentPage;
+  const { anchor = null, resetScroll = num !== previousPage } = options;
   const token = ++renderToken;
   if (renderTask) {
     try {
@@ -336,7 +345,14 @@ async function renderPage(num) {
   const page = await pdfDoc.getPage(currentPage);
   if (token !== renderToken) return;
   const viewport = page.getViewport({ scale, rotation });
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  // PDF.js vuelve a dibujar el vector en cada nivel de zoom. El lienzo se
+  // prepara a densidad de pantalla (hasta 3x), así que no ampliamos un bitmap
+  // ya renderizado mediante CSS.
+  const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
+  // El límite evita que un PDF enorme a 500% bloquee el navegador; seguimos
+  // renderizando desde el vector de origen y reducimos sólo la sobremuestra.
+  const maxCanvasPixels = 24_000_000;
+  const dpr = Math.min(targetDpr, Math.sqrt(maxCanvasPixels / (viewport.width * viewport.height)));
   const canvas = $("pdfCanvas"),
     ctx = canvas.getContext("2d");
   canvas.width = Math.floor(viewport.width * dpr);
@@ -355,6 +371,7 @@ async function renderPage(num) {
   localStorage.setItem(key(currentBook.id, "page"), String(currentPage));
   localStorage.setItem(key(currentBook.id, "scale"), String(scale));
   localStorage.setItem(key(currentBook.id, "rotation"), String(rotation));
+  updateZoomLabel();
   $("pageStatus").textContent = `Página ${currentPage} de ${pdfDoc.numPages}`;
   $("pageJump").value = currentPage;
   $("pageJump").max = pdfDoc.numPages;
@@ -371,7 +388,8 @@ async function renderPage(num) {
   $("progressBar").style.width = `${(currentPage / pdfDoc.numPages) * 100}%`;
   $("prevBtn").disabled = currentPage === 1;
   $("nextBtn").disabled = currentPage === pdfDoc.numPages;
-  $("viewer").scrollTo({ top: 0, left: 0 });
+  if (anchor) restoreZoomAnchor(anchor);
+  else if (resetScroll) $("viewer").scrollTo({ top: 0, left: 0 });
   await renderTextLayer(page, viewport);
   if (token !== renderToken) return;
   if (reflowMode) await renderReflowPage(page);
@@ -461,12 +479,47 @@ async function fitWidth() {
   const p = await pdfDoc.getPage(currentPage);
   const base = p.getViewport({ scale: 1, rotation });
   const available = $("viewer").clientWidth - 24;
-  scale = Math.max(0.35, Math.min(3, available / base.width));
-  renderPage(currentPage);
+  scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, available / base.width));
+  await renderPage(currentPage, { resetScroll: false });
+  updateZoomLabel();
 }
-function zoom(delta) {
-  scale = Math.max(0.4, Math.min(3.5, scale + delta));
-  renderPage(currentPage);
+function zoomAnchor(clientX, clientY) {
+  const wrap = $("canvasWrap");
+  const viewer = $("viewer");
+  const rect = wrap.getBoundingClientRect();
+  const viewerRect = viewer.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return {
+    x: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
+    y: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)),
+    clientX: clientX - viewerRect.left,
+    clientY: clientY - viewerRect.top,
+  };
+}
+function restoreZoomAnchor(anchor) {
+  const viewer = $("viewer");
+  const wrap = $("canvasWrap");
+  viewer.scrollTo({
+    left: Math.max(0, wrap.offsetLeft + wrap.clientWidth * anchor.x - anchor.clientX),
+    top: Math.max(0, wrap.offsetTop + wrap.clientHeight * anchor.y - anchor.clientY),
+    behavior: "auto",
+  });
+}
+function updateZoomLabel() {
+  const label = $("zoomLabel");
+  if (!label) return;
+  const percent = Math.round(scale * 100);
+  label.textContent = `${percent}%`;
+  label.title = `Zoom ${percent}% · pulsar para ajustar a la ventana`;
+  label.setAttribute("aria-label", label.title);
+}
+async function zoom(delta, anchor = null) {
+  if (!pdfDoc || reflowMode) return;
+  const next = Math.round(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale + delta)) * 100) / 100;
+  if (next === scale) return;
+  scale = next;
+  updateZoomLabel();
+  await renderPage(currentPage, { anchor, resetScroll: false });
 }
 function renderBookmarks() {
   if (!currentBook) {
@@ -671,6 +724,16 @@ function buildThumbnails() {
     const card = event.target.closest(".thumb");
     if (card) renderPage(Number(card.dataset.page));
   });
+  // En ratón, la rueda vertical recorre horizontalmente la isla de páginas.
+  // No cambia de página: sólo mueve el navegador visual, como en una galería.
+  list.addEventListener("wheel", (event) => {
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ? event.deltaX
+      : event.deltaY;
+    if (!delta) return;
+    event.preventDefault();
+    list.scrollBy({ left: delta, behavior: "auto" });
+  }, { passive: false });
   updateThumbSelection();
 }
 function toggleThumbnails() {
@@ -2092,8 +2155,9 @@ $("toolbarPage").onchange = (e) => {
   if (Number.isInteger(page) && pdfDoc) renderPage(page);
   else e.target.value = currentPage;
 };
-$("zoomIn").onclick = () => zoom(0.15);
-$("zoomOut").onclick = () => zoom(-0.15);
+$("zoomIn").onclick = () => zoom(ZOOM_STEP);
+$("zoomOut").onclick = () => zoom(-ZOOM_STEP);
+$("zoomLabel").onclick = fitWidth;
 $("fitBtn").onclick = fitWidth;
 $("toolbarFitBtn").onclick = fitWidth;
 $("bookmarkBtn").onclick = toggleBookmark;
@@ -2163,6 +2227,23 @@ $("pageJump").onchange = (e) => {
   else if (pdfDoc) e.target.value = currentPage;
 };
 $("pageScrubber").oninput = (e) => scheduleScrubPage(Number(e.target.value));
+$("viewer").addEventListener("wheel", (event) => {
+  // Ctrl/⌘ + rueda (o pellizco de trackpad) hace zoom sobre el punto que se
+  // está mirando. El documento se vuelve a renderizar, no se escala por CSS.
+  if (!(event.ctrlKey || event.metaKey) || !pdfDoc || reflowMode) return;
+  event.preventDefault();
+  wheelZoomDelta += Math.max(-0.28, Math.min(0.28, -event.deltaY * 0.002));
+  wheelZoomAnchor = zoomAnchor(event.clientX, event.clientY);
+  if (wheelZoomFrame) return;
+  wheelZoomFrame = requestAnimationFrame(() => {
+    const delta = wheelZoomDelta;
+    const anchor = wheelZoomAnchor;
+    wheelZoomFrame = 0;
+    wheelZoomDelta = 0;
+    wheelZoomAnchor = null;
+    zoom(delta, anchor);
+  });
+}, { passive: false });
 $("exportNotes").onclick = exportAnnotations;
 $("exportMarkdown").onclick = exportMarkdown;
 $("toolsBtn").onclick = () => {
@@ -2175,8 +2256,8 @@ $("appearanceBtn").onclick = () => {
     isOpen = pop.classList.toggle("open");
   $("appearanceBtn").setAttribute("aria-expanded", String(isOpen));
 };
-$("appearanceZoomIn").onclick = () => zoom(0.15);
-$("appearanceZoomOut").onclick = () => zoom(-0.15);
+$("appearanceZoomIn").onclick = () => zoom(ZOOM_STEP);
+$("appearanceZoomOut").onclick = () => zoom(-ZOOM_STEP);
 $("appearanceFit").onclick = fitWidth;
 document.querySelectorAll("[data-reader-margin]").forEach(
   (button) =>
@@ -2658,8 +2739,8 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "ArrowLeft" || e.key === "PageUp") renderPage(currentPage - 1);
   if (e.key === "Home") renderPage(1);
   if (e.key === "End" && pdfDoc) renderPage(pdfDoc.numPages);
-  if (e.key === "+" || e.key === "=") zoom(0.15);
-  if (e.key === "-") zoom(-0.15);
+  if (e.key === "+" || e.key === "=") zoom(ZOOM_STEP);
+  if (e.key === "-") zoom(-ZOOM_STEP);
   if (e.key === "b" || e.key === "B") toggleBookmark();
   if (e.key === "r" || e.key === "R") $("rotateBtn").click();
   if (e.key === "f" || e.key === "F") toggleFocusMode();

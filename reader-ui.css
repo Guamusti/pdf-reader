@@ -77,6 +77,13 @@ html, body { width: 100%; overflow: hidden; }
   background: color-mix(in srgb, var(--surface-solid) 88%, transparent);
 }
 .footer .btn { border-radius: 10px; }
+.footer .zoom-level {
+  min-width: 54px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 680;
+  letter-spacing: -.02em;
+  background: color-mix(in srgb, var(--soft) 82%, transparent);
+}
 .thumbnail-rail { border-radius: 18px; }
 
 /* Assistant — one readable, opaque workspace instead of a translucent overlay. */
@@ -241,6 +248,7 @@ html, body { width: 100%; overflow: hidden; }
   .footer { min-width: 0 !important; width: calc(100vw - 16px); bottom: max(8px,env(safe-area-inset-bottom)); padding: 5px; }
   .footer .center { min-width: 92px; }
   .footer .right #rotateBtn, .footer .right #fitBtn { display: none; }
+  .footer .zoom-level { min-width: 48px; }
   .footer .btn { min-height: 34px; padding-inline: 8px; }
   .thumbnail-rail { left: 6px; right: 6px; bottom: 67px; border-radius: 14px; }
 
