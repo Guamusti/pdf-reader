@@ -316,6 +316,9 @@ async function openMarkdownStored(rec) {
   resetAnnotationHistory();
   currentPage = 1;
   reflowMode = true;
+  document.body.classList.add("reflow-mode");
+  $("markerModeBtn").disabled = true;
+  $("eraserModeBtn").disabled = true;
   rec.openedAt = Date.now();
   rec.pages = 1;
   await dbPut(rec);
@@ -352,6 +355,9 @@ async function openStored(id) {
     }
     markdownContent = "";
     reflowMode = localStorage.getItem("paper.reading-mode") === "reflow";
+    document.body.classList.toggle("reflow-mode", reflowMode);
+    $("markerModeBtn").disabled = reflowMode;
+    $("eraserModeBtn").disabled = reflowMode;
     $("reflowControls").hidden = !reflowMode;
     document.querySelectorAll("[data-reading-mode]").forEach((button) =>
       button.classList.toggle("active", button.dataset.readingMode === (reflowMode ? "reflow" : "pdf")),
@@ -563,35 +569,108 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   prefetchAdjacentPages(currentPage);
   return true;
 }
-function reflowParagraphs(items) {
+function reflowLines(items) {
   const lines = [];
+  let current = null;
   for (const item of items.filter((entry) => entry.str?.trim())) {
-    const x = item.transform?.[4] || 0,
-      y = item.transform?.[5] || 0;
-    const line = lines.find((entry) => Math.abs(entry.y - y) < 3);
-    if (line) line.items.push({ x, text: item.str });
-    else lines.push({ y, items: [{ x, text: item.str }] });
+    const x = Number(item.transform?.[4] || 0);
+    const y = Number(item.transform?.[5] || 0);
+    const size = Math.max(6, Math.abs(Number(item.transform?.[0] || item.height || 12)));
+    const changedLine = !current || Math.abs(current.y - y) > Math.max(2.5, size * 0.28);
+    if (changedLine) {
+      current = { y, x, size, chunks: [], hasEol: false };
+      lines.push(current);
+    }
+    current.chunks.push({ x, text: item.str });
+    current.size = Math.max(current.size, size);
+    current.hasEol ||= Boolean(item.hasEOL);
+    if (item.hasEOL) current = null;
   }
-  return lines
-    .sort((a, b) => b.y - a.y)
-    .map((line) => line.items.sort((a, b) => a.x - b.x).map((item) => item.text).join(" "))
-    .filter(Boolean);
+  return lines.map((line) => ({
+    ...line,
+    text: line.chunks
+      .sort((a, b) => a.x - b.x)
+      .map((chunk) => chunk.text.trim())
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+([,.;:!?])/g, "$1"),
+  })).filter((line) => line.text);
+}
+
+function reflowBlocks(items) {
+  const lines = reflowLines(items);
+  if (!lines.length) return [];
+  const sizes = lines.map((line) => line.size).sort((a, b) => a - b);
+  const bodySize = sizes[Math.floor(sizes.length / 2)] || 12;
+  const blocks = [];
+  let paragraph = null;
+  const flush = () => {
+    if (paragraph?.text) blocks.push(paragraph);
+    paragraph = null;
+  };
+  lines.forEach((line, index) => {
+    const previous = lines[index - 1];
+    const next = lines[index + 1];
+    const short = line.text.length < 110;
+    const heading = line.size >= bodySize * 1.22 && short;
+    const list = line.text.match(/^([•●▪◦‣·]|[-–—]|\d+[.)]|[a-zA-Z][.)])\s+(.+)/);
+    const gap = previous ? Math.abs(previous.y - line.y) : 0;
+    const paragraphBreak = previous && (gap > Math.max(previous.size, line.size) * 1.75 || Math.abs(line.x - previous.x) > bodySize * 2.4);
+    if (heading) {
+      flush();
+      blocks.push({ type: line.size >= bodySize * 1.65 ? "h2" : "h3", text: line.text });
+      return;
+    }
+    if (list) {
+      flush();
+      const last = blocks.at(-1);
+      if (last?.type === "list") last.items.push(list[2]);
+      else blocks.push({ type: "list", items: [list[2]] });
+      return;
+    }
+    if (!paragraph || paragraphBreak) {
+      flush();
+      paragraph = { type: "p", text: line.text };
+      return;
+    }
+    const joinsWord = paragraph.text.endsWith("-") && /^[a-záéíóúüñ]/i.test(line.text);
+    paragraph.text = joinsWord
+      ? `${paragraph.text.slice(0, -1)}${line.text}`
+      : `${paragraph.text} ${line.text}`;
+    if (!next) flush();
+  });
+  flush();
+  return blocks;
 }
 async function renderReflowPage(page) {
   const reader = $("reflowReader");
   const content = await getCachedTextContent(page);
-  const lines = reflowParagraphs(content.items);
-  if (!lines.length) {
-    reader.innerHTML = "<p>Esta página no contiene texto extraíble, así que no se puede maquetar.</p>";
+  const blocks = reflowBlocks(content.items);
+  if (!blocks.length) {
+    reader.innerHTML = '<div class="reflow-empty"><strong>Esta página no contiene texto extraíble.</strong><p>Puedes volver a PDF para conservar la composición original.</p></div>';
     return;
   }
-  reader.replaceChildren(
-    ...lines.map((line) => {
-      const paragraph = document.createElement("p");
-      paragraph.textContent = line;
-      return paragraph;
-    }),
-  );
+  const fragment = document.createDocumentFragment();
+  const marker = document.createElement("div");
+  marker.className = "reflow-page-marker";
+  marker.innerHTML = `<span>Página</span><strong>${currentPage}</strong><small>de ${pdfDoc.numPages}</small>`;
+  fragment.append(marker);
+  blocks.forEach((block) => {
+    if (block.type === "list") {
+      const list = document.createElement("ul");
+      block.items.forEach((text) => {
+        const item = document.createElement("li");
+        item.textContent = text;
+        list.append(item);
+      });
+      fragment.append(list);
+      return;
+    }
+    const element = document.createElement(block.type);
+    element.textContent = block.text;
+    fragment.append(element);
+  });
+  reader.replaceChildren(fragment);
 }
 function prefetchAdjacentPages(pageNumber) {
   if (!pdfDoc) return;
@@ -2954,35 +3033,65 @@ function applyReflowPreferences() {
   const size = Number(localStorage.getItem("paper.reflow-size") || 20);
   const spacing = localStorage.getItem("paper.reflow-spacing") || "normal";
   const font = localStorage.getItem("paper.reflow-font") || "sans";
-  const columns = localStorage.getItem("paper.reflow-columns") || "1";
+  const columns = localStorage.getItem("paper.reflow-columns") || "auto";
+  const width = localStorage.getItem("paper.reflow-width") || "normal";
+  const tracking = localStorage.getItem("paper.reflow-tracking") || "normal";
+  const alignment = localStorage.getItem("paper.reflow-alignment") || "left";
+  const theme = localStorage.getItem("paper.reflow-theme") || "paper";
   reader.style.setProperty("--reflow-size", `${size}px`);
   reader.style.setProperty("--reflow-leading", spacing === "compact" ? "1.35" : spacing === "relaxed" ? "1.95" : "1.65");
-  reader.classList.toggle("font-serif", font === "serif");
-  reader.classList.toggle("font-mono", font === "mono");
-  reader.classList.toggle("columns-2", columns === "2");
+  reader.style.setProperty("--reflow-width", ({ narrow: "680px", normal: "840px", wide: "1040px", fluid: "1280px" })[width] || "840px");
+  reader.style.setProperty("--reflow-tracking", tracking === "open" ? ".025em" : "normal");
+  reader.classList.remove("font-serif", "font-humanist", "font-mono", "columns-1", "columns-2", "columns-auto", "align-justify");
+  if (font !== "sans") reader.classList.add(`font-${font}`);
+  reader.classList.add(`columns-${columns}`);
+  reader.classList.toggle("align-justify", alignment === "justify");
+  reader.dataset.readerTheme = theme;
   $("reflowFont").value = font;
+  $("reflowSize").value = String(size);
+  $("reflowSizeOutput").textContent = `${size}px`;
   document.querySelectorAll("[data-reflow-spacing]").forEach((button) => button.classList.toggle("active", button.dataset.reflowSpacing === spacing));
   document.querySelectorAll("[data-reflow-columns]").forEach((button) => button.classList.toggle("active", button.dataset.reflowColumns === columns));
+  document.querySelectorAll("[data-reflow-width]").forEach((button) => button.classList.toggle("active", button.dataset.reflowWidth === width));
+  document.querySelectorAll("[data-reflow-tracking]").forEach((button) => button.classList.toggle("active", button.dataset.reflowTracking === tracking));
+  document.querySelectorAll("[data-reflow-alignment]").forEach((button) => button.classList.toggle("active", button.dataset.reflowAlignment === alignment));
+  document.querySelectorAll("[data-reflow-theme]").forEach((button) => button.classList.toggle("active", button.dataset.reflowTheme === theme));
 }
 async function setReadingMode(mode) {
   reflowMode = mode === "reflow";
   localStorage.setItem("paper.reading-mode", mode);
+  document.body.classList.toggle("reflow-mode", reflowMode);
+  $("markerModeBtn").disabled = reflowMode;
+  $("eraserModeBtn").disabled = reflowMode;
   $("reflowControls").hidden = !reflowMode;
   document.querySelectorAll("[data-reading-mode]").forEach((button) => button.classList.toggle("active", button.dataset.readingMode === mode));
   if (reflowMode) applyReflowPreferences();
   if (pdfDoc) await renderPage(currentPage);
-  if (reflowMode) toast("Modo lectura: texto recompuesto de la página actual.");
+  if (reflowMode) {
+    $("inkStrip")?.setAttribute("hidden", "");
+    $("inkColorCard")?.setAttribute("hidden", "");
+    document.body.classList.remove("ink-toolbar-open");
+    toast("Modo Lectura activado");
+  }
 }
 function buildReflowControls() {
   const popover = $("appearancePopover");
   if (!popover || $("reflowControls")) return;
-  popover.insertAdjacentHTML("beforeend", `<div class="label">Modo</div><div class="tool-row"><button class="btn" data-reading-mode="pdf">PDF</button><button class="btn" data-reading-mode="reflow">Lectura</button></div><div class="reflow-controls" id="reflowControls" hidden><div class="label">Fuente y tamaño</div><div class="tool-row"><select class="field" id="reflowFont"><option value="sans">Sans</option><option value="serif">Serif</option><option value="mono">Mono</option></select><button class="btn" id="reflowSmaller">A−</button><button class="btn" id="reflowLarger">A+</button></div><div class="label">Espaciado</div><div class="tool-row"><button class="btn" data-reflow-spacing="compact">Compacto</button><button class="btn" data-reflow-spacing="normal">Normal</button><button class="btn" data-reflow-spacing="relaxed">Amplio</button></div><div class="label">Columnas</div><div class="tool-row"><button class="btn" data-reflow-columns="1">Una</button><button class="btn" data-reflow-columns="2">Dos</button></div></div>`);
+  popover.insertAdjacentHTML("beforeend", `<div class="label">Modo</div><div class="tool-row reading-mode-switch" role="group" aria-label="Modo de visualización"><button class="btn" data-reading-mode="pdf">PDF original</button><button class="btn" data-reading-mode="reflow">Lectura</button></div><div class="reflow-controls" id="reflowControls" hidden><div class="reflow-control-head"><strong>Maquetación de lectura</strong><small>El texto se adapta sin modificar el PDF.</small></div><div class="label">Tipografía</div><select class="field" id="reflowFont" aria-label="Fuente de lectura"><option value="sans">Sistema</option><option value="serif">Serif editorial</option><option value="humanist">Humanista accesible</option><option value="mono">Monoespaciada</option></select><label class="reflow-slider"><span>Tamaño <output id="reflowSizeOutput">20px</output></span><input id="reflowSize" type="range" min="14" max="36" step="1" value="20"></label><div class="label">Interlineado</div><div class="tool-row"><button class="btn" data-reflow-spacing="compact">Compacto</button><button class="btn" data-reflow-spacing="normal">Normal</button><button class="btn" data-reflow-spacing="relaxed">Amplio</button></div><div class="label">Ancho de lectura</div><div class="tool-row reflow-four"><button class="btn" data-reflow-width="narrow">Estrecho</button><button class="btn" data-reflow-width="normal">Normal</button><button class="btn" data-reflow-width="wide">Amplio</button><button class="btn" data-reflow-width="fluid">Fluido</button></div><div class="label">Columnas</div><div class="tool-row"><button class="btn" data-reflow-columns="auto">Auto</button><button class="btn" data-reflow-columns="1">Una</button><button class="btn" data-reflow-columns="2">Dos</button></div><div class="label">Texto</div><div class="tool-row"><button class="btn" data-reflow-alignment="left">Izquierda</button><button class="btn" data-reflow-alignment="justify">Justificado</button><button class="btn" data-reflow-tracking="normal">Natural</button><button class="btn" data-reflow-tracking="open">Abierto</button></div><div class="label">Papel de lectura</div><div class="reflow-themes"><button data-reflow-theme="paper" aria-label="Blanco"></button><button data-reflow-theme="warm" aria-label="Cálido"></button><button data-reflow-theme="sepia" aria-label="Sepia"></button><button data-reflow-theme="gray" aria-label="Gris"></button><button data-reflow-theme="night" aria-label="Noche"></button></div><button class="btn reflow-reset" id="reflowReset">Restablecer lectura</button></div>`);
   document.querySelectorAll("[data-reading-mode]").forEach((button) => (button.onclick = () => setReadingMode(button.dataset.readingMode)));
   $("reflowFont").onchange = (event) => { localStorage.setItem("paper.reflow-font", event.target.value); applyReflowPreferences(); };
-  $("reflowSmaller").onclick = () => { localStorage.setItem("paper.reflow-size", Math.max(14, Number(localStorage.getItem("paper.reflow-size") || 20) - 1)); applyReflowPreferences(); };
-  $("reflowLarger").onclick = () => { localStorage.setItem("paper.reflow-size", Math.min(34, Number(localStorage.getItem("paper.reflow-size") || 20) + 1)); applyReflowPreferences(); };
+  $("reflowSize").oninput = (event) => { localStorage.setItem("paper.reflow-size", event.target.value); applyReflowPreferences(); };
   document.querySelectorAll("[data-reflow-spacing]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-spacing", button.dataset.reflowSpacing); applyReflowPreferences(); }));
   document.querySelectorAll("[data-reflow-columns]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-columns", button.dataset.reflowColumns); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-width]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-width", button.dataset.reflowWidth); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-tracking]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-tracking", button.dataset.reflowTracking); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-alignment]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-alignment", button.dataset.reflowAlignment); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-theme]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-theme", button.dataset.reflowTheme); applyReflowPreferences(); }));
+  $("reflowReset").onclick = () => {
+    ["size", "spacing", "font", "columns", "width", "tracking", "alignment", "theme"].forEach((name) => localStorage.removeItem(`paper.reflow-${name}`));
+    applyReflowPreferences();
+    toast("Preferencias de lectura restablecidas");
+  };
 }
 function pageColorStorageKey() {
   return currentBook ? key(currentBook.id, `page-color-${currentPage}`) : "paper.page-color";
@@ -3423,11 +3532,22 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "ArrowLeft" || e.key === "PageUp") renderPage(currentPage - 1);
   if (e.key === "Home") renderPage(1);
   if (e.key === "End" && pdfDoc) renderPage(pdfDoc.numPages);
-  if (e.key === "+" || e.key === "=") zoom(ZOOM_STEP);
-  if (e.key === "-") zoom(-ZOOM_STEP);
+  if (e.key === "+" || e.key === "=") {
+    if (reflowMode) {
+      localStorage.setItem("paper.reflow-size", Math.min(36, Number(localStorage.getItem("paper.reflow-size") || 20) + 1));
+      applyReflowPreferences();
+    } else zoom(ZOOM_STEP);
+  }
+  if (e.key === "-") {
+    if (reflowMode) {
+      localStorage.setItem("paper.reflow-size", Math.max(14, Number(localStorage.getItem("paper.reflow-size") || 20) - 1));
+      applyReflowPreferences();
+    } else zoom(-ZOOM_STEP);
+  }
   if (e.key === "b" || e.key === "B") toggleBookmark();
   if (e.key === "r" || e.key === "R") $("rotateBtn").click();
   if (e.key === "f" || e.key === "F") toggleFocusMode();
+  if (e.key === "l" || e.key === "L") setReadingMode(reflowMode ? "pdf" : "reflow");
   if (e.key === "s" || e.key === "S") setAnnotationSelectMode();
   if (e.key === "Escape") {
     if (document.body.classList.contains("reader-chrome-hidden") && !fullscreenElement())

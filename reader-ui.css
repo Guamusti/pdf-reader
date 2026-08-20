@@ -940,6 +940,74 @@ body.ink-toolbar-open .toolbar { margin-bottom: 0 !important; }
 .ink-range-control output { color: var(--text); font-variant-numeric: tabular-nums; }
 .ink-range-control input { width: 100%; accent-color: var(--text); }
 
+/* Professional reflow reading mode. */
+body.reflow-mode .viewer { align-items: start; padding-top: clamp(22px,5vh,64px) !important; }
+body.reflow-mode .canvas-wrap { display: none !important; }
+body.reflow-mode #markerModeBtn, body.reflow-mode #eraserModeBtn { opacity: .38; }
+.reflow-reader {
+  width: min(var(--reflow-width,840px),100%) !important;
+  max-width: var(--reflow-width,840px) !important;
+  min-height: calc(100dvh - var(--paper-topbar) - 130px);
+  padding: clamp(34px,6vw,82px) !important;
+  border: 1px solid color-mix(in srgb,currentColor 12%,transparent) !important;
+  border-radius: 8px !important;
+  background: #fff !important;
+  color: #151515;
+  font-size: var(--reflow-size,20px) !important;
+  line-height: var(--reflow-leading,1.65) !important;
+  letter-spacing: var(--reflow-tracking,normal);
+  text-rendering: optimizeLegibility;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+.reflow-reader.font-serif { font-family: Charter,Georgia,"Times New Roman",serif !important; }
+.reflow-reader.font-humanist { font-family: "Trebuchet MS",Verdana,"Segoe UI",sans-serif !important; }
+.reflow-reader.font-mono { font-family: "SFMono-Regular",Consolas,monospace !important; font-size: calc(var(--reflow-size,20px) * .88) !important; }
+.reflow-reader.align-justify p { text-align: justify; text-justify: inter-word; }
+.reflow-reader.columns-1 { column-count: 1; }
+.reflow-reader.columns-2 { column-count: 2; column-gap: clamp(42px,6vw,76px); column-rule: 1px solid rgba(0,0,0,.1); }
+.reflow-reader h2,.reflow-reader h3 { break-after: avoid; break-inside: avoid; font-family: inherit; line-height: 1.16; letter-spacing: -.035em; }
+.reflow-reader h2 { margin: 1.7em 0 .65em; font-size: 1.7em; }
+.reflow-reader h3 { margin: 1.45em 0 .55em; font-size: 1.25em; }
+.reflow-reader p { margin: 0 0 1.15em; orphans: 3; widows: 3; }
+.reflow-reader ul { margin: 0 0 1.3em; padding-left: 1.25em; break-inside: avoid; }
+.reflow-reader li + li { margin-top: .45em; }
+.reflow-page-marker { display: flex; align-items: baseline; gap: 7px; margin-bottom: 2.4em; padding-bottom: 12px; border-bottom: 1px solid currentColor; column-span: all; font-size: 11px; letter-spacing: .11em; text-transform: uppercase; opacity: .62; }
+.reflow-page-marker strong { font-size: 18px; letter-spacing: -.03em; }
+.reflow-page-marker small { margin-left: auto; }
+.reflow-empty { display: grid; place-items: center; min-height: 45vh; text-align: center; }
+.reflow-empty p { color: inherit; opacity: .62; font-size: .8em; }
+.reflow-reader[data-reader-theme="warm"] { background: #f8f4e9 !important; color: #201d18; }
+.reflow-reader[data-reader-theme="sepia"] { background: #eadcbf !important; color: #33291d; }
+.reflow-reader[data-reader-theme="gray"] { background: #dfe1e2 !important; color: #17191a; }
+.reflow-reader[data-reader-theme="night"] { background: #111 !important; color: #f2f2f2; border-color: #333 !important; box-shadow: 0 18px 60px rgba(0,0,0,.42) !important; }
+.appearance-popover { max-height: calc(100dvh - 78px); overflow-y: auto; }
+.reflow-control-head { margin: 16px 0 10px; padding: 12px; border-radius: 10px; background: var(--soft); }
+.reflow-control-head strong,.reflow-control-head small { display: block; }
+.reflow-control-head strong { font-size: 12px; }
+.reflow-control-head small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.reflow-controls > .field { width: 100%; }
+.reflow-slider { display: grid; gap: 7px; margin-top: 11px; color: var(--muted); font-size: 10px; }
+.reflow-slider span { display: flex; justify-content: space-between; }
+.reflow-slider output { color: var(--text); font-variant-numeric: tabular-nums; }
+.reflow-slider input { width: 100%; accent-color: var(--text); }
+.reflow-four .btn { min-width: 0; padding-inline: 5px !important; font-size: 9px !important; }
+.reflow-themes { display: grid; grid-template-columns: repeat(5,1fr); gap: 7px; padding: 8px; border-radius: 11px; background: var(--soft); }
+.reflow-themes button { aspect-ratio: 1; max-height: 34px; border: 1px solid var(--line); border-radius: 50%; cursor: pointer; }
+.reflow-themes button.active { outline: 2px solid var(--text); outline-offset: 2px; }
+.reflow-themes [data-reflow-theme="paper"] { background: #fff; }
+.reflow-themes [data-reflow-theme="warm"] { background: #f8f4e9; }
+.reflow-themes [data-reflow-theme="sepia"] { background: #eadcbf; }
+.reflow-themes [data-reflow-theme="gray"] { background: #dfe1e2; }
+.reflow-themes [data-reflow-theme="night"] { background: #111; }
+.reflow-reset { width: 100%; margin-top: 13px; }
+@media (min-width: 1200px) { .reflow-reader.columns-auto { column-count: 2; column-gap: clamp(42px,6vw,76px); column-rule: 1px solid rgba(0,0,0,.1); } }
+@media (max-width: 800px) {
+  .reflow-reader.columns-2,.reflow-reader.columns-auto { column-count: 1; column-rule: 0; }
+  .reflow-reader { min-height: calc(100dvh - 130px); padding: 28px 22px !important; border-radius: 0 !important; }
+  body.reflow-mode .viewer { padding-inline: 0 !important; }
+}
+
 /* Reading dock and page previews follow the same island geometry. */
 .footer {
   grid-template-columns: auto minmax(150px,1fr) auto !important;
