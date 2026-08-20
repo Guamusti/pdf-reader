@@ -1365,8 +1365,7 @@ function cropPdfCapture(a, b) {
     .drawImage(source, sx, sy, sw, sh, 0, 0, out.width, out.height);
   aiImage = out.toDataURL("image/jpeg", 0.9);
   closeCapture();
-  $("captureBtn").classList.add("assistant-on");
-  $("captureBtn").textContent = "✦ On";
+  setAssistantButton(true);
   openAiAssistant(true);
 }
 
@@ -1403,6 +1402,13 @@ function aiStatus(message) {
   status.style.setProperty("--ai-progress", `${Math.min(100, Number(percent || 0))}%`);
   $("aiCard")?.classList.toggle("ai-busy", loading);
   $("aiCard")?.setAttribute("aria-busy", String(loading));
+}
+function setAssistantButton(active) {
+  const button = $("captureBtn");
+  button.classList.toggle("assistant-on", active);
+  button.innerHTML = active
+    ? '✦ <span>Activo</span>'
+    : '✦ <span>Asistente</span>';
 }
 function formatAiAnswer(text) {
   const escaped = escapeHtml(text).replace(
@@ -1552,8 +1558,7 @@ async function openAiAssistantLegacy(fromCapture = false) {
 function closeAiAssistant() {
   aiAbortController?.abort();
   $("aiPanel").hidden = true;
-  $("captureBtn").classList.remove("assistant-on");
-  $("captureBtn").textContent = "✦";
+  setAssistantButton(false);
 }
 async function openAssistantForDocument() {
   if (!currentBook) return toast("Abre un documento primero");
@@ -1567,8 +1572,7 @@ async function openAssistantForDocument() {
   $("aiImagePreview").hidden = true;
   $("aiQuestion").placeholder = "Pregunta sobre este documento…";
   $("aiPanel").hidden = false;
-  $("captureBtn").classList.add("assistant-on");
-  $("captureBtn").textContent = "✦ On";
+  setAssistantButton(true);
   aiStatus("Comprobando la IA local de este dispositivo…");
   $("aiQuestion").focus();
   const capability = await inspectAiCapability();
@@ -2145,6 +2149,15 @@ function toggleSidebar() {
   }
   document.body.classList.toggle("sidebar-collapsed");
 }
+function setSidebarPanel(panel) {
+  const notes = panel === "notes";
+  $("sidebarContentsPanel").hidden = notes;
+  $("sidebarNotesPanel").hidden = !notes;
+  $("sidebarContentsTab").classList.toggle("active", !notes);
+  $("sidebarNotesTab").classList.toggle("active", notes);
+  $("sidebarContentsTab").setAttribute("aria-selected", String(!notes));
+  $("sidebarNotesTab").setAttribute("aria-selected", String(notes));
+}
 $("fileInput").onchange = (e) => addFile(e.target.files?.[0]);
 $("prevBtn").onclick = () => renderPage(currentPage - 1);
 $("nextBtn").onclick = () => renderPage(currentPage + 1);
@@ -2175,6 +2188,8 @@ function setTheme(theme) {
 $("themeSelect").onchange = (e) => setTheme(e.target.value);
 $("appearanceTheme").onchange = (e) => setTheme(e.target.value);
 $("openSidebar").onclick = toggleSidebar;
+$("sidebarContentsTab").onclick = () => setSidebarPanel("contents");
+$("sidebarNotesTab").onclick = () => setSidebarPanel("notes");
 $("closeSidebar").onclick = () => {
   if (window.innerWidth < 900) document.body.classList.remove("sidebar-open");
   else document.body.classList.add("sidebar-collapsed");
@@ -2550,7 +2565,7 @@ function configureFooterIsland() {
   collapse.title = "Contraer navegador de páginas";
   collapse.setAttribute("aria-label", collapse.title);
   collapse.textContent = "⌄";
-  footer.append(collapse);
+  (footer.querySelector(".right") || footer).append(collapse);
   const setMinimized = (minimized) => {
     footer.classList.toggle("footer-minimized", minimized);
     localStorage.setItem("paper.footer-minimized", String(minimized));
@@ -2782,6 +2797,10 @@ window.addEventListener("resize", () => {
 });
 
 (async function init() {
+  if (localStorage.getItem("paper.design-version") !== "4") {
+    localStorage.setItem("paper.design-version", "4");
+    localStorage.setItem("paper.theme", "light");
+  }
   $("toolbarPrev").textContent = "‹";
   $("toolbarNext").textContent = "›";
   $("prevBtn").textContent = "‹";
@@ -2793,7 +2812,7 @@ window.addEventListener("resize", () => {
   configureAiWindow();
   configureFooterIsland();
   configureResponsiveUi();
-  setTheme(localStorage.getItem("paper.theme") || "dark");
+  setTheme(localStorage.getItem("paper.theme") || "light");
   setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
   document.querySelector('[data-color="yellow"]').classList.add("active");
   setInkTool("highlight");
