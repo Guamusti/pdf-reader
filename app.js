@@ -27,6 +27,8 @@ let db = null,
   inkTool = "highlight",
   markerMode = false,
   eraserMode = false,
+  annotationSelectMode = false,
+  selectedAnnotationId = null,
   reflowMode = false,
   captureStart = null,
   aiImage = "",
@@ -56,6 +58,7 @@ let db = null,
 
 let inkStroke = null;
 
+let annotationUndo = [];
 let annotationRedo = [];
 let wheelZoomFrame = 0;
 let wheelZoomDelta = 0;
@@ -74,6 +77,50 @@ const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.15;
 const PAGE_CACHE_LIMIT = 12;
 const TEXT_CACHE_LIMIT = 8;
+const INK_TOOL_LABELS = {
+  pen: "Pluma",
+  highlight: "Marcador",
+  underline: "Subrayador",
+  wavy: "Subrayador ondulado",
+  strike: "Tachado",
+  box: "Recuadro",
+  arrow: "Flecha",
+};
+const DEFAULT_INK_STYLES = {
+  pen: { color: "red", opacity: 0.88, width: 3 },
+  highlight: { color: annotationColor, opacity: inkOpacity, width: inkWidth },
+  underline: { color: "blue", opacity: 0.88, width: 2 },
+  wavy: { color: "red", opacity: 0.88, width: 2 },
+  strike: { color: "red", opacity: 0.88, width: 2 },
+  box: { color: "orange", opacity: 0.88, width: 3 },
+  arrow: { color: "green", opacity: 0.88, width: 3 },
+};
+const storedInkStyles = getJSON("paper.ink-tool-styles", {});
+const inkToolStyles = Object.fromEntries(
+  Object.entries(DEFAULT_INK_STYLES).map(([tool, defaults]) => [
+    tool,
+    { ...defaults, ...(storedInkStyles[tool] || {}) },
+  ]),
+);
+
+function persistInkToolStyles() {
+  setJSON("paper.ink-tool-styles", inkToolStyles);
+}
+
+function applyInkToolStyle(tool = inkTool) {
+  const style = inkToolStyles[tool] || DEFAULT_INK_STYLES.highlight;
+  annotationColor = style.color;
+  inkOpacity = Number(style.opacity);
+  inkWidth = Number(style.width);
+  localStorage.setItem("paper.ink-opacity", String(inkOpacity));
+  localStorage.setItem("paper.ink-width", String(inkWidth));
+}
+
+function updateCurrentInkToolStyle(patch) {
+  inkToolStyles[inkTool] = { ...inkToolStyles[inkTool], ...patch };
+  persistInkToolStyles();
+  applyInkToolStyle();
+}
 
 function toast(msg) {
   const e = $("toast");
@@ -266,6 +313,7 @@ async function openMarkdownStored(rec) {
   resetRenderEngine();
   pdfDoc = null;
   currentBook = rec;
+  resetAnnotationHistory();
   currentPage = 1;
   reflowMode = true;
   rec.openedAt = Date.now();
@@ -315,6 +363,7 @@ async function openStored(id) {
     rec.openedAt = Date.now();
     await dbPut(rec);
     currentBook = rec;
+    resetAnnotationHistory();
     resetThumbnails();
     searchQuery = "";
     searchMatches = [];
@@ -441,6 +490,10 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
     } catch {}
   }
   hideAnnotationActions();
+  if (num !== previousPage && selectedAnnotationId) {
+    selectedAnnotationId = null;
+    $("annotationEditor").hidden = true;
+  }
   currentPage = Math.max(1, Math.min(pdfDoc.numPages, num));
   if (currentPage !== previousPage) navigationDirection = currentPage > previousPage ? 1 : -1;
   updatePageColor();
@@ -905,6 +958,8 @@ function downloadText(name, text, type) {
 function exportAnnotations() {
   if (!currentBook) return toast("Abre un PDF primero");
   const data = {
+    schema: "paper-annotations",
+    version: 2,
     document: currentBook.name,
     exportedAt: new Date().toISOString(),
     annotations: annotations(),
@@ -926,7 +981,7 @@ function exportMarkdown() {
   ];
   for (const mark of annotations().sort((a, b) => a.page - b.page)) {
     lines.push(
-      `## Página ${mark.page} · ${mark.type === "note" ? "Nota" : mark.type === "underline" ? "Subrayado" : "Resaltado"}`,
+      `## Página ${mark.page} · ${annotationLabel(mark.type)}`,
       mark.text ? `> ${mark.text}` : "> Fragmento sin texto disponible",
       mark.note ? `\n${mark.note}` : "",
       "",
@@ -940,11 +995,191 @@ function exportMarkdown() {
   toast("Markdown exportado");
 }
 
+const SUPPORTED_ANNOTATION_TYPES = new Set(["highlight", "underline", "wavy", "strike", "note", "pen", "box", "arrow"]);
+const ANNOTATION_COLORS = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
+function clampUnit(value) {
+  return Math.max(0, Math.min(1, Number(value)));
+}
+function normalizeAnnotationRect(rect) {
+  if (!rect || ![rect.x, rect.y, rect.w, rect.h].every(Number.isFinite)) return null;
+  const x = clampUnit(rect.x), y = clampUnit(rect.y);
+  const w = Math.max(0, Math.min(1 - x, Number(rect.w)));
+  const h = Math.max(0, Math.min(1 - y, Number(rect.h)));
+  return w > 0.0005 && h > 0.0005 ? { x, y, w, h } : null;
+}
+function normalizeAnnotationPoint(point) {
+  if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+  return { x: clampUnit(point.x), y: clampUnit(point.y) };
+}
+function normalizeImportedAnnotation(mark) {
+  if (!mark || !SUPPORTED_ANNOTATION_TYPES.has(mark.type)) return null;
+  const page = Math.trunc(Number(mark.page));
+  if (!pdfDoc || page < 1 || page > pdfDoc.numPages) return null;
+  const rects = Array.isArray(mark.rects) ? mark.rects.map(normalizeAnnotationRect).filter(Boolean) : [];
+  const points = Array.isArray(mark.points) ? mark.points.map(normalizeAnnotationPoint).filter(Boolean) : [];
+  if (!rects.length && points.length < 2) return null;
+  return {
+    id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+    page,
+    type: mark.type,
+    color: ANNOTATION_COLORS.includes(mark.color) ? mark.color : "yellow",
+    opacity: Math.max(.1, Math.min(1, Number(mark.opacity) || .48)),
+    width: Math.max(1, Math.min(12, Number(mark.width) || 2)),
+    text: String(mark.text || "").slice(0, 1000),
+    note: String(mark.note || "").slice(0, 2000),
+    rects,
+    ...(points.length >= 2 ? { points } : {}),
+    sourceId: mark.sourceId ? String(mark.sourceId) : undefined,
+    createdAt: Number(mark.createdAt) || Date.now(),
+  };
+}
+async function importAnnotationBackup(file) {
+  if (!currentBook || !pdfDoc) return toast("Abre el PDF de destino primero");
+  try {
+    const data = JSON.parse(await file.text());
+    if (!Array.isArray(data?.annotations)) throw new Error("Formato no compatible");
+    const imported = data.annotations.map(normalizeImportedAnnotation).filter(Boolean);
+    if (!imported.length) throw new Error("No contiene anotaciones compatibles");
+    commitAnnotations([...annotations(), ...imported]);
+    renderAnnotations();
+    renderAnnotationList();
+    toast(`${imported.length} anotación${imported.length === 1 ? " importada" : "es importadas"}`);
+  } catch (error) {
+    console.error("No se pudieron importar las anotaciones", error);
+    toast("El archivo de anotaciones no es válido");
+  }
+}
+function nearestAnnotationColor(rgb) {
+  const palette = {
+    yellow: [255, 193, 7], green: [46, 160, 88], blue: [47, 112, 224], pink: [229, 72, 134],
+    orange: [239, 123, 38], purple: [137, 74, 204], red: [218, 64, 64],
+  };
+  const values = Array.from(rgb || []);
+  if (values.length < 3) return "yellow";
+  const normalized = values.slice(0, 3).map((value) => value <= 1 ? value * 255 : value);
+  return Object.entries(palette).sort(([, a], [, b]) =>
+    a.reduce((sum, value, index) => sum + (value - normalized[index]) ** 2, 0) -
+    b.reduce((sum, value, index) => sum + (value - normalized[index]) ** 2, 0),
+  )[0][0];
+}
+function pdfRectToNormalized(rect, viewport) {
+  if (!Array.isArray(rect) && !(rect instanceof Float32Array)) return null;
+  const converted = viewport.convertToViewportRectangle(Array.from(rect));
+  const left = Math.min(converted[0], converted[2]), top = Math.min(converted[1], converted[3]);
+  return normalizeAnnotationRect({
+    x: left / viewport.width,
+    y: top / viewport.height,
+    w: Math.abs(converted[2] - converted[0]) / viewport.width,
+    h: Math.abs(converted[3] - converted[1]) / viewport.height,
+  });
+}
+function pdfQuadRects(quadPoints, viewport) {
+  const raw = Array.from(quadPoints || []);
+  if (!raw.length) return [];
+  const coordinates = typeof raw[0] === "object"
+    ? raw.flatMap((point) => [point.x, point.y])
+    : raw;
+  const rects = [];
+  for (let index = 0; index + 7 < coordinates.length; index += 8) {
+    const points = [];
+    for (let offset = 0; offset < 8; offset += 2)
+      points.push(viewport.convertToViewportPoint(coordinates[index + offset], coordinates[index + offset + 1]));
+    const xs = points.map((point) => point[0]), ys = points.map((point) => point[1]);
+    const rect = normalizeAnnotationRect({
+      x: Math.min(...xs) / viewport.width,
+      y: Math.min(...ys) / viewport.height,
+      w: (Math.max(...xs) - Math.min(...xs)) / viewport.width,
+      h: (Math.max(...ys) - Math.min(...ys)) / viewport.height,
+    });
+    if (rect) rects.push(rect);
+  }
+  return rects;
+}
+async function importEmbeddedPdfAnnotations() {
+  if (!pdfDoc || !currentBook || currentBook.kind === "markdown") return toast("Abre un PDF primero");
+  const existingSources = new Set(annotations().map((mark) => mark.sourceId).filter(Boolean));
+  const imported = [];
+  showLoader(true, "Importando anotaciones…", "Analizando el documento");
+  try {
+    for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber++) {
+      $("loaderText").textContent = `Página ${pageNumber} de ${pdfDoc.numPages}`;
+      const page = await getCachedPage(pageNumber);
+      const viewport = page.getViewport({ scale: 1, rotation });
+      const embedded = await page.getAnnotations({ intent: "display" });
+      embedded.forEach((annotation, annotationIndex) => {
+        const type = ({ Highlight: "highlight", Underline: "underline", Squiggly: "wavy", StrikeOut: "strike", Text: "note", Ink: "pen" })[annotation.subtype];
+        if (!type) return;
+        const baseSource = `pdf:${pageNumber}:${annotation.id || annotationIndex}`;
+        const color = nearestAnnotationColor(annotation.color);
+        const note = annotation.contentsObj?.str || annotation.contents || "";
+        if (type === "pen" && Array.isArray(annotation.inkLists)) {
+          annotation.inkLists.forEach((stroke, strokeIndex) => {
+            const sourceId = `${baseSource}:${strokeIndex}`;
+            if (existingSources.has(sourceId)) return;
+            const rawStroke = Array.from(stroke || []);
+            const sourcePoints = typeof rawStroke[0] === "number"
+              ? Array.from({ length: Math.floor(rawStroke.length / 2) }, (_, index) => [rawStroke[index * 2], rawStroke[index * 2 + 1]])
+              : rawStroke;
+            const points = sourcePoints.map((point) => {
+              const x = Array.isArray(point) ? point[0] : point?.x;
+              const y = Array.isArray(point) ? point[1] : point?.y;
+              if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+              const converted = viewport.convertToViewportPoint(x, y);
+              return normalizeAnnotationPoint({ x: converted[0] / viewport.width, y: converted[1] / viewport.height });
+            }).filter(Boolean);
+            if (points.length < 2) return;
+            imported.push({ id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, page: pageNumber, type, color, opacity: annotation.opacity || .82, width: annotation.borderStyle?.width || 2, text: "", note: String(note).slice(0, 2000), rects: [], points, sourceId, createdAt: Date.now() });
+            existingSources.add(sourceId);
+          });
+          return;
+        }
+        const sourceId = baseSource;
+        if (existingSources.has(sourceId)) return;
+        const rects = pdfQuadRects(annotation.quadPoints, viewport);
+        const fallbackRect = pdfRectToNormalized(annotation.rect, viewport);
+        if (!rects.length && fallbackRect) rects.push(fallbackRect);
+        if (!rects.length) return;
+        imported.push({ id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, page: pageNumber, type, color, opacity: annotation.opacity || .48, width: annotation.borderStyle?.width || 2, text: "", note: String(note).slice(0, 2000), rects, sourceId, createdAt: Date.now() });
+        existingSources.add(sourceId);
+      });
+      if (pageNumber % 12 === 0) await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    if (!imported.length) return toast("No se encontraron anotaciones nuevas en el PDF");
+    commitAnnotations([...annotations(), ...imported]);
+    renderAnnotations();
+    renderAnnotationList();
+    toast(`${imported.length} anotación${imported.length === 1 ? " importada" : "es importadas"} desde el PDF`);
+  } catch (error) {
+    console.error("No se pudieron importar las anotaciones del PDF", error);
+    toast("No se pudieron importar las anotaciones del PDF");
+  } finally {
+    showLoader(false);
+  }
+}
+
 function annotations() {
   return currentBook ? getJSON(key(currentBook.id, "annotations"), []) : [];
 }
 function setAnnotations(items) {
   if (currentBook) setJSON(key(currentBook.id, "annotations"), items);
+}
+function resetAnnotationHistory() {
+  annotationUndo = [];
+  annotationRedo = [];
+  annotationSelectMode = false;
+  selectedAnnotationId = null;
+  document.body.classList.remove("annotation-select-mode");
+  $("annotationEditor").hidden = true;
+  $("inkStrip")?.querySelector("[data-strip-select]")?.classList.remove("active");
+}
+function commitAnnotations(items, record = true) {
+  if (!currentBook) return;
+  if (record) {
+    annotationUndo.push(structuredClone(annotations()));
+    if (annotationUndo.length > 50) annotationUndo.shift();
+    annotationRedo = [];
+  }
+  setAnnotations(items);
 }
 function annotationStyle(color, opacity) {
   const rgb = {
@@ -976,6 +1211,98 @@ function annotationLabel(type) {
           ? "Tachado"
           : "Resaltado";
 }
+function closeAnnotationEditor() {
+  const hadSelection = Boolean(selectedAnnotationId);
+  selectedAnnotationId = null;
+  $("annotationEditor").hidden = true;
+  if (hadSelection) {
+    renderAnnotations();
+    renderAnnotationList();
+  }
+}
+function setAnnotationSelectMode(force) {
+  const next = typeof force === "boolean" ? force : !annotationSelectMode;
+  if (next && markerMode) toggleMarkerMode();
+  if (next && eraserMode) toggleEraserMode(false);
+  annotationSelectMode = next;
+  document.body.classList.toggle("annotation-select-mode", annotationSelectMode);
+  $("inkStrip")?.querySelector("[data-strip-select]")?.classList.toggle("active", annotationSelectMode);
+  if (!annotationSelectMode) closeAnnotationEditor();
+  toast(annotationSelectMode ? "Selecciona una anotación para editarla" : "Edición de anotaciones desactivada");
+}
+function updateAnnotation(id, patch, record = true) {
+  const items = annotations();
+  const index = items.findIndex((mark) => mark.id === id);
+  if (index < 0) return false;
+  const changed = Object.entries(patch).some(([property, value]) =>
+    JSON.stringify(items[index][property] ?? null) !== JSON.stringify(value ?? null),
+  );
+  if (!changed) return false;
+  items[index] = { ...items[index], ...patch, updatedAt: Date.now() };
+  commitAnnotations(items, record);
+  renderAnnotations();
+  renderAnnotationList();
+  return true;
+}
+function deleteAnnotation(id) {
+  const mark = annotations().find((item) => item.id === id);
+  if (!mark) return;
+  commitAnnotations(annotations().filter((item) => item.id !== id));
+  closeAnnotationEditor();
+  toast("Anotación eliminada");
+}
+function openAnnotationEditor(id, anchorRect = null) {
+  const mark = annotations().find((item) => item.id === id);
+  if (!mark) return;
+  if (!annotationSelectMode) setAnnotationSelectMode(true);
+  selectedAnnotationId = id;
+  renderAnnotations();
+  renderAnnotationList();
+  const editor = $("annotationEditor");
+  const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
+  const textTypes = ["highlight", "underline", "wavy", "strike"];
+  const editableType = textTypes.includes(mark.type);
+  editor.innerHTML = `<header><div><small>Página ${mark.page}</small><strong>${annotationLabel(mark.type)}</strong></div><button class="btn icon" data-editor-close aria-label="Cerrar editor">×</button></header>${editableType ? `<label>Tipo<select class="field" data-editor-type>${textTypes.map((type) => `<option value="${type}"${type === mark.type ? " selected" : ""}>${annotationLabel(type)}</option>`).join("")}</select></label>` : ""}<label>Color<div class="annotation-editor-colors">${colors.map((color) => `<button data-editor-color="${color}" class="${color === (mark.color || "yellow") ? "active" : ""}" style="--swatch:${annotationStyle(color, .9)}" aria-label="${color}"></button>`).join("")}</div></label><label>Opacidad <output data-opacity-output>${Math.round((mark.opacity ?? .48) * 100)}%</output><input type="range" min="10" max="100" value="${Math.round((mark.opacity ?? .48) * 100)}" data-editor-opacity></label>${mark.type !== "highlight" && mark.type !== "note" ? `<label>Grosor <output data-width-output>${mark.width || 2}px</output><input type="range" min="1" max="12" value="${mark.width || 2}" data-editor-width></label>` : ""}<label>Comentario<textarea class="field" data-editor-note placeholder="Añade una nota a esta anotación…">${escapeHtml(mark.note || "")}</textarea></label><footer><button class="btn" data-editor-duplicate>Duplicar</button><button class="btn danger" data-editor-delete>Eliminar</button></footer>`;
+  editor.hidden = false;
+  const width = 310;
+  const left = anchorRect ? anchorRect.right + 10 : window.innerWidth - width - 18;
+  const top = anchorRect ? anchorRect.top : 84;
+  editor.style.left = `${Math.max(10, Math.min(left, window.innerWidth - width - 10))}px`;
+  editor.style.top = `${Math.max(64, Math.min(top, window.innerHeight - editor.offsetHeight - 10))}px`;
+  editor.querySelector("[data-editor-close]").onclick = closeAnnotationEditor;
+  editor.querySelector("[data-editor-delete]").onclick = () => deleteAnnotation(id);
+  editor.querySelector("[data-editor-duplicate]").onclick = () => {
+    const items = annotations();
+    const copy = structuredClone(items.find((item) => item.id === id));
+    if (!copy) return;
+    copy.id = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    copy.createdAt = Date.now();
+    delete copy.sourceId;
+    items.push(copy);
+    commitAnnotations(items);
+    renderAnnotations();
+    renderAnnotationList();
+    toast("Anotación duplicada");
+  };
+  editor.querySelector("[data-editor-type]")?.addEventListener("change", (event) => {
+    if (updateAnnotation(id, { type: event.target.value })) openAnnotationEditor(id, anchorRect);
+  });
+  editor.querySelectorAll("[data-editor-color]").forEach((button) => button.onclick = () => {
+    updateAnnotation(id, { color: button.dataset.editorColor });
+    openAnnotationEditor(id, anchorRect);
+  });
+  const opacity = editor.querySelector("[data-editor-opacity]");
+  opacity.oninput = () => {
+    editor.querySelector("[data-opacity-output]").textContent = `${opacity.value}%`;
+  };
+  opacity.onchange = () => updateAnnotation(id, { opacity: Number(opacity.value) / 100 });
+  const widthInput = editor.querySelector("[data-editor-width]");
+  if (widthInput) {
+    widthInput.oninput = () => editor.querySelector("[data-width-output]").textContent = `${widthInput.value}px`;
+    widthInput.onchange = () => updateAnnotation(id, { width: Number(widthInput.value) });
+  }
+  editor.querySelector("[data-editor-note]").onchange = (event) => updateAnnotation(id, { note: event.target.value.trim().slice(0, 2000) });
+}
 function renderAnnotations() {
   const layer = $("annotationLayer");
   layer.innerHTML = "";
@@ -986,6 +1313,8 @@ function renderAnnotations() {
       svg.setAttribute("viewBox", "0 0 1 1");
       svg.setAttribute("preserveAspectRatio", "none");
       svg.classList.add("annotation-vector");
+      svg.classList.toggle("selected", mark.id === selectedAnnotationId);
+      svg.dataset.annotationId = mark.id;
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", mark.points.map((point, index) => `${index ? "L" : "M"}${point.x} ${point.y}`).join(" "));
       path.setAttribute("fill", "none");
@@ -995,6 +1324,7 @@ function renderAnnotations() {
       path.setAttribute("stroke-linecap", "round");
       path.setAttribute("stroke-linejoin", "round");
       path.dataset.annotationId = mark.id;
+      path.classList.toggle("selected", mark.id === selectedAnnotationId);
       const arrowId = `ink-arrow-${String(mark.id).replace(/[^a-z0-9_-]/gi, "")}`;
       if (mark.type === "arrow") path.setAttribute("marker-end", `url(#${arrowId})`);
       const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
@@ -1006,6 +1336,7 @@ function renderAnnotations() {
     for (const rect of mark.rects) {
       const el = document.createElement("i");
       el.className = `annotation ${mark.type}`;
+      el.classList.toggle("selected", mark.id === selectedAnnotationId);
       el.dataset.annotationId = mark.id;
       el.style.left = `${rect.x * 100}%`;
       el.style.top = `${rect.y * 100}%`;
@@ -1048,7 +1379,7 @@ function renderAnnotationList() {
     ? marks
         .map(
           (mark) =>
-            `<div class="annotation-entry"><button class="bookmark" data-annotation-page="${mark.page}"><strong>${annotationLabel(mark.type)} · página ${mark.page}</strong><small>${escapeHtml(mark.note || mark.text || "Fragmento seleccionado")}</small></button><button class="btn icon annotation-remove" data-remove-annotation="${mark.id}" aria-label="Eliminar anotación">×</button></div>`,
+            `<div class="annotation-entry${mark.id === selectedAnnotationId ? " selected" : ""}"><button class="bookmark" data-annotation-page="${mark.page}" data-annotation-id="${mark.id}"><strong>${annotationLabel(mark.type)} · página ${mark.page}</strong><small>${escapeHtml(mark.note || mark.text || "Fragmento seleccionado")}</small></button><button class="btn icon annotation-remove" data-remove-annotation="${mark.id}" aria-label="Eliminar anotación">×</button></div>`,
         )
         .join("")
     : `<span style="color:var(--muted);font-size:13px">${all.length ? "No hay anotaciones de este tipo." : "Aún no hay anotaciones."}</span>`;
@@ -1056,20 +1387,15 @@ function renderAnnotationList() {
     .querySelectorAll("[data-annotation-page]")
     .forEach(
       (button) =>
-        (button.onclick = () =>
-          renderPage(Number(button.dataset.annotationPage))),
+        (button.onclick = async () => {
+          await renderPage(Number(button.dataset.annotationPage));
+          openAnnotationEditor(button.dataset.annotationId);
+        }),
     );
   document.querySelectorAll("[data-remove-annotation]").forEach(
     (button) =>
       (button.onclick = () => {
-        setAnnotations(
-          annotations().filter(
-            (mark) => mark.id !== button.dataset.removeAnnotation,
-          ),
-        );
-        renderAnnotations();
-        renderAnnotationList();
-        toast("Anotación eliminada");
+        deleteAnnotation(button.dataset.removeAnnotation);
       }),
   );
 }
@@ -1205,8 +1531,7 @@ function saveInkStroke() {
   }
   const items = annotations();
   items.push(mark);
-  annotationRedo = [];
-  setAnnotations(items);
+  commitAnnotations(items);
   inkStroke = null;
   paintLiveStroke();
   renderAnnotations();
@@ -1241,8 +1566,7 @@ function saveAnnotation(type, quiet = false) {
     rects,
     createdAt: Date.now(),
   });
-  annotationRedo = [];
-  setAnnotations(items);
+  commitAnnotations(items);
   window.getSelection().removeAllRanges();
   hideAnnotationActions();
   clearLiveHighlight();
@@ -1261,6 +1585,7 @@ function saveAnnotation(type, quiet = false) {
   return true;
 }
 function toggleMarkerMode() {
+  if (annotationSelectMode) setAnnotationSelectMode(false);
   if (eraserMode) toggleEraserMode(false);
   markerMode = !markerMode;
   document.body.classList.toggle("marker-mode", markerMode);
@@ -1277,10 +1602,11 @@ function toggleMarkerMode() {
 }
 function setInkTool(tool) {
   inkTool = tool;
+  applyInkToolStyle(tool);
   document
     .querySelectorAll("[data-ink-tool]")
     .forEach((button) => button.classList.toggle("active", button.dataset.inkTool === tool));
-  const label = ({ highlight: "Marcador", underline: "Subrayador", wavy: "Subrayador ondulado", strike: "Tachado", pen: "Pluma", box: "Recuadro", arrow: "Flecha" })[tool] || "Ink";
+  const label = INK_TOOL_LABELS[tool] || "Ink";
   $("markerModeBtn").title = `Herramientas Ink · ${label}`;
   $("markerModeBtn").setAttribute("aria-label", $("markerModeBtn").title);
   if (markerMode) toast(`${label} seleccionado`);
@@ -1297,27 +1623,24 @@ function refreshInkPreview() {
 }
 function undoAnnotation() {
   if (!currentBook) return;
-  const items = annotations();
-  let index = -1;
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    if (items[i].page === currentPage) { index = i; break; }
-  }
-  if (index < 0) return toast("No hay anotaciones que deshacer");
-  annotationRedo.push(items.splice(index, 1)[0]);
-  setAnnotations(items);
+  const previous = annotationUndo.pop();
+  if (!previous) return toast("No hay cambios que deshacer");
+  annotationRedo.push(structuredClone(annotations()));
+  setAnnotations(previous);
+  closeAnnotationEditor();
   renderAnnotations();
   renderAnnotationList();
-  toast("Anotación deshecha");
+  toast("Cambio deshecho");
 }
 function redoAnnotation() {
-  const mark = annotationRedo.pop();
-  if (!mark) return toast("No hay anotaciones que rehacer");
-  const items = annotations();
-  items.push(mark);
-  setAnnotations(items);
+  const next = annotationRedo.pop();
+  if (!next) return toast("No hay cambios que rehacer");
+  annotationUndo.push(structuredClone(annotations()));
+  setAnnotations(next);
+  closeAnnotationEditor();
   renderAnnotations();
   renderAnnotationList();
-  toast("Anotación rehecha");
+  toast("Cambio rehecho");
 }
 function buildInkPalette() {
   const popover = $("toolPopover");
@@ -1346,14 +1669,14 @@ function buildInkPalette() {
     strip.id = "inkStrip";
     strip.dataset.activeTool = "Marcador";
     strip.hidden = true;
-    strip.innerHTML = '<div class="ink-strip-inner"><button class="ink-drag-handle" data-strip-drag title="Mover barra Ink" aria-label="Mover barra Ink">⠿</button><button data-strip-tool="pen" title="Pluma libre"><span class="tool-glyph pen-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="highlight" title="Marcador de texto"><span class="tool-glyph marker-glyph">▰</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-tool="box" title="Dibujar recuadro"><span class="tool-glyph">□</span></button><button data-strip-tool="arrow" title="Dibujar flecha"><span class="tool-glyph">↗</span></button><button data-strip-note title="Añadir nota al texto"><span class="tool-glyph note-glyph">T+</span></button><button data-strip-eraser title="Goma: toca una anotación"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Color, opacidad y grosor"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
+    strip.innerHTML = '<div class="ink-strip-inner"><button class="ink-drag-handle" data-strip-drag title="Mover barra Ink" aria-label="Mover barra Ink">⠿</button><button data-strip-select title="Seleccionar y editar anotación" aria-label="Seleccionar anotación">↖</button><button data-strip-tool="pen" title="Pluma libre"><span class="tool-glyph pen-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="highlight" title="Marcador de texto"><span class="tool-glyph marker-glyph">▰</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-tool="box" title="Dibujar recuadro"><span class="tool-glyph">□</span><i class="tool-color"></i></button><button data-strip-tool="arrow" title="Dibujar flecha"><span class="tool-glyph">↗</span><i class="tool-color"></i></button><button data-strip-note title="Añadir nota al texto"><span class="tool-glyph note-glyph">T+</span></button><button data-strip-eraser title="Goma: toca una anotación"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Estilo de la herramienta actual"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
     $("openSidebar").closest(".toolbar").append(strip);
     const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
     const colorCard = document.createElement("div");
     colorCard.className = "ink-color-card";
     colorCard.id = "inkColorCard";
     colorCard.hidden = true;
-    colorCard.innerHTML = `<div class="ink-card-title">Estilo de tinta</div><div class="ink-color-preview"><i></i></div><span class="ink-control-label">Color sólido</span><div class="ink-color-list strong">${colors.map((color) => `<button data-strip-palette="${color}" data-strip-opacity=".88" style="background:${annotationStyle(color, .88)}" aria-label="${color}"></button>`).join("")}</div><span class="ink-control-label">Color translúcido</span><div class="ink-color-list soft">${colors.map((color) => `<button data-strip-palette="${color}" data-strip-opacity=".42" style="background:${annotationStyle(color, .42)}" aria-label="${color} suave"></button>`).join("")}</div><span class="ink-control-label">Grosor del trazo</span><div class="ink-width-list"><button data-ink-width="1"><i></i><span>Fino</span></button><button data-ink-width="3"><i></i><span>Medio</span></button><button data-ink-width="6"><i></i><span>Grueso</span></button></div>`;
+    colorCard.innerHTML = `<div class="ink-card-title">Estilo de tinta</div><div class="ink-color-preview"><i></i></div><span class="ink-control-label">Color sólido</span><div class="ink-color-list strong">${colors.map((color) => `<button data-strip-palette="${color}" data-strip-opacity=".88" style="background:${annotationStyle(color, .88)}" aria-label="${color}"></button>`).join("")}</div><span class="ink-control-label">Color translúcido</span><div class="ink-color-list soft">${colors.map((color) => `<button data-strip-palette="${color}" data-strip-opacity=".42" style="background:${annotationStyle(color, .42)}" aria-label="${color} suave"></button>`).join("")}</div><label class="ink-range-control"><span>Opacidad <output data-ink-opacity-output></output></span><input type="range" min="10" max="100" step="1" data-ink-opacity-range></label><span class="ink-control-label">Grosor del trazo</span><div class="ink-width-list"><button data-ink-width="1"><i></i><span>Fino</span></button><button data-ink-width="3"><i></i><span>Medio</span></button><button data-ink-width="6"><i></i><span>Grueso</span></button></div><label class="ink-range-control"><span>Grosor preciso <output data-ink-width-output></output></span><input type="range" min="1" max="12" step="1" data-ink-width-range></label>`;
     $("openSidebar").closest(".toolbar").append(colorCard);
     const dragHandle = strip.querySelector("[data-strip-drag]");
     let inkDrag = null;
@@ -1365,15 +1688,16 @@ function buildInkPalette() {
         top: Math.max(8, Math.min(top, Math.max(8, window.innerHeight - height - 8))),
       };
     };
-    const positionInkColorCard = () => {
-      if (colorCard.hidden || !strip.classList.contains("ink-positioned")) {
+    const positionInkColorCard = (anchor = strip.querySelector(`[data-strip-tool="${inkTool}"]`)) => {
+      if (colorCard.hidden || !anchor) {
         colorCard.classList.remove("ink-positioned");
         return;
       }
       const stripRect = strip.getBoundingClientRect();
+      const anchorRect = anchor.getBoundingClientRect();
       const width = Math.min(430, window.innerWidth - 24);
       const height = colorCard.offsetHeight || 330;
-      const left = Math.max(12, Math.min(stripRect.left, window.innerWidth - width - 12));
+      const left = Math.max(12, Math.min(anchorRect.left + anchorRect.width / 2 - width / 2, window.innerWidth - width - 12));
       let top = stripRect.bottom + 9;
       if (top + height > window.innerHeight - 12) top = Math.max(12, stripRect.top - height - 9);
       colorCard.style.setProperty("--ink-card-left", `${left}px`);
@@ -1432,26 +1756,54 @@ function buildInkPalette() {
     const updateStrip = () => {
       strip.style.setProperty("--ink-dot", annotationStyle(annotationColor, inkOpacity));
       strip.querySelector(".ink-dot").style.setProperty("--ink-dot", annotationStyle(annotationColor, inkOpacity));
-      strip.querySelectorAll("[data-strip-tool]").forEach((button) => button.classList.toggle("active", button.dataset.stripTool === inkTool && markerMode));
-      strip.dataset.activeTool = ({ pen: "Pluma", highlight: "Marcador", underline: "Subrayado", wavy: "Ondulado", strike: "Tachado", box: "Recuadro", arrow: "Flecha" })[inkTool] || "Ink";
+      strip.querySelectorAll("[data-strip-tool]").forEach((button) => {
+        const style = inkToolStyles[button.dataset.stripTool];
+        const swatch = annotationStyle(style.color, style.opacity);
+        button.style.setProperty("--tool-ink", swatch);
+        button.style.setProperty("--ink-dot", swatch);
+        button.classList.toggle("active", button.dataset.stripTool === inkTool && markerMode);
+      });
+      strip.dataset.activeTool = INK_TOOL_LABELS[inkTool] || "Ink";
     };
-    strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => { setInkTool(button.dataset.stripTool); if (!markerMode) toggleMarkerMode(); updateStrip(); }));
+    const openToolStyle = (button, toggle = false) => {
+      const wasOpen = !colorCard.hidden && colorCard.dataset.tool === inkTool;
+      colorCard.dataset.tool = inkTool;
+      colorCard.hidden = toggle && wasOpen;
+      updateInkColorCard();
+      requestAnimationFrame(() => positionInkColorCard(button));
+    };
+    strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => {
+      const repeated = button.dataset.stripTool === inkTool && markerMode;
+      setInkTool(button.dataset.stripTool);
+      if (!markerMode) toggleMarkerMode();
+      updateStrip();
+      openToolStyle(button, repeated);
+    }));
+    strip.querySelector("[data-strip-select]").onclick = () => setAnnotationSelectMode();
     strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
     strip.querySelector("[data-strip-note]").onclick = () => { if (markerMode) toggleMarkerMode(); toast("Selecciona texto y pulsa Nota en el menú contextual."); };
     strip.querySelector("[data-strip-color]").onclick = () => {
-      colorCard.hidden = !colorCard.hidden;
-      requestAnimationFrame(positionInkColorCard);
+      openToolStyle(strip.querySelector(`[data-strip-tool="${inkTool}"]`), true);
     };
     strip.querySelector("[data-strip-undo]").onclick = undoAnnotation;
     strip.querySelector("[data-strip-redo]").onclick = redoAnnotation;
-    colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => (button.onclick = () => { annotationColor = button.dataset.stripPalette; inkOpacity = Number(button.dataset.stripOpacity); localStorage.setItem("paper.ink-opacity", String(inkOpacity)); refreshInkPreview(); updateStrip(); updateInkColorCard(); syncInkInteractionMode(); toast("Color de tinta actualizado"); }));
-    colorCard.querySelectorAll("[data-ink-width]").forEach((button) => (button.onclick = () => { inkWidth = Number(button.dataset.inkWidth); localStorage.setItem("paper.ink-width", String(inkWidth)); updateInkColorCard(); syncInkInteractionMode(); toast(`Trazo ${inkWidth === 1 ? "fino" : inkWidth === 3 ? "medio" : "grueso"}`); }));
+    colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => (button.onclick = () => { updateCurrentInkToolStyle({ color: button.dataset.stripPalette, opacity: Number(button.dataset.stripOpacity) }); refreshInkPreview(); updateStrip(); updateInkColorCard(); syncInkInteractionMode(); toast(`${INK_TOOL_LABELS[inkTool]} actualizado`); }));
+    colorCard.querySelectorAll("[data-ink-width]").forEach((button) => (button.onclick = () => { updateCurrentInkToolStyle({ width: Number(button.dataset.inkWidth) }); updateStrip(); updateInkColorCard(); syncInkInteractionMode(); toast(`Trazo ${inkWidth === 1 ? "fino" : inkWidth === 3 ? "medio" : "grueso"}`); }));
+    colorCard.querySelector("[data-ink-opacity-range]").oninput = (event) => { updateCurrentInkToolStyle({ opacity: Number(event.target.value) / 100 }); refreshInkPreview(); updateStrip(); updateInkColorCard(); syncInkInteractionMode(); };
+    colorCard.querySelector("[data-ink-width-range]").oninput = (event) => { updateCurrentInkToolStyle({ width: Number(event.target.value) }); updateStrip(); updateInkColorCard(); syncInkInteractionMode(); };
     const updateInkColorCard = () => {
+      colorCard.querySelector(".ink-card-title").textContent = `Estilo · ${INK_TOOL_LABELS[inkTool] || "Ink"}`;
       colorCard.querySelector(".ink-color-preview i").style.setProperty("--ink-card-color", annotationStyle(annotationColor, inkOpacity));
       colorCard.querySelector(".ink-color-preview i").style.height = `${Math.max(3, inkWidth * 2)}px`;
       colorCard.querySelectorAll("[data-strip-palette]").forEach((button) => button.classList.toggle("active", button.dataset.stripPalette === annotationColor && Number(button.dataset.stripOpacity) === inkOpacity));
       colorCard.querySelectorAll("[data-ink-width]").forEach((button) => button.classList.toggle("active", Number(button.dataset.inkWidth) === inkWidth));
+      colorCard.querySelector("[data-ink-opacity-range]").value = String(Math.round(inkOpacity * 100));
+      colorCard.querySelector("[data-ink-opacity-output]").textContent = `${Math.round(inkOpacity * 100)}%`;
+      colorCard.querySelector("[data-ink-width-range]").value = String(inkWidth);
+      colorCard.querySelector("[data-ink-width-output]").textContent = `${inkWidth}px`;
     };
+    applyInkToolStyle();
+    updateStrip();
     updateInkColorCard();
     strip.addEventListener("click", updateInkColorCard);
     strip.querySelector("[data-strip-close]").onclick = () => { strip.hidden = true; colorCard.hidden = true; document.body.classList.remove("ink-toolbar-open"); };
@@ -1474,7 +1826,7 @@ function eraseSelectedAnnotations(quiet = false) {
   );
   const erased = all.length - kept.length;
   if (!erased) return false;
-  setAnnotations(kept);
+  commitAnnotations(kept);
   window.getSelection().removeAllRanges();
   clearLiveHighlight();
   renderAnnotations();
@@ -1484,6 +1836,7 @@ function eraseSelectedAnnotations(quiet = false) {
 }
 function toggleEraserMode(force) {
   eraserMode = typeof force === "boolean" ? force : !eraserMode;
+  if (eraserMode && annotationSelectMode) setAnnotationSelectMode(false);
   if (eraserMode && markerMode) {
     markerMode = false;
     document.body.classList.remove("marker-mode");
@@ -1502,7 +1855,7 @@ function clearPageAnnotations() {
     count = existing.filter((a) => a.page === currentPage).length;
   if (!count) return toast("No hay anotaciones en esta página");
   if (!confirm(`¿Eliminar las ${count} anotaciones de esta página?`)) return;
-  setAnnotations(existing.filter((a) => a.page !== currentPage));
+  commitAnnotations(existing.filter((a) => a.page !== currentPage));
   renderAnnotations();
   renderAnnotationList();
   $("toolPopover").classList.remove("open");
@@ -1537,7 +1890,7 @@ function saveNote() {
     rects: pendingNote.rects,
     createdAt: Date.now(),
   });
-  setAnnotations(items);
+  commitAnnotations(items);
   closeNotePanel();
   renderAnnotations();
   renderAnnotationList();
@@ -2565,6 +2918,12 @@ $("viewer").addEventListener("wheel", (event) => {
 }, { passive: false });
 $("exportNotes").onclick = exportAnnotations;
 $("exportMarkdown").onclick = exportMarkdown;
+$("annotationImportInput").onchange = async (event) => {
+  const [file] = event.target.files || [];
+  if (file) await importAnnotationBackup(file);
+  event.target.value = "";
+};
+$("importPdfAnnotations").onclick = importEmbeddedPdfAnnotations;
 $("toolsBtn").onclick = () => {
   const pop = $("toolPopover"),
     isOpen = pop.classList.toggle("open");
@@ -2948,13 +3307,13 @@ $("inkDrawingLayer").addEventListener("pointercancel", () => {
   paintLiveStroke();
 });
 $("annotationLayer").addEventListener("click", (event) => {
-  if (!eraserMode) return;
   const id = event.target.closest("[data-annotation-id]")?.dataset.annotationId;
   if (!id) return;
-  setAnnotations(annotations().filter((mark) => mark.id !== id));
-  renderAnnotations();
-  renderAnnotationList();
-  toast("Anotación borrada");
+  if (eraserMode) {
+    deleteAnnotation(id);
+    return;
+  }
+  if (annotationSelectMode) openAnnotationEditor(id, event.target.getBoundingClientRect());
 });
 $("captureBtn").onclick = openAssistantForDocument;
 $("captureOverlay").addEventListener("pointerdown", (e) => {
@@ -3044,6 +3403,11 @@ document.addEventListener("pointerdown", (e) => {
     $("toolPopover").classList.remove("open");
     $("appearancePopover").classList.remove("open");
   }
+  if (
+    annotationSelectMode &&
+    !e.target.closest("#annotationEditor") &&
+    !e.target.closest("[data-annotation-id]")
+  ) closeAnnotationEditor();
 });
 window.addEventListener("keydown", (e) => {
   if (
@@ -3064,10 +3428,12 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "b" || e.key === "B") toggleBookmark();
   if (e.key === "r" || e.key === "R") $("rotateBtn").click();
   if (e.key === "f" || e.key === "F") toggleFocusMode();
+  if (e.key === "s" || e.key === "S") setAnnotationSelectMode();
   if (e.key === "Escape") {
     if (document.body.classList.contains("reader-chrome-hidden") && !fullscreenElement())
       setReaderChromeHidden(false);
     hideAnnotationActions();
+    if (selectedAnnotationId) closeAnnotationEditor();
     $("toolPopover").classList.remove("open");
   }
 });

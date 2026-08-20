@@ -427,6 +427,43 @@ body.ink-eraser-mode .annotation { pointer-events: auto; cursor: not-allowed; }
 body.ink-eraser-mode .annotation-vector { pointer-events: none; }
 body.ink-eraser-mode .annotation-vector path { pointer-events: stroke; cursor: not-allowed; }
 body.ink-eraser-mode .annotation:hover,body.ink-eraser-mode .annotation-vector path:hover { filter: drop-shadow(0 0 4px rgba(218,64,64,.9)); }
+body.annotation-select-mode .annotation-layer { z-index: 6; pointer-events: none; }
+body.annotation-select-mode .annotation { pointer-events: auto; cursor: pointer; }
+body.annotation-select-mode .annotation-vector { pointer-events: none; }
+body.annotation-select-mode .annotation-vector path { pointer-events: stroke; cursor: pointer; }
+.annotation.selected,
+.annotation-vector.selected path { filter: drop-shadow(0 0 3px var(--text)); }
+.annotation.selected { outline: 2px solid var(--text); outline-offset: 2px; }
+.annotation-entry.selected { border-radius: 8px; background: var(--soft); box-shadow: inset 3px 0 0 var(--text); }
+.annotation-portability { display: grid !important; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.annotation-import-label { display: grid; place-items: center; cursor: pointer; }
+.annotation-editor {
+  position: fixed;
+  z-index: 130;
+  width: 310px;
+  max-height: calc(100dvh - 20px);
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-solid);
+  box-shadow: 0 18px 55px rgba(0,0,0,.22);
+  color: var(--text);
+}
+.annotation-editor[hidden] { display: none; }
+.annotation-editor header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.annotation-editor header small { display: block; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .12em; }
+.annotation-editor header strong { display: block; margin-top: 2px; font-size: 14px; }
+.annotation-editor > label { display: block; margin-top: 10px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.annotation-editor select,.annotation-editor textarea { width: 100%; margin-top: 6px; }
+.annotation-editor textarea { min-height: 68px; resize: vertical; color: var(--text); text-transform: none; letter-spacing: normal; }
+.annotation-editor input[type="range"] { width: 100%; margin-top: 6px; accent-color: var(--text); }
+.annotation-editor output { float: right; color: var(--text); font-variant-numeric: tabular-nums; }
+.annotation-editor-colors { display: flex; gap: 8px; margin-top: 8px; }
+.annotation-editor-colors button { width: 25px; height: 25px; padding: 0; border: 2px solid var(--surface-solid); border-radius: 50%; outline: 1px solid var(--line); background: var(--swatch); cursor: pointer; }
+.annotation-editor-colors button.active { outline: 3px solid var(--text); }
+.annotation-editor footer { display: flex; justify-content: space-between; gap: 8px; margin-top: 12px; }
+.annotation-editor .danger { color: #b42318; }
 
 /* Appearance — swatches and segmented controls instead of a settings dump. */
 .appearance-popover { width: 320px !important; padding: 16px !important; border-radius: 18px !important; background: color-mix(in srgb,var(--surface-solid) 98%,var(--soft)); box-shadow: 0 20px 55px rgba(0,0,0,.2) !important; }
@@ -886,6 +923,22 @@ body.ink-toolbar-open .toolbar { margin-bottom: 0 !important; }
   overflow: auto !important;
   align-self: start;
 }
+.ink-color-card[data-tool]::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 11px;
+  height: 11px;
+  border-left: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  background: var(--surface-solid);
+  transform: translateX(-50%) rotate(45deg);
+}
+.ink-range-control { display: grid; gap: 7px; margin-top: 13px; color: var(--muted); font-size: 11px; }
+.ink-range-control span { display: flex; justify-content: space-between; gap: 12px; }
+.ink-range-control output { color: var(--text); font-variant-numeric: tabular-nums; }
+.ink-range-control input { width: 100%; accent-color: var(--text); }
 
 /* Reading dock and page previews follow the same island geometry. */
 .footer {
@@ -977,7 +1030,16 @@ body.ink-toolbar-open .toolbar { margin-bottom: 0 !important; }
   }
   .viewer { padding: 54px 6px 86px !important; }
   .ink-strip { top: 61px !important; }
+  .ink-color-card.ink-positioned {
+    left: 8px !important;
+    right: 8px !important;
+    top: 118px !important;
+    width: auto !important;
+    max-height: calc(100dvh - 130px) !important;
+    transform: none !important;
+  }
   .footer { grid-template-columns: auto minmax(82px,1fr) auto !important; width: calc(100vw - 12px) !important; min-height: 46px !important; }
   .footer #rotateBtn, .footer #fitBtn, .footer #zoomLabel { display: none; }
   .thumbnail-rail { bottom: 63px !important; }
+  .annotation-editor { inset: auto 8px max(62px,env(safe-area-inset-bottom)) 8px !important; width: auto; max-height: min(64dvh,520px); border-radius: 14px; }
 }
