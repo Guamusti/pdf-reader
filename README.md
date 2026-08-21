@@ -24,3 +24,4 @@ Incluye:
 - Copia del texto seleccionado desde el menú de selección.
 - Búsqueda avanzada: distinguir mayúsculas, palabra completa y expresiones regulares, con contador de coincidencias y navegación anterior/siguiente entre todas las apariciones.
 - Búsqueda en toda la biblioteca: encuentra un término en el texto de todos los PDFs guardados, con resultados agrupados por documento; al pulsar uno se abre el documento en la página correspondiente.
+- Lectura en voz alta (Text-to-Speech) con la voz local del navegador: barra con reproducir/pausar, frase anterior/siguiente, velocidad y selección de voz. Lee frase a frase mostrando la actual como subtítulo y pasa de página automáticamente al terminar.

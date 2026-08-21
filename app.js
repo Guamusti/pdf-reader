@@ -509,6 +509,7 @@ async function openStored(id) {
   showLoader(true);
   try {
     if (currentBook?.id !== id) flushReadingSession(true);
+    if (ttsActive && currentBook?.id !== id) stopReadAloud();
     const rec = await dbGet(id);
     if (!rec) throw new Error("Documento no encontrado");
     if (rec.kind === "markdown") {
@@ -989,6 +990,158 @@ async function exitPresentation() {
 }
 function togglePresentation() {
   presentationMode ? exitPresentation() : enterPresentation();
+}
+
+// ---- Lectura en voz alta (Text-to-Speech) ----
+const speechSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+let ttsActive = false;
+let ttsPaused = false;
+let ttsSentences = [];
+let ttsSentenceIndex = 0;
+let ttsRate = 1;
+let ttsVoiceURI = "";
+let speechVoices = [];
+async function getPagePlainText(pageNumber) {
+  const page = await getCachedPage(pageNumber);
+  const content = await getCachedTextContent(page);
+  const parts = [];
+  for (const block of reflowBlocks(content.items)) {
+    if (block.type === "list") parts.push(...block.items);
+    else if (block.text) parts.push(block.text);
+  }
+  return parts.join("\n");
+}
+function splitSentences(text) {
+  return text
+    .split(/\n+/)
+    .flatMap((paragraph) => paragraph.match(/[^.!?]+[.!?]*/g) || [paragraph])
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 1);
+}
+function populateTtsVoices() {
+  if (!speechSupported) return;
+  speechVoices = window.speechSynthesis.getVoices();
+  const select = $("ttsVoice");
+  if (!select) return;
+  if (!speechVoices.length) {
+    select.innerHTML = "<option>Voz del sistema</option>";
+    return;
+  }
+  select.innerHTML = speechVoices
+    .map((voice) => `<option value="${escapeHtml(voice.voiceURI)}">${escapeHtml(voice.name)} · ${voice.lang}</option>`)
+    .join("");
+  if (!ttsVoiceURI || !speechVoices.some((voice) => voice.voiceURI === ttsVoiceURI)) {
+    const spanish = speechVoices.find((voice) => /^es/i.test(voice.lang));
+    ttsVoiceURI = (spanish || speechVoices[0]).voiceURI;
+  }
+  select.value = ttsVoiceURI;
+}
+function updateTtsCaption(message) {
+  const caption = $("ttsCaption");
+  if (!caption) return;
+  if (message) {
+    caption.textContent = message;
+    return;
+  }
+  caption.innerHTML = `<b>${escapeHtml(ttsSentences[ttsSentenceIndex] || "")}</b>`;
+}
+async function loadPageSentences(pageNumber) {
+  try {
+    ttsSentences = splitSentences(await getPagePlainText(pageNumber));
+  } catch {
+    ttsSentences = [];
+  }
+  if (!ttsSentences.length) updateTtsCaption("Esta página no tiene texto para leer.");
+}
+function speakSentence() {
+  if (!ttsActive || !speechSupported) return;
+  const synth = window.speechSynthesis;
+  synth.cancel();
+  const text = ttsSentences[ttsSentenceIndex];
+  if (text == null) return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = ttsRate;
+  const voice = speechVoices.find((candidate) => candidate.voiceURI === ttsVoiceURI);
+  if (voice) {
+    utterance.voice = voice;
+    utterance.lang = voice.lang;
+  }
+  utterance.onend = () => {
+    if (!ttsActive || ttsPaused) return;
+    ttsSentenceIndex++;
+    if (ttsSentenceIndex < ttsSentences.length) speakSentence();
+    else advanceTtsPage();
+  };
+  ttsPaused = false;
+  $("ttsPlayPause").textContent = "⏸";
+  updateTtsCaption();
+  synth.speak(utterance);
+}
+async function advanceTtsPage() {
+  if (!pdfDoc || currentPage >= pdfDoc.numPages) {
+    updateTtsCaption("Fin del documento.");
+    stopReadAloud();
+    return;
+  }
+  const next = currentPage + 1;
+  if (viewMode === "continuous") scrollToContinuousPage(next);
+  else await renderPage(next);
+  await loadPageSentences(next);
+  ttsSentenceIndex = 0;
+  if (ttsSentences.length) speakSentence();
+  else advanceTtsPage();
+}
+async function startReadAloud() {
+  if (!speechSupported) {
+    toast("Este navegador no admite lectura en voz alta");
+    return;
+  }
+  if (!pdfDoc) return;
+  ttsActive = true;
+  ttsPaused = false;
+  document.body.classList.add("tts-active");
+  $("readAloudBtn").classList.add("active");
+  $("readAloudBtn").setAttribute("aria-pressed", "true");
+  $("ttsBar").hidden = false;
+  populateTtsVoices();
+  updateTtsCaption("Preparando lectura…");
+  await loadPageSentences(currentPage);
+  ttsSentenceIndex = 0;
+  if (ttsSentences.length) speakSentence();
+  else advanceTtsPage();
+}
+function stopReadAloud() {
+  ttsActive = false;
+  ttsPaused = false;
+  if (speechSupported) window.speechSynthesis.cancel();
+  document.body.classList.remove("tts-active");
+  $("readAloudBtn")?.classList.remove("active");
+  $("readAloudBtn")?.setAttribute("aria-pressed", "false");
+  if ($("ttsBar")) $("ttsBar").hidden = true;
+}
+function toggleReadAloud() {
+  if (ttsActive) stopReadAloud();
+  else startReadAloud();
+}
+function toggleTtsPlayPause() {
+  if (!ttsActive) {
+    startReadAloud();
+    return;
+  }
+  if (ttsPaused) {
+    window.speechSynthesis.resume();
+    ttsPaused = false;
+    $("ttsPlayPause").textContent = "⏸";
+  } else {
+    window.speechSynthesis.pause();
+    ttsPaused = true;
+    $("ttsPlayPause").textContent = "▶";
+  }
+}
+function ttsSkip(direction) {
+  if (!ttsActive || !ttsSentences.length) return;
+  ttsSentenceIndex = Math.max(0, Math.min(ttsSentences.length - 1, ttsSentenceIndex + direction));
+  speakSentence();
 }
 
 async function drainPageRenderQueue() {
@@ -3561,6 +3714,7 @@ async function streamWebLlmVision(question) {
 }
 
 function showEmpty() {
+  if (ttsActive) stopReadAloud();
   $("emptyState").hidden = false;
   $("canvasWrap").hidden = true;
   $("reflowReader").hidden = true;
@@ -3800,6 +3954,27 @@ document.querySelectorAll("[data-search-scope]").forEach((button) => {
 });
 searchOptions = { ...searchOptions, ...getJSON("paper.search-options", {}) };
 applySearchOptionButtons();
+// Lectura en voz alta
+$("readAloudBtn").onclick = toggleReadAloud;
+$("ttsPlayPause").onclick = toggleTtsPlayPause;
+$("ttsPrev").onclick = () => ttsSkip(-1);
+$("ttsNext").onclick = () => ttsSkip(1);
+$("ttsClose").onclick = stopReadAloud;
+$("ttsRate").onchange = (event) => {
+  ttsRate = Number(event.target.value) || 1;
+  if (ttsActive && !ttsPaused) speakSentence();
+};
+$("ttsVoice").onchange = (event) => {
+  ttsVoiceURI = event.target.value;
+  if (ttsActive && !ttsPaused) speakSentence();
+};
+if (speechSupported) {
+  populateTtsVoices();
+  window.speechSynthesis.addEventListener?.("voiceschanged", populateTtsVoices);
+} else {
+  $("readAloudBtn").disabled = true;
+  $("readAloudBtn").title = "Lectura en voz alta no disponible en este navegador";
+}
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("paper.theme", theme);
