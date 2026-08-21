@@ -81,6 +81,8 @@ let navigationDirection = 1;
 let prefetchHandle = 0;
 const pageProxyCache = new Map();
 const textContentCache = new Map();
+let navBackStack = [];
+let navForwardStack = [];
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 5;
@@ -513,6 +515,7 @@ async function openStored(id) {
     currentBook = rec;
     resetAiDocumentState();
     resetAnnotationHistory();
+    resetNavHistory();
     resetThumbnails();
     searchQuery = "";
     searchMatches = [];
@@ -613,6 +616,44 @@ function renderPage(num, options = {}) {
     drainPageRenderQueue();
   });
 }
+// ---- Historial de vistas (atrás / adelante) ----
+// Registra los saltos "no secuenciales" (índice, enlaces, búsqueda, marcadores)
+// para poder volver al punto anterior, como el "vista previa" de un lector real.
+function resetNavHistory() {
+  navBackStack = [];
+  navForwardStack = [];
+  updateNavHistoryButtons();
+}
+function updateNavHistoryButtons() {
+  const back = $("navBack"),
+    forward = $("navForward");
+  if (back) back.disabled = navBackStack.length === 0;
+  if (forward) forward.disabled = navForwardStack.length === 0;
+}
+function jumpToPage(page, options = {}) {
+  if (!pdfDoc) return Promise.resolve(false);
+  const target = Math.max(1, Math.min(pdfDoc.numPages, Number(page) || 1));
+  if (target === currentPage) return Promise.resolve(false);
+  navBackStack.push(currentPage);
+  if (navBackStack.length > 120) navBackStack.shift();
+  navForwardStack = [];
+  updateNavHistoryButtons();
+  return renderPage(target, options);
+}
+function navigateBack() {
+  if (!navBackStack.length) return;
+  navForwardStack.push(currentPage);
+  const target = navBackStack.pop();
+  updateNavHistoryButtons();
+  renderPage(target);
+}
+function navigateForward() {
+  if (!navForwardStack.length) return;
+  navBackStack.push(currentPage);
+  const target = navForwardStack.pop();
+  updateNavHistoryButtons();
+  renderPage(target);
+}
 async function drainPageRenderQueue() {
   if (pageRenderActive) return;
   pageRenderActive = true;
@@ -706,6 +747,7 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   else if (resetScroll) $("viewer").scrollTo({ top: 0, left: 0 });
   await renderTextLayer(page, viewport);
   if (token !== renderToken || requestId !== pageRenderRequestId) return false;
+  renderLinkLayer(page, viewport, token);
   if (reflowMode) await renderReflowPage(page);
   $("canvasWrap").hidden = reflowMode;
   $("reflowReader").hidden = !reflowMode;
@@ -867,6 +909,64 @@ async function renderTextLayer(page, viewport) {
     console.error("No se pudo crear la capa de texto", e);
   }
 }
+// ---- Capa de enlaces clicables ----
+// Los enlaces internos saltan a su página (registrando historial); las URLs
+// externas se abren en una pestaña nueva. La capa se reconstruye por página.
+async function renderLinkLayer(page, viewport, token) {
+  const layer = $("linkLayer");
+  if (!layer) return;
+  layer.replaceChildren();
+  layer.style.width = `${viewport.width}px`;
+  layer.style.height = `${viewport.height}px`;
+  if (reflowMode) return;
+  let annots;
+  try {
+    annots = await page.getAnnotations({ intent: "display" });
+  } catch {
+    return;
+  }
+  if (token !== renderToken) return;
+  const links = annots.filter(
+    (annotation) => annotation.subtype === "Link" && (annotation.url || annotation.dest),
+  );
+  const fragment = document.createDocumentFragment();
+  for (const link of links) {
+    const [x1, y1, x2, y2] = viewport.convertToViewportRectangle(link.rect);
+    const left = Math.min(x1, x2),
+      top = Math.min(y1, y2),
+      width = Math.abs(x2 - x1),
+      height = Math.abs(y2 - y1);
+    if (width < 1 || height < 1) continue;
+    const anchor = document.createElement("a");
+    anchor.style.left = `${left}px`;
+    anchor.style.top = `${top}px`;
+    anchor.style.width = `${width}px`;
+    anchor.style.height = `${height}px`;
+    if (link.url) {
+      anchor.href = link.url;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.className = "external";
+      anchor.title = link.url;
+    } else {
+      anchor.href = "#";
+      anchor.title = "Ir a la sección enlazada";
+      anchor.addEventListener("click", async (event) => {
+        event.preventDefault();
+        try {
+          const dest = typeof link.dest === "string" ? await pdfDoc.getDestination(link.dest) : link.dest;
+          if (!Array.isArray(dest) || !dest[0]) return;
+          const index = await pdfDoc.getPageIndex(dest[0]);
+          jumpToPage(index + 1);
+        } catch {
+          toast("No se pudo abrir el enlace");
+        }
+      });
+    }
+    fragment.append(anchor);
+  }
+  layer.append(fragment);
+}
 function paintSearchHits() {
   if (!searchQuery) return;
   document
@@ -955,7 +1055,7 @@ function renderBookmarks() {
     : '<span style="color:var(--muted);font-size:13px">Sin marcadores.</span>';
   document
     .querySelectorAll("#bookmarkList .bookmark")
-    .forEach((b) => (b.onclick = () => renderPage(Number(b.dataset.p))));
+    .forEach((b) => (b.onclick = () => jumpToPage(Number(b.dataset.p))));
 }
 function toggleBookmark() {
   if (!currentBook) return;
@@ -996,7 +1096,7 @@ async function renderOutline() {
         if (page) button.dataset.page = page;
         button.innerHTML = `<i class="outline-dot"></i><span class="outline-name">${escapeHtml(item.title || "Sin título")}</span>${page ? `<span class="outline-page">${page}</span>` : ""}`;
         button.onclick = () => {
-          if (page) renderPage(page);
+          if (page) jumpToPage(page);
           else toast("No se pudo abrir esta sección");
         };
         root.appendChild(button);
@@ -1144,7 +1244,7 @@ function buildThumbnails() {
     if (list.hasPointerCapture(event.pointerId)) list.releasePointerCapture(event.pointerId);
     if (!wasDragged && card) {
       thumbWasDragged = true;
-      renderPage(Number(card.dataset.page));
+      jumpToPage(Number(card.dataset.page));
     }
   });
   list.addEventListener(
@@ -1159,7 +1259,7 @@ function buildThumbnails() {
   );
   list.addEventListener("click", (event) => {
     const card = event.target.closest(".thumb");
-    if (card) renderPage(Number(card.dataset.page));
+    if (card) jumpToPage(Number(card.dataset.page));
   });
   // En ratón, la rueda vertical recorre horizontalmente la isla de páginas.
   // No cambia de página: sólo mueve el navegador visual, como en una galería.
@@ -1627,7 +1727,7 @@ function renderAnnotationList() {
     .forEach(
       (button) =>
         (button.onclick = async () => {
-          await renderPage(Number(button.dataset.annotationPage));
+          await jumpToPage(Number(button.dataset.annotationPage));
           openAnnotationEditor(button.dataset.annotationId);
         }),
     );
@@ -1661,6 +1761,28 @@ function selectedRects() {
 }
 function hideAnnotationActions() {
   $("annotationActions").classList.remove("show");
+}
+async function copySelectionText() {
+  const text = window.getSelection()?.toString().trim();
+  if (!text) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const helper = document.createElement("textarea");
+      helper.value = text;
+      helper.style.position = "fixed";
+      helper.style.opacity = "0";
+      document.body.append(helper);
+      helper.select();
+      document.execCommand("copy");
+      helper.remove();
+    }
+    toast("Texto copiado");
+  } catch {
+    toast("No se pudo copiar");
+  }
+  hideAnnotationActions();
 }
 function paintLiveHighlight() {
   const layer = $("liveHighlightLayer"),
@@ -2353,7 +2475,7 @@ function renderAiSources(pages = []) {
   sources.hidden = !aiSourcePages.length;
   sources.innerHTML = aiSourcePages.map((page) => `<button type="button" data-ai-source-page="${page}">p. ${page}</button>`).join("");
   sources.querySelectorAll("[data-ai-source-page]").forEach((button) => {
-    button.onclick = () => renderPage(Number(button.dataset.aiSourcePage));
+    button.onclick = () => jumpToPage(Number(button.dataset.aiSourcePage));
   });
 }
 async function ensureDocumentContextIndex(signal) {
@@ -2908,7 +3030,7 @@ function renderSearchResults() {
     (button) =>
       (button.onclick = async () => {
         searchIndex = Number(button.dataset.searchIndex);
-        await renderPage(searchMatches[searchIndex].page);
+        await jumpToPage(searchMatches[searchIndex].page);
         renderSearchResults();
       }),
   );
@@ -2956,7 +3078,7 @@ async function search(query) {
       (match) => match.page >= currentPage,
     );
     searchIndex = afterCurrent < 0 ? 0 : afterCurrent;
-    await renderPage(searchMatches[searchIndex].page);
+    await jumpToPage(searchMatches[searchIndex].page);
     renderSearchResults();
     toast(
       `Coincidencia ${searchIndex + 1} de ${searchMatches.length} · página ${currentPage}`,
@@ -3165,9 +3287,11 @@ $("prevBtn").onclick = () => renderPage(currentPage - 1);
 $("nextBtn").onclick = () => renderPage(currentPage + 1);
 $("toolbarPrev").onclick = () => renderPage(currentPage - 1);
 $("toolbarNext").onclick = () => renderPage(currentPage + 1);
+$("navBack").onclick = navigateBack;
+$("navForward").onclick = navigateForward;
 $("toolbarPage").onchange = (e) => {
   const page = Number(e.target.value);
-  if (Number.isInteger(page) && pdfDoc) renderPage(page);
+  if (Number.isInteger(page) && pdfDoc) jumpToPage(page);
   else e.target.value = currentPage;
 };
 $("zoomIn").onclick = () => changeReaderZoom(ZOOM_STEP);
@@ -3318,7 +3442,7 @@ $("canvasWrap").addEventListener("pointerup", (event) => {
 });
 $("pageJump").onchange = (e) => {
   const page = Number(e.target.value);
-  if (Number.isInteger(page) && pdfDoc) renderPage(page);
+  if (Number.isInteger(page) && pdfDoc) jumpToPage(page);
   else if (pdfDoc) e.target.value = currentPage;
 };
 $("pageScrubber").oninput = (e) => scheduleScrubPage(Number(e.target.value));
@@ -3821,6 +3945,7 @@ document
     $("toolPopover").classList.remove("open");
   }));
 $("clearPageNotes").onclick = clearPageAnnotations;
+$("copySelectionBtn").onclick = copySelectionText;
 $("noteBtn").onclick = openNotePanel;
 $("closeNotePanel").onclick = closeNotePanel;
 $("saveNote").onclick = saveNote;
@@ -3897,11 +4022,21 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.target.matches?.("input,select,textarea")) return;
+  if (e.altKey && e.key === "ArrowLeft") {
+    e.preventDefault();
+    navigateBack();
+    return;
+  }
+  if (e.altKey && e.key === "ArrowRight") {
+    e.preventDefault();
+    navigateForward();
+    return;
+  }
   if (e.key === "ArrowRight" || e.key === "PageDown")
     renderPage(currentPage + 1);
   if (e.key === "ArrowLeft" || e.key === "PageUp") renderPage(currentPage - 1);
-  if (e.key === "Home") renderPage(1);
-  if (e.key === "End" && pdfDoc) renderPage(pdfDoc.numPages);
+  if (e.key === "Home") jumpToPage(1);
+  if (e.key === "End" && pdfDoc) jumpToPage(pdfDoc.numPages);
   if (e.key === "+" || e.key === "=") {
     changeReaderZoom(ZOOM_STEP);
   }
@@ -3920,6 +4055,20 @@ window.addEventListener("keydown", (e) => {
     if (selectedAnnotationId) closeAnnotationEditor();
     $("toolPopover").classList.remove("open");
   }
+});
+// Botones laterales del ratón: atrás (3) / adelante (4) en el historial de vistas.
+window.addEventListener("mouseup", (e) => {
+  if (!pdfDoc) return;
+  if (e.button === 3) {
+    e.preventDefault();
+    navigateBack();
+  } else if (e.button === 4) {
+    e.preventDefault();
+    navigateForward();
+  }
+});
+window.addEventListener("auxclick", (e) => {
+  if (pdfDoc && (e.button === 3 || e.button === 4)) e.preventDefault();
 });
 function touchDistance(touches) {
   return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
