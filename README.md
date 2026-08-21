@@ -17,3 +17,8 @@ Incluye:
 - Selección nativa azul como previsualización, índice navegable cuando el PDF lo ofrece, salto directo de página y resultados de búsqueda con coincidencias señaladas en la página.
 - Modo enfoque, búsqueda cíclica entre todas las coincidencias y renderizado cancelable para una navegación más fluida.
 - Índice editorial con jerarquía y página activa, más una tira inferior de miniaturas con carga diferida para recorrer el documento visualmente.
+- Diseños de página: una página, doble página (libro) con página enfrentada y scroll continuo vertical con render diferido de las páginas visibles. El modo elegido se recuerda entre sesiones.
+- Modo presentación a pantalla completa: avanza con flechas, barra espaciadora o clic (mitad derecha/izquierda), con una barra de control y salida con Esc.
+- Historial de vistas atrás/adelante para volver al punto anterior tras saltar desde el índice, un enlace, la búsqueda o un marcador (botones en la barra, Alt+←/→ y botones laterales del ratón).
+- Enlaces del PDF clicables: los internos saltan a su sección y las direcciones web se abren en una pestaña nueva.
+- Copia del texto seleccionado desde el menú de selección.

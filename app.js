@@ -83,6 +83,12 @@ const pageProxyCache = new Map();
 const textContentCache = new Map();
 let navBackStack = [];
 let navForwardStack = [];
+let viewMode = "single"; // "single" | "double" | "continuous"
+let continuousObserver = null;
+let continuousRendered = new Set();
+let continuousScrollFrame = 0;
+let continuousResizeObserver = null;
+let presentationMode = false;
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 5;
@@ -449,6 +455,11 @@ async function openMarkdownStored(rec) {
   flushReadingSession(true);
   markdownContent = await rec.blob.text();
   resetRenderEngine();
+  teardownContinuous();
+  viewMode = "single";
+  $("continuousView").hidden = true;
+  $("facingWrap").hidden = true;
+  $("viewer").classList.remove("double-mode");
   pdfDoc = null;
   currentBook = rec;
   resetAiDocumentState();
@@ -516,6 +527,12 @@ async function openStored(id) {
     resetAiDocumentState();
     resetAnnotationHistory();
     resetNavHistory();
+    // Empezar siempre desde una vista limpia; el modo guardado se aplica al final.
+    teardownContinuous();
+    viewMode = "single";
+    $("continuousView").hidden = true;
+    $("facingWrap").hidden = true;
+    $("viewer").classList.remove("double-mode");
     resetThumbnails();
     searchQuery = "";
     searchMatches = [];
@@ -533,6 +550,11 @@ async function openStored(id) {
     $("docMeta").textContent =
       `${pdfDoc.numPages} páginas · guardado localmente`;
     await renderPage(currentPage);
+    const storedViewMode = localStorage.getItem("paper.view-mode") || "single";
+    if (!reflowMode && storedViewMode !== "single") await setViewMode(storedViewMode, { silent: true });
+    else document.querySelectorAll("[data-view-mode]").forEach((button) =>
+      button.classList.toggle("active", button.dataset.viewMode === viewMode),
+    );
     renderBookmarks();
     renderAnnotationList();
     await renderOutline();
@@ -605,6 +627,12 @@ function resetRenderEngine() {
 function renderPage(num, options = {}) {
   if (!pdfDoc) return Promise.resolve(false);
   const pageNumber = Math.max(1, Math.min(pdfDoc.numPages, Number(num) || 1));
+  // En scroll continuo, "renderizar una página" equivale a desplazarse a ella:
+  // el resto de la navegación (teclas, enlaces, índice…) sigue igual.
+  if (viewMode === "continuous" && !reflowMode) {
+    scrollToContinuousPage(pageNumber, options);
+    return Promise.resolve(true);
+  }
   const requestId = ++pageRenderRequestId;
   return new Promise((resolve) => {
     if (pageRenderPending) pageRenderPending.resolve(false);
@@ -615,6 +643,27 @@ function renderPage(num, options = {}) {
     }
     drainPageRenderQueue();
   });
+}
+// Actualiza toda la barra de página (pie, cabecera, progreso) a partir de
+// currentPage. Compartido por el modo página única, doble y scroll continuo.
+function updatePageChrome() {
+  if (!pdfDoc) return;
+  $("pageStatus").textContent = `Página ${currentPage} de ${pdfDoc.numPages}`;
+  $("pageJump").value = currentPage;
+  $("pageJump").max = pdfDoc.numPages;
+  $("pageJump").hidden = false;
+  $("toolbarPage").value = currentPage;
+  $("toolbarPage").max = pdfDoc.numPages;
+  $("toolbarPage").disabled = false;
+  $("toolbarPageCount").textContent = `/ ${pdfDoc.numPages}`;
+  $("toolbarPrev").disabled = currentPage === 1;
+  $("toolbarNext").disabled = currentPage === pdfDoc.numPages;
+  $("pageScrubber").max = pdfDoc.numPages;
+  $("pageScrubber").value = currentPage;
+  $("pageScrubber").disabled = false;
+  $("progressBar").style.width = `${(currentPage / pdfDoc.numPages) * 100}%`;
+  $("prevBtn").disabled = currentPage === 1;
+  $("nextBtn").disabled = currentPage === pdfDoc.numPages;
 }
 // ---- Historial de vistas (atrás / adelante) ----
 // Registra los saltos "no secuenciales" (índice, enlaces, búsqueda, marcadores)
@@ -654,6 +703,278 @@ function navigateForward() {
   updateNavHistoryButtons();
   renderPage(target);
 }
+// ---- Motor de dibujo reutilizable (página única, doble y continuo) ----
+// Dibuja una página en un canvas + capa de texto + capa de enlaces dados,
+// sin tocar el estado global. `token` permite descartar renders obsoletos.
+async function renderPageGraphics(pageNumber, targets, token) {
+  const page = await getCachedPage(pageNumber);
+  if (token !== undefined && token !== renderToken) return null;
+  const viewport = page.getViewport({ scale, rotation });
+  const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
+  const dpr = Math.min(targetDpr, Math.sqrt(24_000_000 / (viewport.width * viewport.height)));
+  const { canvas, textLayer, linkLayer, sizeTarget } = targets;
+  const ctx = canvas.getContext("2d");
+  canvas.width = Math.floor(viewport.width * dpr);
+  canvas.height = Math.floor(viewport.height * dpr);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  if (sizeTarget) {
+    sizeTarget.style.width = `${viewport.width}px`;
+    sizeTarget.style.height = `${viewport.height}px`;
+  }
+  const task = page.render({ canvasContext: ctx, viewport, transform: [dpr, 0, 0, dpr, 0, 0] });
+  try {
+    await task.promise;
+  } catch (error) {
+    if (error?.name === "RenderingCancelledException") return null;
+    throw error;
+  }
+  if (token !== undefined && token !== renderToken) return null;
+  if (textLayer) {
+    textLayer.replaceChildren();
+    textLayer.style.width = `${viewport.width}px`;
+    textLayer.style.height = `${viewport.height}px`;
+    textLayer.style.setProperty("--scale-factor", String(viewport.scale));
+    try {
+      const content = await getCachedTextContent(page);
+      const layer = new pdfjsLib.TextLayer({ textContentSource: content, container: textLayer, viewport });
+      await layer.render();
+    } catch {}
+  }
+  if (linkLayer) renderLinkLayerInto(linkLayer, page, viewport, token);
+  return viewport;
+}
+
+// ---- Modo doble página (libro) ----
+async function renderFacingPage(token) {
+  const wrap = $("facingWrap");
+  if (!wrap) return;
+  const facingNumber = currentPage + 1;
+  if (viewMode !== "double" || !pdfDoc || facingNumber > pdfDoc.numPages) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  try {
+    await renderPageGraphics(facingNumber, {
+      canvas: $("facingCanvas"),
+      textLayer: $("facingTextLayer"),
+      linkLayer: $("facingLinkLayer"),
+      sizeTarget: wrap,
+    }, token);
+  } catch (error) {
+    if (error?.name !== "RenderingCancelledException") console.error("No se pudo renderizar la página enfrentada", error);
+  }
+}
+
+// ---- Modo scroll continuo ----
+function teardownContinuous() {
+  if (continuousObserver) {
+    continuousObserver.disconnect();
+    continuousObserver = null;
+  }
+  continuousRendered = new Set();
+  if (continuousScrollFrame) {
+    cancelAnimationFrame(continuousScrollFrame);
+    continuousScrollFrame = 0;
+  }
+  const container = $("continuousView");
+  if (container) container.replaceChildren();
+}
+async function buildContinuousView() {
+  const container = $("continuousView");
+  if (!container || !pdfDoc) return;
+  teardownContinuous();
+  const first = await getCachedPage(currentPage);
+  const baseViewport = first.getViewport({ scale, rotation });
+  const fragment = document.createDocumentFragment();
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    const slot = document.createElement("div");
+    slot.className = "cont-page";
+    slot.dataset.page = String(i);
+    slot.style.width = `${baseViewport.width}px`;
+    slot.style.height = `${baseViewport.height}px`;
+    slot.innerHTML = `<canvas></canvas><div class="textLayer"></div><div class="link-layer"></div><span class="cont-num">${i}</span>`;
+    fragment.append(slot);
+  }
+  container.append(fragment);
+  continuousObserver = new IntersectionObserver(onContinuousIntersect, {
+    root: $("viewer"),
+    rootMargin: "350px 0px",
+    threshold: 0.01,
+  });
+  container.querySelectorAll(".cont-page").forEach((slot) => continuousObserver.observe(slot));
+  markContinuousCurrent();
+}
+function onContinuousIntersect(entries) {
+  for (const entry of entries) {
+    const slot = entry.target;
+    const pageNumber = Number(slot.dataset.page);
+    if (entry.isIntersecting) renderContinuousSlot(slot);
+    else if (Math.abs(pageNumber - currentPage) > 3) unloadContinuousSlot(slot);
+  }
+}
+async function renderContinuousSlot(slot) {
+  const pageNumber = Number(slot.dataset.page);
+  if (continuousRendered.has(pageNumber)) return;
+  continuousRendered.add(pageNumber);
+  try {
+    await renderPageGraphics(pageNumber, {
+      canvas: slot.querySelector("canvas"),
+      textLayer: slot.querySelector(".textLayer"),
+      linkLayer: slot.querySelector(".link-layer"),
+      sizeTarget: slot,
+    });
+    if (viewMode !== "continuous") return;
+  } catch {
+    continuousRendered.delete(pageNumber);
+  }
+}
+function unloadContinuousSlot(slot) {
+  const pageNumber = Number(slot.dataset.page);
+  if (!continuousRendered.has(pageNumber)) return;
+  continuousRendered.delete(pageNumber);
+  const canvas = slot.querySelector("canvas");
+  if (canvas) {
+    canvas.width = 0;
+    canvas.height = 0;
+    canvas.style.width = slot.style.width;
+    canvas.style.height = slot.style.height;
+  }
+  slot.querySelector(".textLayer")?.replaceChildren();
+  slot.querySelector(".link-layer")?.replaceChildren();
+}
+function markContinuousCurrent() {
+  $("continuousView")
+    ?.querySelectorAll(".cont-page")
+    .forEach((slot) => slot.classList.toggle("is-current", Number(slot.dataset.page) === currentPage));
+}
+function scrollToContinuousPage(pageNumber, options = {}) {
+  const container = $("continuousView");
+  if (!container) return;
+  const target = Math.max(1, Math.min(pdfDoc.numPages, pageNumber));
+  const slot = container.querySelector(`.cont-page[data-page="${target}"]`);
+  syncCurrentFromScroll(target);
+  if (slot && options.scroll !== false) {
+    $("viewer").scrollTo({ top: slot.offsetTop - 18, behavior: options.smooth === false ? "auto" : "smooth" });
+  }
+}
+// Actualiza el estado a partir de la página visible al hacer scroll (sin
+// volver a desplazar, para no crear un bucle con el propio scroll).
+function syncCurrentFromScroll(pageNumber) {
+  const previous = currentPage;
+  if (previous !== pageNumber) {
+    flushReadingSession(false);
+    navigationDirection = pageNumber > previous ? 1 : -1;
+  }
+  currentPage = pageNumber;
+  readingSession.page = currentPage;
+  if (currentBook) localStorage.setItem(key(currentBook.id, "page"), String(currentPage));
+  updatePageChrome();
+  updateThumbSelection();
+  updateOutlineSelection();
+  markContinuousCurrent();
+  if (presentationMode) updatePresentationCount();
+}
+function onContinuousScroll() {
+  if (viewMode !== "continuous" || continuousScrollFrame) return;
+  continuousScrollFrame = requestAnimationFrame(() => {
+    continuousScrollFrame = 0;
+    const viewer = $("viewer");
+    const center = viewer.scrollTop + viewer.clientHeight / 2;
+    let best = currentPage,
+      bestDistance = Infinity;
+    $("continuousView")
+      .querySelectorAll(".cont-page")
+      .forEach((slot) => {
+        const middle = slot.offsetTop + slot.offsetHeight / 2;
+        const distance = Math.abs(middle - center);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = Number(slot.dataset.page);
+        }
+      });
+    if (best !== currentPage) syncCurrentFromScroll(best);
+  });
+}
+
+// ---- Selector de diseño de página ----
+async function setViewMode(mode, options = {}) {
+  if (!["single", "double", "continuous"].includes(mode)) mode = "single";
+  if (reflowMode && mode !== "single") await setReadingMode("pdf");
+  const previous = viewMode;
+  viewMode = mode;
+  localStorage.setItem("paper.view-mode", mode);
+  document.querySelectorAll("[data-view-mode]").forEach((button) =>
+    button.classList.toggle("active", button.dataset.viewMode === mode),
+  );
+  $("viewer").classList.toggle("double-mode", mode === "double");
+  // La tinta usa el motor de página única; se desactiva en scroll continuo.
+  const inkDisabled = mode === "continuous" || reflowMode;
+  if (inkDisabled && markerMode) toggleMarkerMode();
+  if (inkDisabled && eraserMode) toggleEraserMode(false);
+  $("markerModeBtn").disabled = inkDisabled;
+  $("eraserModeBtn").disabled = inkDisabled;
+  if (previous === "continuous" && mode !== "continuous") teardownContinuous();
+  $("continuousView").hidden = mode !== "continuous";
+  $("canvasWrap").hidden = mode === "continuous" || reflowMode;
+  if (mode !== "double") $("facingWrap").hidden = true;
+  $("reflowReader").hidden = !reflowMode;
+  if (!pdfDoc) return;
+  if (mode === "continuous") {
+    await buildContinuousView();
+    scrollToContinuousPage(currentPage, { smooth: false });
+  } else {
+    await renderPage(currentPage, { resetScroll: false });
+  }
+  if (!options.silent)
+    toast(mode === "continuous" ? "Scroll continuo" : mode === "double" ? "Doble página" : "Una página");
+}
+function stepPage(direction) {
+  const step = viewMode === "double" ? 2 : 1;
+  renderPage(currentPage + direction * step);
+}
+// Re-dibuja la vista actual tras cambiar zoom, rotación o tamaño de ventana.
+function refreshCurrentView() {
+  if (!pdfDoc) return;
+  if (viewMode === "continuous" && !reflowMode) {
+    buildContinuousView().then(() => scrollToContinuousPage(currentPage, { smooth: false }));
+  } else {
+    renderPage(currentPage, { resetScroll: false });
+  }
+}
+
+// ---- Modo presentación (pantalla completa, avance por clic) ----
+function updatePresentationCount() {
+  const count = $("pmCount");
+  if (count && pdfDoc) count.textContent = `${currentPage} / ${pdfDoc.numPages}`;
+}
+async function enterPresentation() {
+  if (!pdfDoc) return;
+  presentationMode = true;
+  document.body.classList.add("presentation-mode");
+  if (viewMode !== "single") await setViewMode("single", { silent: true });
+  updatePresentationCount();
+  const request = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
+  try {
+    if (request) await request.call(document.documentElement, { navigationUI: "hide" });
+  } catch {}
+  requestAnimationFrame(fitWidth);
+  toast("Presentación · flechas o clic para avanzar · Esc para salir");
+}
+async function exitPresentation() {
+  presentationMode = false;
+  document.body.classList.remove("presentation-mode");
+  const exit = document.exitFullscreen || document.webkitExitFullscreen;
+  try {
+    if (fullscreenElement() && exit) await exit.call(document);
+  } catch {}
+  requestAnimationFrame(fitWidth);
+}
+function togglePresentation() {
+  presentationMode ? exitPresentation() : enterPresentation();
+}
+
 async function drainPageRenderQueue() {
   if (pageRenderActive) return;
   pageRenderActive = true;
@@ -727,22 +1048,7 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   localStorage.setItem(key(currentBook.id, "scale"), String(scale));
   localStorage.setItem(key(currentBook.id, "rotation"), String(rotation));
   updateZoomLabel();
-  $("pageStatus").textContent = `Página ${currentPage} de ${pdfDoc.numPages}`;
-  $("pageJump").value = currentPage;
-  $("pageJump").max = pdfDoc.numPages;
-  $("pageJump").hidden = false;
-  $("toolbarPage").value = currentPage;
-  $("toolbarPage").max = pdfDoc.numPages;
-  $("toolbarPage").disabled = false;
-  $("toolbarPageCount").textContent = `/ ${pdfDoc.numPages}`;
-  $("toolbarPrev").disabled = currentPage === 1;
-  $("toolbarNext").disabled = currentPage === pdfDoc.numPages;
-  $("pageScrubber").max = pdfDoc.numPages;
-  $("pageScrubber").value = currentPage;
-  $("pageScrubber").disabled = false;
-  $("progressBar").style.width = `${(currentPage / pdfDoc.numPages) * 100}%`;
-  $("prevBtn").disabled = currentPage === 1;
-  $("nextBtn").disabled = currentPage === pdfDoc.numPages;
+  updatePageChrome();
   if (anchor) restoreZoomAnchor(anchor);
   else if (resetScroll) $("viewer").scrollTo({ top: 0, left: 0 });
   await renderTextLayer(page, viewport);
@@ -754,6 +1060,9 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   renderAnnotations();
   updateThumbSelection();
   updateOutlineSelection();
+  if (viewMode === "double") renderFacingPage(token);
+  else $("facingWrap").hidden = true;
+  if (presentationMode) updatePresentationCount();
   prefetchAdjacentPages(currentPage);
   return true;
 }
@@ -886,7 +1195,9 @@ function scheduleScrubPage(pageNumber) {
   if (scrubFrame) return;
   scrubFrame = requestAnimationFrame(() => {
     scrubFrame = 0;
-    if (scrubTarget !== currentPage) renderPage(scrubTarget);
+    if (scrubTarget === currentPage) return;
+    if (viewMode === "continuous") scrollToContinuousPage(scrubTarget, { smooth: false });
+    else renderPage(scrubTarget);
   });
 }
 async function renderTextLayer(page, viewport) {
@@ -913,7 +1224,9 @@ async function renderTextLayer(page, viewport) {
 // Los enlaces internos saltan a su página (registrando historial); las URLs
 // externas se abren en una pestaña nueva. La capa se reconstruye por página.
 async function renderLinkLayer(page, viewport, token) {
-  const layer = $("linkLayer");
+  return renderLinkLayerInto($("linkLayer"), page, viewport, token);
+}
+async function renderLinkLayerInto(layer, page, viewport, token) {
   if (!layer) return;
   layer.replaceChildren();
   layer.style.width = `${viewport.width}px`;
@@ -985,7 +1298,7 @@ async function fitWidth() {
   const base = p.getViewport({ scale: 1, rotation });
   const available = $("viewer").clientWidth - 24;
   scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, available / base.width));
-  await renderPage(currentPage, { resetScroll: false });
+  refreshCurrentView();
   updateZoomLabel();
 }
 function zoomAnchor(clientX, clientY) {
@@ -1024,7 +1337,8 @@ async function setZoom(nextScale, anchor = null) {
   if (next === scale) return;
   scale = next;
   updateZoomLabel();
-  await renderPage(currentPage, { anchor, resetScroll: false });
+  if (viewMode === "continuous") refreshCurrentView();
+  else await renderPage(currentPage, { anchor, resetScroll: false });
 }
 async function zoom(delta, anchor = null) {
   return setZoom(scale + delta, anchor);
@@ -3283,12 +3597,22 @@ function setSidebarPanel(panel) {
   $("sidebarNotesTab").setAttribute("aria-selected", String(notes));
 }
 $("fileInput").onchange = (e) => addFile(e.target.files?.[0]);
-$("prevBtn").onclick = () => renderPage(currentPage - 1);
-$("nextBtn").onclick = () => renderPage(currentPage + 1);
-$("toolbarPrev").onclick = () => renderPage(currentPage - 1);
-$("toolbarNext").onclick = () => renderPage(currentPage + 1);
+$("prevBtn").onclick = () => stepPage(-1);
+$("nextBtn").onclick = () => stepPage(1);
+$("toolbarPrev").onclick = () => stepPage(-1);
+$("toolbarNext").onclick = () => stepPage(1);
 $("navBack").onclick = navigateBack;
 $("navForward").onclick = navigateForward;
+document.querySelectorAll("[data-view-mode]").forEach((button) => {
+  button.onclick = () => setViewMode(button.dataset.viewMode);
+});
+$("presentationBtn").onclick = () => {
+  $("appearancePopover").classList.remove("open");
+  enterPresentation();
+};
+$("pmPrev").onclick = () => stepPage(-1);
+$("pmNext").onclick = () => stepPage(1);
+$("pmExit").onclick = exitPresentation;
 $("toolbarPage").onchange = (e) => {
   const page = Number(e.target.value);
   if (Number.isInteger(page) && pdfDoc) jumpToPage(page);
@@ -3354,7 +3678,8 @@ $("rotateBtn").onclick = async () => {
   try {
     rotation = (rotation + 90) % 360;
     resetThumbnails();
-    await renderPage(currentPage);
+    if (viewMode === "continuous") refreshCurrentView();
+    else await renderPage(currentPage);
     if (wasOpen) toggleThumbnails();
     toast(`Página girada ${rotation}°`);
   } finally {
@@ -3412,6 +3737,12 @@ async function toggleFocusMode() {
 }
 function syncFullscreenState() {
   const active = Boolean(fullscreenElement());
+  // Si el usuario abandona la pantalla completa desde el navegador, salimos
+  // también del modo presentación para no dejar la interfaz oculta.
+  if (!active && presentationMode) {
+    exitPresentation();
+    return;
+  }
   document.body.classList.toggle("focus-mode", active);
   if (!active) setReaderChromeHidden(false, false);
   updateFocusButton(active);
@@ -3438,6 +3769,12 @@ $("canvasWrap").addEventListener("pointerup", (event) => {
   ) return;
   const selection = window.getSelection();
   if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+  if (presentationMode) {
+    // En presentación, el clic avanza (mitad derecha) o retrocede (izquierda).
+    const rect = $("canvasWrap").getBoundingClientRect();
+    stepPage(event.clientX < rect.left + rect.width / 2 ? -1 : 1);
+    return;
+  }
   setReaderChromeHidden(!document.body.classList.contains("reader-chrome-hidden"));
 });
 $("pageJump").onchange = (e) => {
@@ -3446,6 +3783,7 @@ $("pageJump").onchange = (e) => {
   else if (pdfDoc) e.target.value = currentPage;
 };
 $("pageScrubber").oninput = (e) => scheduleScrubPage(Number(e.target.value));
+$("viewer").addEventListener("scroll", onContinuousScroll, { passive: true });
 $("viewer").addEventListener("wheel", (event) => {
   // Ctrl/⌘ + rueda (o pellizco de trackpad) hace zoom sobre el punto que se
   // está mirando. El documento se vuelve a renderizar, no se escala por CSS.
@@ -3531,6 +3869,18 @@ function applyReflowPreferences() {
 }
 async function setReadingMode(mode) {
   reflowMode = mode === "reflow";
+  if (reflowMode && viewMode !== "single") {
+    // La lectura maquetada usa el motor de página única.
+    if (viewMode === "continuous") teardownContinuous();
+    viewMode = "single";
+    localStorage.setItem("paper.view-mode", "single");
+    document.querySelectorAll("[data-view-mode]").forEach((button) =>
+      button.classList.toggle("active", button.dataset.viewMode === "single"),
+    );
+    $("viewer").classList.remove("double-mode");
+    $("continuousView").hidden = true;
+    $("facingWrap").hidden = true;
+  }
   localStorage.setItem("paper.reading-mode", mode);
   document.body.classList.toggle("reflow-mode", reflowMode);
   $("markerModeBtn").disabled = reflowMode;
@@ -4032,11 +4382,16 @@ window.addEventListener("keydown", (e) => {
     navigateForward();
     return;
   }
-  if (e.key === "ArrowRight" || e.key === "PageDown")
-    renderPage(currentPage + 1);
-  if (e.key === "ArrowLeft" || e.key === "PageUp") renderPage(currentPage - 1);
+  if (presentationMode && e.key === " ") {
+    e.preventDefault();
+    stepPage(1);
+    return;
+  }
+  if (e.key === "ArrowRight" || e.key === "PageDown") stepPage(1);
+  if (e.key === "ArrowLeft" || e.key === "PageUp") stepPage(-1);
   if (e.key === "Home") jumpToPage(1);
   if (e.key === "End" && pdfDoc) jumpToPage(pdfDoc.numPages);
+  if (e.key === "p" || e.key === "P") togglePresentation();
   if (e.key === "+" || e.key === "=") {
     changeReaderZoom(ZOOM_STEP);
   }
@@ -4049,6 +4404,10 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "l" || e.key === "L") setReadingMode(reflowMode ? "pdf" : "reflow");
   if (e.key === "s" || e.key === "S") setAnnotationSelectMode();
   if (e.key === "Escape") {
+    if (presentationMode) {
+      exitPresentation();
+      return;
+    }
     if (document.body.classList.contains("reader-chrome-hidden") && !fullscreenElement())
       setReaderChromeHidden(false);
     hideAnnotationActions();
