@@ -22,3 +22,5 @@ Incluye:
 - Historial de vistas atrás/adelante para volver al punto anterior tras saltar desde el índice, un enlace, la búsqueda o un marcador (botones en la barra, Alt+←/→ y botones laterales del ratón).
 - Enlaces del PDF clicables: los internos saltan a su sección y las direcciones web se abren en una pestaña nueva.
 - Copia del texto seleccionado desde el menú de selección.
+- Búsqueda avanzada: distinguir mayúsculas, palabra completa y expresiones regulares, con contador de coincidencias y navegación anterior/siguiente entre todas las apariciones.
+- Búsqueda en toda la biblioteca: encuentra un término en el texto de todos los PDFs guardados, con resultados agrupados por documento; al pulsar uno se abre el documento en la página correspondiente.

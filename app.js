@@ -89,6 +89,13 @@ let continuousRendered = new Set();
 let continuousScrollFrame = 0;
 let continuousResizeObserver = null;
 let presentationMode = false;
+let searchOptions = { caseSensitive: false, wholeWord: false, regex: false };
+let searchScope = "document";
+let searchRawQuery = "";
+let searchRegex = null;
+let searchSignature = "";
+let preserveSearchOnOpen = false;
+let librarySearchToken = 0;
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 5;
@@ -534,10 +541,19 @@ async function openStored(id) {
     $("facingWrap").hidden = true;
     $("viewer").classList.remove("double-mode");
     resetThumbnails();
-    searchQuery = "";
-    searchMatches = [];
-    searchIndex = -1;
-    renderSearchResults();
+    // Al abrir desde un resultado de búsqueda en la biblioteca conservamos las
+    // coincidencias para poder seguir navegando entre documentos.
+    if (preserveSearchOnOpen) {
+      preserveSearchOnOpen = false;
+    } else {
+      searchQuery = "";
+      searchRawQuery = "";
+      searchRegex = null;
+      searchSignature = "";
+      searchMatches = [];
+      searchIndex = -1;
+      renderSearchResults();
+    }
     currentPage = Math.min(
       Number(localStorage.getItem(key(id, "page")) || 1),
       pdfDoc.numPages,
@@ -1281,15 +1297,12 @@ async function renderLinkLayerInto(layer, page, viewport, token) {
   layer.append(fragment);
 }
 function paintSearchHits() {
-  if (!searchQuery) return;
+  if (!searchRegex) return;
+  // Copia sin la bandera global para poder usar .test() sin arrastrar lastIndex.
+  const matcher = new RegExp(searchRegex.source, searchRegex.flags.replace("g", ""));
   document
     .querySelectorAll("#textLayer span")
-    .forEach((span) =>
-      span.classList.toggle(
-        "search-hit",
-        span.textContent.toLowerCase().includes(searchQuery),
-      ),
-    );
+    .forEach((span) => span.classList.toggle("search-hit", matcher.test(span.textContent)));
 }
 
 async function fitWidth() {
@@ -3328,78 +3341,195 @@ async function askLocalAiLegacy() {
 function renderSearchResults() {
   const section = $("searchResultsSection"),
     list = $("searchResults");
+  updateSearchCounter();
   if (!searchMatches.length) {
-    section.hidden = true;
-    list.innerHTML = "";
+    if (!searchRawQuery) {
+      section.hidden = true;
+      list.innerHTML = "";
+      return;
+    }
+    section.hidden = false;
+    list.innerHTML = '<span style="color:var(--muted);font-size:13px;padding:0 9px">Sin coincidencias.</span>';
     return;
   }
   section.hidden = false;
-  list.innerHTML = searchMatches
-    .map(
-      (match, index) =>
-        `<button class="bookmark ${index === searchIndex ? "active" : ""}" data-search-index="${index}"><strong>Página ${match.page}</strong><small>${escapeHtml(match.snippet)}</small></button>`,
-    )
-    .join("");
+  const entry = (match, index) =>
+    `<button class="bookmark ${index === searchIndex ? "active" : ""}" data-search-index="${index}"><strong>Página ${match.page}</strong><small>${escapeHtml(match.snippet)}</small></button>`;
+  if (searchScope === "library") {
+    const groups = new Map();
+    searchMatches.forEach((match, index) => {
+      if (!groups.has(match.docId)) groups.set(match.docId, { name: match.docName, items: [] });
+      groups.get(match.docId).items.push({ index });
+    });
+    let html = "";
+    for (const [, group] of groups) {
+      html += `<div class="search-doc-group"><span>${escapeHtml(group.name)}</span><em>${group.items.length}</em></div>`;
+      html += group.items.map(({ index }) => entry(searchMatches[index], index)).join("");
+    }
+    list.innerHTML = html;
+  } else {
+    list.innerHTML = searchMatches.map((match, index) => entry(match, index)).join("");
+  }
   document.querySelectorAll("[data-search-index]").forEach(
-    (button) =>
-      (button.onclick = async () => {
-        searchIndex = Number(button.dataset.searchIndex);
-        await jumpToPage(searchMatches[searchIndex].page);
-        renderSearchResults();
-      }),
+    (button) => (button.onclick = () => openSearchMatch(Number(button.dataset.searchIndex))),
   );
 }
+// Construye una expresión regular según las opciones (mayúsculas, palabra
+// completa, regex libre). Devuelve null si el patrón regex no es válido.
+function buildSearchRegex(rawQuery) {
+  const query = rawQuery.trim();
+  if (!query) return null;
+  const flags = searchOptions.caseSensitive ? "g" : "gi";
+  try {
+    if (searchOptions.regex) return new RegExp(query, flags);
+    let escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (searchOptions.wholeWord) escaped = `\\b${escaped}\\b`;
+    return new RegExp(escaped, flags);
+  } catch {
+    return null;
+  }
+}
+function collectPageMatches(text, regex, page, extra = {}) {
+  const matches = [];
+  regex.lastIndex = 0;
+  let match,
+    guard = 0;
+  while ((match = regex.exec(text)) && guard++ < 5000) {
+    if (match.index === regex.lastIndex) regex.lastIndex++;
+    if (!match[0]) continue;
+    const at = match.index;
+    matches.push({
+      page,
+      snippet: text.slice(Math.max(0, at - 42), at + match[0].length + 72).replace(/\s+/g, " ").trim(),
+      ...extra,
+    });
+  }
+  return matches;
+}
+function currentSearchSignature(raw) {
+  return `${searchScope}|${raw}|${JSON.stringify(searchOptions)}`;
+}
 async function search(query) {
-  if (!pdfDoc || !query.trim()) return;
-  const q = query.trim().toLowerCase();
-  if (q === searchQuery && searchMatches.length) {
-    searchIndex = (searchIndex + 1) % searchMatches.length;
-    await renderPage(searchMatches[searchIndex].page);
-    renderSearchResults();
-    toast(
-      `Coincidencia ${searchIndex + 1} de ${searchMatches.length} · página ${currentPage}`,
-    );
+  const raw = (query ?? $("searchInput").value ?? "").trim();
+  if (!raw) return;
+  if (searchScope === "library") return searchLibrary(raw);
+  if (!pdfDoc) return;
+  const regex = buildSearchRegex(raw);
+  if (!regex) {
+    toast("Expresión regular no válida");
+    return;
+  }
+  const signature = currentSearchSignature(raw);
+  // Repetir la misma búsqueda avanza a la siguiente coincidencia.
+  if (signature === searchSignature && searchMatches.length) {
+    navigateSearch(1);
     return;
   }
   const token = ++searchToken;
-  searchQuery = q;
+  searchSignature = signature;
+  searchRawQuery = raw;
+  searchQuery = raw.toLowerCase();
+  searchRegex = regex;
   searchMatches = [];
   searchIndex = -1;
-  showLoader(true, "Buscando…", `“${query.trim()}”`);
+  showLoader(true, "Buscando…", `“${raw}”`);
   try {
     for (let i = 1; i <= pdfDoc.numPages; i++) {
       if (token !== searchToken) return;
-      const p = await pdfDoc.getPage(i);
-      const tc = await p.getTextContent();
+      const p = await getCachedPage(i);
+      const tc = await getCachedTextContent(p);
       const text = tc.items.map((x) => x.str).join(" ");
-      const at = text.toLowerCase().indexOf(q);
-      if (at >= 0)
-        searchMatches.push({
-          page: i,
-          snippet: text
-            .slice(Math.max(0, at - 42), at + q.length + 72)
-            .replace(/\s+/g, " ")
-            .trim(),
-        });
+      searchMatches.push(...collectPageMatches(text, regex, i));
       $("loaderText").textContent = `Página ${i} de ${pdfDoc.numPages}`;
     }
     if (!searchMatches.length) {
       renderSearchResults();
-      toast("No se encontró el texto");
+      toast("Sin coincidencias");
       return;
     }
-    const afterCurrent = searchMatches.findIndex(
-      (match) => match.page >= currentPage,
-    );
+    const afterCurrent = searchMatches.findIndex((match) => match.page >= currentPage);
     searchIndex = afterCurrent < 0 ? 0 : afterCurrent;
     await jumpToPage(searchMatches[searchIndex].page);
     renderSearchResults();
+    toast(`${searchMatches.length} coincidencia${searchMatches.length > 1 ? "s" : ""}`);
+  } finally {
+    showLoader(false);
+  }
+}
+// Busca el término en el texto de todos los PDFs guardados en la biblioteca.
+async function searchLibrary(raw) {
+  const regex = buildSearchRegex(raw);
+  if (!regex) {
+    toast("Expresión regular no válida");
+    return;
+  }
+  const token = ++searchToken;
+  const libToken = ++librarySearchToken;
+  searchSignature = currentSearchSignature(raw);
+  searchRawQuery = raw;
+  searchQuery = raw.toLowerCase();
+  searchRegex = regex;
+  searchMatches = [];
+  searchIndex = -1;
+  const records = (await dbAll()).filter((record) => record.kind !== "markdown" && record.blob);
+  showLoader(true, "Buscando en la biblioteca…", `“${raw}”`);
+  try {
+    for (let d = 0; d < records.length; d++) {
+      if (token !== searchToken || libToken !== librarySearchToken) return;
+      const record = records[d];
+      $("loaderText").textContent = `${record.name} · ${d + 1}/${records.length}`;
+      try {
+        const doc =
+          currentBook?.id === record.id && pdfDoc
+            ? pdfDoc
+            : await pdfjsLib.getDocument({ data: new Uint8Array(await record.blob.arrayBuffer()) }).promise;
+        for (let i = 1; i <= doc.numPages; i++) {
+          if (token !== searchToken || libToken !== librarySearchToken) return;
+          const page = await doc.getPage(i);
+          const content = await page.getTextContent();
+          const text = content.items.map((x) => x.str).join(" ");
+          searchMatches.push(...collectPageMatches(text, regex, i, { docId: record.id, docName: record.name }));
+        }
+        if (doc !== pdfDoc) doc.destroy?.();
+      } catch (error) {
+        console.warn("No se pudo buscar en", record.name, error);
+      }
+    }
+    if (!searchMatches.length) {
+      renderSearchResults();
+      toast("Sin coincidencias en la biblioteca");
+      return;
+    }
+    searchIndex = 0;
+    renderSearchResults();
     toast(
-      `Coincidencia ${searchIndex + 1} de ${searchMatches.length} · página ${currentPage}`,
+      `${searchMatches.length} coincidencia${searchMatches.length > 1 ? "s" : ""} en ${new Set(searchMatches.map((m) => m.docId)).size} documento(s)`,
     );
   } finally {
     showLoader(false);
   }
+}
+function updateSearchCounter() {
+  const counter = $("searchCounter");
+  if (!counter) return;
+  counter.textContent = searchMatches.length ? `${searchIndex + 1} / ${searchMatches.length}` : "—";
+}
+async function openSearchMatch(index) {
+  if (index < 0 || index >= searchMatches.length) return;
+  searchIndex = index;
+  const match = searchMatches[index];
+  if (match.docId && match.docId !== currentBook?.id) {
+    preserveSearchOnOpen = true;
+    await openStored(match.docId);
+    searchRegex = buildSearchRegex(searchRawQuery);
+    searchQuery = searchRawQuery.toLowerCase();
+  }
+  await jumpToPage(match.page);
+  renderSearchResults();
+}
+function navigateSearch(direction) {
+  if (!searchMatches.length) return;
+  openSearchMatch((searchIndex + direction + searchMatches.length) % searchMatches.length);
 }
 
 async function streamWebLlmVision(question) {
@@ -3451,7 +3581,11 @@ function showEmpty() {
   $("outlineList").innerHTML = "";
   $("annotationList").innerHTML = "";
   searchQuery = "";
+  searchRawQuery = "";
+  searchRegex = null;
+  searchSignature = "";
   searchMatches = [];
+  searchIndex = -1;
   renderSearchResults();
   resetThumbnails();
   renderBookmarks();
@@ -3626,8 +3760,46 @@ $("toolbarFitBtn").onclick = fitWidth;
 $("bookmarkBtn").onclick = toggleBookmark;
 $("searchBtn").onclick = () => search($("searchInput").value);
 $("searchInput").onkeydown = (e) => {
-  if (e.key === "Enter") search(e.target.value);
+  if (e.key === "Enter") {
+    if (e.shiftKey && searchMatches.length) navigateSearch(-1);
+    else search(e.target.value);
+  }
 };
+// Opciones de búsqueda (mayúsculas, palabra completa, regex).
+function applySearchOptionButtons() {
+  $("searchCaseBtn")?.setAttribute("aria-pressed", String(searchOptions.caseSensitive));
+  $("searchCaseBtn")?.classList.toggle("active", searchOptions.caseSensitive);
+  $("searchWordBtn")?.setAttribute("aria-pressed", String(searchOptions.wholeWord));
+  $("searchWordBtn")?.classList.toggle("active", searchOptions.wholeWord);
+  $("searchRegexBtn")?.setAttribute("aria-pressed", String(searchOptions.regex));
+  $("searchRegexBtn")?.classList.toggle("active", searchOptions.regex);
+}
+function toggleSearchOption(name) {
+  searchOptions[name] = !searchOptions[name];
+  if (name === "regex" && searchOptions.regex) searchOptions.wholeWord = false;
+  setJSON("paper.search-options", searchOptions);
+  applySearchOptionButtons();
+  // Forzar una nueva búsqueda con las opciones actualizadas.
+  searchSignature = "";
+  if ($("searchInput").value.trim()) search($("searchInput").value);
+}
+$("searchCaseBtn").onclick = () => toggleSearchOption("caseSensitive");
+$("searchWordBtn").onclick = () => toggleSearchOption("wholeWord");
+$("searchRegexBtn").onclick = () => toggleSearchOption("regex");
+$("searchPrev").onclick = () => navigateSearch(-1);
+$("searchNext").onclick = () => navigateSearch(1);
+document.querySelectorAll("[data-search-scope]").forEach((button) => {
+  button.onclick = () => {
+    searchScope = button.dataset.searchScope;
+    document.querySelectorAll("[data-search-scope]").forEach((other) =>
+      other.classList.toggle("active", other === button),
+    );
+    searchSignature = "";
+    if ($("searchInput").value.trim()) search($("searchInput").value);
+  };
+});
+searchOptions = { ...searchOptions, ...getJSON("paper.search-options", {}) };
+applySearchOptionButtons();
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("paper.theme", theme);
