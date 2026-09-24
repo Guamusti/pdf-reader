@@ -1,11 +1,33 @@
 /* Paper Reader v3 — capa de interfaz. Se carga después de reader-ui.css. */
 
+/* ---- Disposición general ------------------------------------------------ */
+/* Entre 901 y 1179px la barra lateral es un cajón flotante (reader-ui.css),
+   pero una regla posterior le seguía reservando su columna y el lector quedaba
+   comprimido en 228px. Sin columna lateral, el contenido ocupa todo el ancho. */
+@media (max-width: 1179px) {
+  :root { --paper-sidebar: 0px; }
+  .app { grid-template-columns: minmax(0, 1fr) !important; }
+  .sidebar { width: min(320px, 86vw) !important; padding-inline: 16px !important; }
+}
+
 /* ---- Cabecera ---------------------------------------------------------- */
 .nav-history { display: inline-flex; align-items: center; gap: 2px; }
 .nav-history .btn { width: 30px; min-height: 30px; border-radius: 7px; font-size: 14px; color: var(--muted); }
 .nav-history .btn:not(:disabled):hover { color: var(--text); }
 .nav-divider { width: 1px; height: 18px; margin: 0 4px; background: var(--line); }
 @media (max-width: 700px) { .nav-history { display: none; } }
+
+/* Las acciones nunca invaden el navegador de páginas: la columna central y la
+   derecha se dimensionan por su contenido y el título cede el espacio. */
+@media (min-width: 701px) {
+  .toolbar { grid-template-columns: minmax(0, 1fr) auto auto !important; }
+  .toolbar-nav { justify-self: end; }
+}
+@media (max-width: 1560px) {
+  .assistant-group .mode-button span, .ink-group .mode-button span { display: none; }
+  .assistant-group .mode-button, .ink-group .mode-button { width: 32px; padding: 0 !important; justify-content: center; }
+}
+@media (max-width: 1180px) { .palette-trigger-label { display: none; } }
 
 /* La búsqueda vive en la paleta de comandos: un único punto de entrada en
    cualquier ancho de pantalla (antes el campo se ocultaba entre 1180 y 1500px). */
@@ -31,7 +53,7 @@
   background: var(--surface-solid); color: var(--muted);
   font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-@media (max-width: 1280px) { .palette-trigger-label { display: none; } .palette-trigger { padding-right: 6px; } }
+
 @media (max-width: 700px) { .palette-trigger { width: 34px; min-height: 34px; padding: 0; justify-content: center; } .palette-kbd { display: none; } }
 
 /* Sin documento abierto sólo quedan visibles la marca, la biblioteca y la paleta. */
@@ -84,3 +106,83 @@ body:not(.has-doc) .toolbar-actions { display: none !important; }
 .shortcut-row span:last-child { display: flex; gap: 3px; flex: 0 0 auto; }
 
 @media (prefers-reduced-motion: reduce) { .palette-card { animation: none; } }
+
+/* ---- Notas adhesivas ---------------------------------------------------- */
+.sticky-layer { position: absolute; inset: 0; z-index: 6; pointer-events: none; }
+.sticky-pin {
+  position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; padding: 0;
+  display: grid; place-items: center; pointer-events: auto; cursor: grab; touch-action: none;
+  border: 0; border-radius: 7px 7px 7px 2px;
+  background: var(--sticky, #f6c945); color: rgba(0, 0, 0, .72);
+  box-shadow: 0 2px 0 rgba(0, 0, 0, .12), 0 6px 16px rgba(0, 0, 0, .22);
+  font: 750 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.sticky-pin::after { content: ""; position: absolute; right: 0; bottom: 0; border-style: solid; border-width: 0 0 8px 8px; border-color: transparent transparent rgba(0, 0, 0, .18) transparent; border-radius: 0 0 5px 0; }
+.sticky-pin:hover, .sticky-pin.active { transform: scale(1.12); box-shadow: 0 0 0 3px color-mix(in srgb, var(--sticky, #f6c945) 45%, transparent), 0 8px 20px rgba(0, 0, 0, .25); }
+.sticky-pin.dragging { cursor: grabbing; transform: scale(1.18); }
+body.sticky-placing .canvas-wrap, body.sticky-placing .canvas-wrap * { cursor: copy !important; }
+body.sticky-placing .canvas-wrap { outline: 2px dashed color-mix(in srgb, #e3b21d 70%, transparent); outline-offset: 6px; }
+.notes-group .btn.active, #stickyNoteBtn[aria-pressed="true"] { background: var(--text) !important; color: var(--surface-solid) !important; }
+
+.sticky-editor { position: fixed; z-index: 95; width: min(300px, calc(100vw - 20px)); padding: 12px; background: var(--surface-solid); border: 1px solid var(--line); border-top: 4px solid var(--sticky, #f6c945); border-radius: 14px; box-shadow: var(--shadow); }
+.sticky-editor[hidden] { display: none; }
+.sticky-editor header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.sticky-editor header strong { font-size: 13px; }
+.sticky-editor header small { display: block; color: var(--muted); font-size: 11px; font-weight: 500; }
+.sticky-editor textarea { width: 100%; min-height: 110px; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); color: var(--text); font: inherit; font-size: 14px; line-height: 1.5; outline: none; }
+.sticky-editor textarea:focus { border-color: color-mix(in srgb, var(--text) 30%, var(--line)); }
+.sticky-editor footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.sticky-colors { display: flex; gap: 6px; }
+.sticky-colors button { width: 22px; height: 22px; padding: 0; border: 2px solid var(--surface-solid); border-radius: 50%; background: var(--swatch); box-shadow: 0 0 0 1px var(--line); cursor: pointer; }
+.sticky-colors button.active { box-shadow: 0 0 0 2px var(--text); }
+.sticky-editor .danger { color: #d84a4a; min-height: 30px; font-size: 12px; }
+
+.thumb.has-notes::before { content: ""; position: absolute; z-index: 2; top: 6px; right: 6px; width: 9px; height: 9px; border-radius: 50%; background: #f0b429; box-shadow: 0 0 0 2px #fff; }
+
+/* ---- Cuaderno ------------------------------------------------------------ */
+.notebook {
+  position: fixed; z-index: 70; top: calc(var(--paper-topbar, 58px) + 10px); right: 12px; bottom: 12px;
+  width: min(360px, calc(100vw - 24px)); display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto;
+  background: var(--surface-solid); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden;
+}
+.notebook[hidden] { display: none; }
+.notebook-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 14px 10px 16px; }
+.notebook-kicker { display: block; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.notebook-head strong { display: block; margin-top: 2px; font-size: 16px; letter-spacing: -.01em; }
+.notebook-tabs { display: flex; gap: 4px; margin: 0 12px 10px; padding: 3px; background: var(--soft); border: 1px solid var(--line); border-radius: 10px; }
+.notebook-tabs button { flex: 1; min-height: 30px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.notebook-tabs button[aria-selected="true"] { background: var(--surface-solid); color: var(--text); font-weight: 650; box-shadow: 0 1px 3px rgba(0, 0, 0, .08); }
+.notebook-body { min-height: 0; overflow: auto; padding: 0 12px 12px; }
+.notebook-section { display: grid; gap: 12px; height: 100%; grid-template-rows: minmax(0, 1fr) auto; }
+.notebook-section[hidden] { display: none; }
+.notebook-text { width: 100%; height: 100%; min-height: 240px; resize: none; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--soft); color: var(--text); font: 15px/1.6 Georgia, "Iowan Old Style", "Times New Roman", serif; outline: none; }
+.notebook-text:focus { border-color: color-mix(in srgb, var(--text) 25%, var(--line)); background: var(--surface-solid); }
+.notebook-stickies:empty { display: none; }
+.notebook-stickies { display: grid; gap: 6px; }
+.notebook-stickies .label { margin: 2px 2px 0; }
+.notebook-sticky { display: flex; gap: 10px; align-items: flex-start; width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-left: 4px solid var(--sticky, #f6c945); border-radius: 10px; background: var(--surface-solid); color: var(--text); text-align: left; font: inherit; font-size: 13px; line-height: 1.4; cursor: pointer; }
+.notebook-sticky:hover { background: var(--soft); }
+.notebook-sticky b { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+.notebook-all { display: grid; gap: 8px; align-content: start; }
+.notebook-section[data-notebook-section="all"] { display: block; height: auto; }
+.notebook-section[data-notebook-section="all"][hidden] { display: none; }
+.notebook-entry { display: grid; gap: 4px; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-solid); color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.notebook-entry:hover { background: var(--soft); }
+.notebook-entry strong { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+.notebook-entry strong span { color: var(--muted); font-size: 11px; font-weight: 500; }
+.notebook-entry small { color: var(--muted); font-size: 12px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.notebook-empty { padding: 30px 10px; color: var(--muted); font-size: 13px; line-height: 1.5; text-align: center; }
+.notebook-foot { display: flex; justify-content: space-between; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+@media (min-width: 1100px) {
+  body.notebook-open .viewer { padding-right: 396px !important; }
+  body.notebook-open .footer { left: calc(50% - 190px) !important; }
+}
+@media (min-width: 701px) {
+  body.notebook-open .thumbnail-rail { right: 384px !important; }
+}
+@media (max-width: 700px) {
+  .notebook { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; height: min(62dvh, 520px); }
+  .notes-group #notebookBtn { display: none; }
+}
+@media (max-width: 430px) { .notes-group { display: none !important; } }

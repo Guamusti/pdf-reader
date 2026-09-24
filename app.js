@@ -460,6 +460,9 @@ function markdownToHtml(source) {
 }
 async function openMarkdownStored(rec) {
   flushReadingSession(true);
+  flushNotebook();
+  setStickyPlacement(false);
+  if (activeStickyId) closeStickyEditor();
   markdownContent = await rec.blob.text();
   resetRenderEngine();
   teardownContinuous();
@@ -511,6 +514,9 @@ async function openStored(id) {
   try {
     if (currentBook?.id !== id) flushReadingSession(true);
     if (ttsActive && currentBook?.id !== id) stopReadAloud();
+    flushNotebook();
+    setStickyPlacement(false);
+    if (activeStickyId) closeStickyEditor();
     const rec = await dbGet(id);
     if (!rec) throw new Error("Documento no encontrado");
     if (rec.kind === "markdown") {
@@ -583,6 +589,7 @@ async function openStored(id) {
     renderAnnotationList();
     await renderOutline();
     renderLibrary();
+    if (!$("notebookPanel").hidden) renderNotebook();
     document.body.classList.remove("sidebar-open");
     markReadingActivity();
   } catch (e) {
@@ -688,6 +695,7 @@ function updatePageChrome() {
   $("progressBar").style.width = `${(currentPage / pdfDoc.numPages) * 100}%`;
   $("prevBtn").disabled = currentPage === 1;
   $("nextBtn").disabled = currentPage === pdfDoc.numPages;
+  syncNotebookPage();
 }
 // ---- Historial de vistas (atrás / adelante) ----
 // Registra los saltos "no secuenciales" (índice, enlaces, búsqueda, marcadores)
@@ -1203,6 +1211,9 @@ function paletteActions() {
     { icon: "☰", title: "Mostrar u ocultar el panel lateral", keys: "indice sidebar contenido", when: hasDoc, run: toggleSidebar },
     { icon: "◇", title: "Marcar o desmarcar esta página", keys: "marcador bookmark", shortcut: ["B"], when: hasPdf, run: toggleBookmark },
     { icon: "✐", title: "Herramientas Ink (resaltar, subrayar, dibujar)", keys: "anotar marcador subrayado pluma", when: hasPdf && !reflowMode, run: () => $("markerModeBtn").click() },
+    { icon: "✎", title: "Añadir nota adhesiva en esta página", keys: "post-it comentario apunte pegar", shortcut: ["N"], when: hasPdf && !reflowMode, run: () => setStickyPlacement(true) },
+    { icon: "▥", title: $("notebookPanel").hidden ? "Abrir cuaderno de notas" : "Cerrar cuaderno de notas", keys: "apuntes notas pagina resumen", shortcut: ["C"], when: hasDoc, run: toggleNotebook },
+    { icon: "▥", title: "Escribir la nota del documento", keys: "resumen general apuntes", when: hasDoc, run: () => openNotebook("doc") },
     { icon: "↶", title: "Deshacer anotación", keys: "undo", shortcut: ["Ctrl", "Z"], when: hasDoc && annotationUndo.length > 0, run: undoAnnotation },
     { icon: "✦", title: "Preguntar al documento (IA local)", keys: "asistente ia chat pregunta", when: hasDoc, run: openAssistantForDocument },
     { icon: "☀", title: "Tema claro", keys: "apariencia color", run: () => setTheme("light") },
@@ -1445,14 +1456,14 @@ async function applyPaletteSearch(raw, page = 0, occurrence = 0) {
     await openSearchMatch(target);
     toast(`${searchMatches.length} coincidencia${searchMatches.length > 1 ? "s" : ""}`);
   }
-  if (window.innerWidth > 900 && document.body.classList.contains("sidebar-collapsed")) toggleSidebar();
+  if (!isDrawerLayout() && document.body.classList.contains("sidebar-collapsed")) toggleSidebar();
   setSidebarPanel("contents");
 }
 // ---- Atajos de teclado ----
 const SHORTCUT_GROUPS = [
   ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
   ["Lectura", [["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
-  ["Anotaciones", [["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
+  ["Notas y anotaciones", [["Nota adhesiva en la página", ["N"]], ["Cuaderno de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
   ["General", [["Atajos de teclado", ["?"]], ["Cerrar paneles", ["Esc"]]]],
 ];
 function openShortcuts() {
@@ -1468,6 +1479,385 @@ function openShortcuts() {
 }
 function closeShortcuts() {
   $("shortcutsPanel").hidden = true;
+}
+
+// ---- Notas adhesivas en la página ----
+// Se guardan como anotaciones de tipo "sticky" con una posición normalizada
+// (x, y) y `rects: []`, así el resto del sistema (deshacer, borrar, listar,
+// exportar) las trata igual que cualquier otra anotación.
+const STICKY_COLORS = ["yellow", "green", "blue", "pink", "orange", "purple"];
+let stickyPlacement = false;
+let activeStickyId = null;
+let freshStickyId = null;
+let stickySaveTimer = 0;
+let stickyPendingText = null;
+function stickyColorValue(color) {
+  return annotationStyle(color || "yellow", 0.95);
+}
+function renderStickyNotes() {
+  const layer = $("stickyLayer");
+  if (!layer) return;
+  layer.replaceChildren();
+  if (activeStickyId) {
+    const active = annotations().find((mark) => mark.id === activeStickyId);
+    if (!active || active.page !== currentPage) closeStickyEditor();
+  }
+  if (!currentBook || !pdfDoc || reflowMode) return;
+  annotations()
+    .filter((mark) => mark.type === "sticky" && mark.page === currentPage)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .forEach((mark, i) => {
+      const pin = document.createElement("button");
+      pin.className = "sticky-pin";
+      pin.dataset.stickyId = mark.id;
+      pin.style.left = `${mark.x * 100}%`;
+      pin.style.top = `${mark.y * 100}%`;
+      pin.style.setProperty("--sticky", stickyColorValue(mark.color));
+      pin.classList.toggle("active", mark.id === activeStickyId);
+      pin.textContent = String(i + 1);
+      pin.title = (mark.note || "Nota vacía").slice(0, 180);
+      pin.setAttribute("aria-label", `Nota ${i + 1}: ${(mark.note || "vacía").slice(0, 80)}`);
+      layer.append(pin);
+    });
+}
+function setStickyPlacement(on) {
+  if (on) {
+    if (!pdfDoc) return toast("Abre un PDF primero");
+    if (reflowMode) return toast("Vuelve al PDF original para colocar notas en la página");
+    if (viewMode === "continuous") setViewMode("single", { silent: true });
+    if (markerMode) toggleMarkerMode();
+    if (eraserMode) toggleEraserMode(false);
+  }
+  stickyPlacement = Boolean(on);
+  document.body.classList.toggle("sticky-placing", stickyPlacement);
+  $("stickyNoteBtn")?.setAttribute("aria-pressed", String(stickyPlacement));
+  if (stickyPlacement) toast("Toca la página donde quieras la nota · Esc para cancelar");
+}
+function createStickyAt(x, y) {
+  if (!currentBook) return;
+  const mark = {
+    id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+    page: currentPage,
+    type: "sticky",
+    color: localStorage.getItem("paper.sticky-color") || "yellow",
+    x: Math.max(0.02, Math.min(0.98, x)),
+    y: Math.max(0.02, Math.min(0.98, y)),
+    note: "",
+    text: "",
+    rects: [],
+    createdAt: Date.now(),
+  };
+  commitAnnotations([...annotations(), mark]);
+  freshStickyId = mark.id;
+  renderAnnotations();
+  renderAnnotationList();
+  openStickyEditor(mark.id);
+}
+function flushStickyText() {
+  clearTimeout(stickySaveTimer);
+  stickySaveTimer = 0;
+  if (!stickyPendingText) return;
+  const { id, text } = stickyPendingText;
+  stickyPendingText = null;
+  updateAnnotation(id, { note: text.slice(0, 4000) }, false);
+}
+function openStickyEditor(id) {
+  const mark = annotations().find((item) => item.id === id);
+  if (!mark) return;
+  if (activeStickyId && activeStickyId !== id) closeStickyEditor();
+  activeStickyId = id;
+  renderStickyNotes();
+  const editor = $("stickyEditor");
+  const index = annotations()
+    .filter((item) => item.type === "sticky" && item.page === mark.page)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .findIndex((item) => item.id === id);
+  editor.style.setProperty("--sticky", stickyColorValue(mark.color));
+  editor.innerHTML = `<header><div><strong>Nota ${index + 1}</strong><small>Página ${mark.page}${mark.createdAt ? ` · ${new Date(mark.createdAt).toLocaleDateString("es-ES", { day: "numeric", month: "short", year: "numeric" })}` : ""}</small></div><button class="btn icon" data-sticky-close aria-label="Cerrar nota">✕</button></header><textarea data-sticky-text placeholder="Escribe tu nota… (Ctrl+Enter para cerrar)" aria-label="Texto de la nota">${escapeHtml(mark.note || "")}</textarea><footer><div class="sticky-colors" role="group" aria-label="Color de la nota">${STICKY_COLORS.map((color) => `<button data-sticky-color="${color}" class="${color === (mark.color || "yellow") ? "active" : ""}" style="--swatch:${stickyColorValue(color)}" aria-label="Color ${color}"></button>`).join("")}</div><button class="btn danger" data-sticky-delete>Eliminar</button></footer>`;
+  editor.hidden = false;
+  positionStickyEditor();
+  const textarea = editor.querySelector("[data-sticky-text]");
+  textarea.addEventListener("input", () => {
+    stickyPendingText = { id, text: textarea.value };
+    clearTimeout(stickySaveTimer);
+    stickySaveTimer = setTimeout(flushStickyText, 350);
+  });
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" || ((event.ctrlKey || event.metaKey) && event.key === "Enter")) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeStickyEditor();
+    }
+  });
+  editor.querySelector("[data-sticky-close]").onclick = () => closeStickyEditor();
+  editor.querySelector("[data-sticky-delete]").onclick = () => {
+    flushStickyText();
+    freshStickyId = null;
+    deleteAnnotation(id);
+    closeStickyEditor();
+  };
+  editor.querySelectorAll("[data-sticky-color]").forEach((button) => {
+    button.onclick = () => {
+      flushStickyText();
+      localStorage.setItem("paper.sticky-color", button.dataset.stickyColor);
+      updateAnnotation(id, { color: button.dataset.stickyColor });
+      editor.style.setProperty("--sticky", stickyColorValue(button.dataset.stickyColor));
+      editor.querySelectorAll("[data-sticky-color]").forEach((other) => other.classList.toggle("active", other === button));
+      renderStickyNotes();
+    };
+  });
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+}
+function positionStickyEditor() {
+  const editor = $("stickyEditor");
+  const pin = document.querySelector(`[data-sticky-id="${CSS.escape(activeStickyId || "")}"]`);
+  if (!pin || editor.hidden) return;
+  if (window.innerWidth <= 700) {
+    editor.style.left = "10px";
+    editor.style.top = "auto";
+    editor.style.bottom = "max(70px, env(safe-area-inset-bottom))";
+    return;
+  }
+  editor.style.bottom = "auto";
+  const box = pin.getBoundingClientRect();
+  const width = editor.offsetWidth || 300;
+  const height = editor.offsetHeight || 220;
+  let left = box.right + 12;
+  if (left + width > window.innerWidth - 10) left = box.left - width - 12;
+  left = Math.max(10, Math.min(left, window.innerWidth - width - 10));
+  const top = Math.max(66, Math.min(box.top - 12, window.innerHeight - height - 12));
+  editor.style.left = `${left}px`;
+  editor.style.top = `${top}px`;
+}
+function closeStickyEditor() {
+  const id = activeStickyId;
+  flushStickyText();
+  activeStickyId = null;
+  $("stickyEditor").hidden = true;
+  // Una nota recién creada que se cierra vacía no deja rastro.
+  if (id && id === freshStickyId) {
+    const mark = annotations().find((item) => item.id === id);
+    if (mark && !mark.note?.trim()) {
+      commitAnnotations(annotations().filter((item) => item.id !== id), false);
+      renderAnnotationList();
+    }
+  }
+  freshStickyId = null;
+  renderStickyNotes();
+  if (!$("notebookPanel").hidden) renderNotebook();
+}
+function bindStickyInteractions() {
+  // Colocar una nota: se captura antes que la capa de texto para no iniciar
+  // una selección ni alternar la interfaz inmersiva.
+  $("canvasWrap").addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!stickyPlacement || event.button > 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const box = $("canvasWrap").getBoundingClientRect();
+      setStickyPlacement(false);
+      createStickyAt((event.clientX - box.left) / box.width, (event.clientY - box.top) / box.height);
+    },
+    true,
+  );
+  // Pulsar abre la nota; arrastrar la recoloca.
+  let drag = null;
+  $("stickyLayer").addEventListener("pointerdown", (event) => {
+    const pin = event.target.closest("[data-sticky-id]");
+    if (!pin || event.button > 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    drag = { pin, id: pin.dataset.stickyId, x: event.clientX, y: event.clientY, moved: false, pointerId: event.pointerId };
+    pin.setPointerCapture(event.pointerId);
+  });
+  $("stickyLayer").addEventListener("pointermove", (event) => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 5) return;
+    drag.moved = true;
+    drag.pin.classList.add("dragging");
+    const box = $("canvasWrap").getBoundingClientRect();
+    drag.nx = Math.max(0.02, Math.min(0.98, (event.clientX - box.left) / box.width));
+    drag.ny = Math.max(0.02, Math.min(0.98, (event.clientY - box.top) / box.height));
+    drag.pin.style.left = `${drag.nx * 100}%`;
+    drag.pin.style.top = `${drag.ny * 100}%`;
+    if (activeStickyId === drag.id) positionStickyEditor();
+  });
+  const finish = (event) => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const current = drag;
+    drag = null;
+    current.pin.classList.remove("dragging");
+    if (current.moved && current.nx !== undefined) {
+      updateAnnotation(current.id, { x: current.nx, y: current.ny });
+      if (activeStickyId === current.id) requestAnimationFrame(positionStickyEditor);
+    } else if (event.type === "pointerup") {
+      activeStickyId === current.id ? closeStickyEditor() : openStickyEditor(current.id);
+    }
+  };
+  $("stickyLayer").addEventListener("pointerup", finish);
+  $("stickyLayer").addEventListener("pointercancel", finish);
+  document.addEventListener("pointerdown", (event) => {
+    if ($("stickyEditor").hidden) return;
+    if (event.target.closest("#stickyEditor, [data-sticky-id], #notebookPanel")) return;
+    closeStickyEditor();
+  });
+  window.addEventListener("resize", positionStickyEditor);
+  $("viewer").addEventListener("scroll", positionStickyEditor, { passive: true });
+}
+
+// ---- Cuaderno: notas libres por página y del documento ----
+let notebookTab = "page";
+let notebookShownPage = 0;
+let notebookSaveTimer = 0;
+function pageNotesStore() {
+  return currentBook ? getJSON(key(currentBook.id, "page-notes"), {}) : {};
+}
+function writePageNote(page, text) {
+  if (!currentBook) return;
+  const store = pageNotesStore();
+  if (text.trim()) store[page] = { text: text.slice(0, 20000), updatedAt: Date.now() };
+  else delete store[page];
+  setJSON(key(currentBook.id, "page-notes"), store);
+}
+function documentNote() {
+  return currentBook ? localStorage.getItem(key(currentBook.id, "doc-note")) || "" : "";
+}
+function writeDocumentNote(text) {
+  if (!currentBook) return;
+  if (text.trim()) localStorage.setItem(key(currentBook.id, "doc-note"), text.slice(0, 40000));
+  else localStorage.removeItem(key(currentBook.id, "doc-note"));
+}
+function wordCount(text) {
+  return (String(text).trim().match(/\S+/g) || []).length;
+}
+function flushNotebook() {
+  if (!notebookSaveTimer) return;
+  clearTimeout(notebookSaveTimer);
+  notebookSaveTimer = 0;
+  if (notebookShownPage) writePageNote(notebookShownPage, $("notebookPageText").value);
+  writeDocumentNote($("notebookDocText").value);
+  $("notebookStatus").textContent = "Guardado";
+  updateThumbNoteBadges();
+}
+function scheduleNotebookSave() {
+  $("notebookStatus").textContent = "Guardando…";
+  clearTimeout(notebookSaveTimer);
+  notebookSaveTimer = setTimeout(flushNotebook, 450);
+  updateNotebookCount();
+}
+function updateNotebookCount() {
+  const text = notebookTab === "doc" ? $("notebookDocText").value : $("notebookPageText").value;
+  $("notebookCount").textContent = notebookTab === "all" ? "" : `${wordCount(text)} palabras`;
+}
+function renderNotebook() {
+  if (!currentBook) return;
+  flushNotebook();
+  const store = pageNotesStore();
+  const stickies = annotations().filter((mark) => mark.type === "sticky");
+  notebookShownPage = currentPage;
+  $("notebookTitle").textContent = notebookTab === "doc" ? "Nota del documento" : notebookTab === "all" ? "Todas las notas" : `Página ${currentPage}`;
+  document.querySelectorAll("[data-notebook-tab]").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.notebookTab === notebookTab)));
+  document.querySelectorAll("[data-notebook-section]").forEach((section) => (section.hidden = section.dataset.notebookSection !== notebookTab));
+  if (document.activeElement !== $("notebookPageText")) $("notebookPageText").value = store[currentPage]?.text || "";
+  if (document.activeElement !== $("notebookDocText")) $("notebookDocText").value = documentNote();
+  const pageStickies = stickies.filter((mark) => mark.page === currentPage).sort((a, b) => a.createdAt - b.createdAt);
+  $("notebookStickies").innerHTML = pageStickies.length
+    ? `<div class="label">Notas adhesivas en la página</div>${pageStickies
+        .map((mark, i) => `<button class="notebook-sticky" data-notebook-sticky="${mark.id}" style="--sticky:${stickyColorValue(mark.color)}"><b>${i + 1}</b><span>${escapeHtml(mark.note || "Nota vacía")}</span></button>`)
+        .join("")}`
+    : "";
+  const pages = new Map();
+  Object.entries(store).forEach(([page, entry]) => pages.set(Number(page), { text: entry.text, stickies: 0 }));
+  stickies.forEach((mark) => {
+    const entry = pages.get(mark.page) || { text: "", stickies: 0 };
+    entry.stickies++;
+    if (!entry.text && mark.note) entry.preview = mark.note;
+    pages.set(mark.page, entry);
+  });
+  const docText = documentNote();
+  const entries = [...pages.entries()].sort((a, b) => a[0] - b[0]);
+  $("notebookAll").innerHTML =
+    (docText ? `<button class="notebook-entry" data-notebook-doc><strong>Nota del documento<span>${wordCount(docText)} palabras</span></strong><small>${escapeHtml(docText)}</small></button>` : "") +
+    (entries.length
+      ? entries
+          .map(([page, entry]) => `<button class="notebook-entry" data-notebook-page="${page}"><strong>Página ${page}<span>${entry.stickies ? `${entry.stickies} nota${entry.stickies > 1 ? "s" : ""} adhesiva${entry.stickies > 1 ? "s" : ""}` : ""}</span></strong><small>${escapeHtml(entry.text || entry.preview || "Sin texto")}</small></button>`)
+          .join("")
+      : docText
+        ? ""
+        : '<div class="notebook-empty">Aún no hay notas.<br>Escribe en «Esta página» o pulsa <b>N</b> para pegar una nota adhesiva en el PDF.</div>');
+  $("notebookStatus").textContent = store[currentPage]?.updatedAt && notebookTab === "page" ? `Editado ${new Date(store[currentPage].updatedAt).toLocaleString("es-ES", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "Se guarda automáticamente";
+  updateNotebookCount();
+}
+function syncNotebookPage() {
+  if ($("notebookPanel").hidden || notebookShownPage === currentPage) return;
+  renderNotebook();
+}
+function openNotebook(tab) {
+  if (!currentBook) return toast("Abre un documento primero");
+  if (tab) notebookTab = tab;
+  $("notebookPanel").hidden = false;
+  document.body.classList.add("notebook-open");
+  $("notebookBtn")?.setAttribute("aria-pressed", "true");
+  renderNotebook();
+  const field = notebookTab === "doc" ? $("notebookDocText") : notebookTab === "page" ? $("notebookPageText") : null;
+  field?.focus();
+  if (window.innerWidth >= 1100 && pdfDoc && !reflowMode) requestAnimationFrame(() => fitWidth());
+}
+function closeNotebook() {
+  flushNotebook();
+  $("notebookPanel").hidden = true;
+  document.body.classList.remove("notebook-open");
+  $("notebookBtn")?.setAttribute("aria-pressed", "false");
+  if (window.innerWidth >= 1100 && pdfDoc && !reflowMode) requestAnimationFrame(() => fitWidth());
+}
+function toggleNotebook() {
+  $("notebookPanel").hidden ? openNotebook() : closeNotebook();
+}
+function updateThumbNoteBadges() {
+  if (!currentBook) return;
+  const pages = new Set(Object.keys(pageNotesStore()).map(Number));
+  annotations().forEach((mark) => {
+    if (mark.type === "sticky") pages.add(mark.page);
+  });
+  document.querySelectorAll(".thumb[data-page]").forEach((card) => card.classList.toggle("has-notes", pages.has(Number(card.dataset.page))));
+}
+function bindNotebook() {
+  $("notebookBtn").onclick = toggleNotebook;
+  $("closeNotebook").onclick = closeNotebook;
+  $("stickyNoteBtn").onclick = () => setStickyPlacement(!stickyPlacement);
+  $("notebookPageText").addEventListener("input", scheduleNotebookSave);
+  $("notebookDocText").addEventListener("input", scheduleNotebookSave);
+  $("notebookPageText").addEventListener("blur", flushNotebook);
+  $("notebookDocText").addEventListener("blur", flushNotebook);
+  document.querySelectorAll("[data-notebook-tab]").forEach((button) => {
+    button.onclick = () => {
+      notebookTab = button.dataset.notebookTab;
+      renderNotebook();
+    };
+  });
+  $("notebookPanel").addEventListener("click", (event) => {
+    const sticky = event.target.closest("[data-notebook-sticky]");
+    if (sticky) return openStickyEditor(sticky.dataset.notebookSticky);
+    const page = event.target.closest("[data-notebook-page]");
+    if (page) {
+      notebookTab = "page";
+      jumpToPage(Number(page.dataset.notebookPage)).then(renderNotebook);
+      return;
+    }
+    if (event.target.closest("[data-notebook-doc]")) {
+      notebookTab = "doc";
+      renderNotebook();
+    }
+  });
+  $("notebookPanel").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closeNotebook();
+    }
+  });
+  window.addEventListener("pagehide", flushNotebook);
 }
 
 async function drainPageRenderQueue() {
@@ -2035,6 +2425,7 @@ function buildThumbnails() {
   document
     .querySelectorAll(".thumb")
     .forEach((card) => thumbObserver.observe(card));
+  updateThumbNoteBadges();
   list.addEventListener("pointerdown", (event) => {
     thumbScrubStart = { x: event.clientX, page: currentPage };
     thumbWasDragged = false;
@@ -2116,6 +2507,8 @@ function exportAnnotations() {
     document: currentBook.name,
     exportedAt: new Date().toISOString(),
     annotations: annotations(),
+    pageNotes: pageNotesStore(),
+    documentNote: documentNote(),
   };
   downloadText(
     `${currentBook.name.replace(/\.pdf$/i, "")}-anotaciones.json`,
@@ -2132,13 +2525,20 @@ function exportMarkdown() {
     `Exportado: ${new Date().toLocaleString()}`,
     "",
   ];
-  for (const mark of annotations().sort((a, b) => a.page - b.page)) {
-    lines.push(
-      `## Página ${mark.page} · ${annotationLabel(mark.type)}`,
-      mark.text ? `> ${mark.text}` : "> Fragmento sin texto disponible",
-      mark.note ? `\n${mark.note}` : "",
-      "",
-    );
+  const docText = documentNote().trim();
+  if (docText) lines.push("## Nota del documento", "", docText, "");
+  const pageNotes = pageNotesStore();
+  const marks = annotations();
+  const pages = [...new Set([...Object.keys(pageNotes).map(Number), ...marks.map((mark) => mark.page)])].sort((a, b) => a - b);
+  for (const page of pages) {
+    lines.push(`## Página ${page}`, "");
+    if (pageNotes[page]?.text) lines.push("### Apuntes", "", pageNotes[page].text.trim(), "");
+    for (const mark of marks.filter((item) => item.page === page).sort((a, b) => a.createdAt - b.createdAt)) {
+      lines.push(`### ${annotationLabel(mark.type)}`);
+      if (mark.type !== "sticky") lines.push(mark.text ? `> ${mark.text}` : "> Fragmento sin texto disponible");
+      if (mark.note) lines.push("", mark.note);
+      lines.push("");
+    }
   }
   downloadText(
     `${currentBook.name.replace(/\.pdf$/i, "")}-anotaciones.md`,
@@ -2148,7 +2548,7 @@ function exportMarkdown() {
   toast("Markdown exportado");
 }
 
-const SUPPORTED_ANNOTATION_TYPES = new Set(["highlight", "underline", "wavy", "strike", "note", "pen", "box", "arrow"]);
+const SUPPORTED_ANNOTATION_TYPES = new Set(["highlight", "underline", "wavy", "strike", "note", "sticky", "pen", "box", "arrow"]);
 const ANNOTATION_COLORS = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
 function clampUnit(value) {
   return Math.max(0, Math.min(1, Number(value)));
@@ -2168,6 +2568,23 @@ function normalizeImportedAnnotation(mark) {
   if (!mark || !SUPPORTED_ANNOTATION_TYPES.has(mark.type)) return null;
   const page = Math.trunc(Number(mark.page));
   if (!pdfDoc || page < 1 || page > pdfDoc.numPages) return null;
+  if (mark.type === "sticky") {
+    const x = Number(mark.x),
+      y = Number(mark.y);
+    if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return null;
+    return {
+      id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+      page,
+      type: "sticky",
+      color: ANNOTATION_COLORS.includes(mark.color) ? mark.color : "yellow",
+      x,
+      y,
+      note: String(mark.note || "").slice(0, 4000),
+      text: "",
+      rects: [],
+      createdAt: Number(mark.createdAt) || Date.now(),
+    };
+  }
   const rects = Array.isArray(mark.rects) ? mark.rects.map(normalizeAnnotationRect).filter(Boolean) : [];
   const points = Array.isArray(mark.points) ? mark.points.map(normalizeAnnotationPoint).filter(Boolean) : [];
   if (!rects.length && points.length < 2) return null;
@@ -2186,17 +2603,44 @@ function normalizeImportedAnnotation(mark) {
     createdAt: Number(mark.createdAt) || Date.now(),
   };
 }
+// Fusiona las notas del cuaderno de una copia de seguridad sin pisar las
+// existentes: si una página ya tiene texto, el importado se añade debajo.
+function importNotebookBackup(data) {
+  let count = 0;
+  if (data?.pageNotes && typeof data.pageNotes === "object") {
+    const store = pageNotesStore();
+    for (const [pageKey, entry] of Object.entries(data.pageNotes)) {
+      const page = Math.trunc(Number(pageKey));
+      const text = String(entry?.text ?? entry ?? "").trim();
+      if (!text || !pdfDoc || page < 1 || page > pdfDoc.numPages) continue;
+      const existing = store[page]?.text?.trim();
+      if (existing === text) continue;
+      store[page] = { text: existing ? `${existing}\n\n${text}` : text, updatedAt: Date.now() };
+      count++;
+    }
+    setJSON(key(currentBook.id, "page-notes"), store);
+  }
+  const docText = String(data?.documentNote || "").trim();
+  if (docText && docText !== documentNote().trim()) {
+    const existing = documentNote().trim();
+    writeDocumentNote(existing ? `${existing}\n\n${docText}` : docText);
+    count++;
+  }
+  if (count && !$("notebookPanel").hidden) renderNotebook();
+  return count;
+}
 async function importAnnotationBackup(file) {
   if (!currentBook || !pdfDoc) return toast("Abre el PDF de destino primero");
   try {
     const data = JSON.parse(await file.text());
     if (!Array.isArray(data?.annotations)) throw new Error("Formato no compatible");
     const imported = data.annotations.map(normalizeImportedAnnotation).filter(Boolean);
-    if (!imported.length) throw new Error("No contiene anotaciones compatibles");
-    commitAnnotations([...annotations(), ...imported]);
+    const notesImported = importNotebookBackup(data);
+    if (!imported.length && !notesImported) throw new Error("No contiene anotaciones compatibles");
+    if (imported.length) commitAnnotations([...annotations(), ...imported]);
     renderAnnotations();
     renderAnnotationList();
-    toast(`${imported.length} anotación${imported.length === 1 ? " importada" : "es importadas"}`);
+    toast(`${imported.length} anotación${imported.length === 1 ? " importada" : "es importadas"}${notesImported ? ` · ${notesImported} nota${notesImported === 1 ? "" : "s"} del cuaderno` : ""}`);
   } catch (error) {
     console.error("No se pudieron importar las anotaciones", error);
     toast("El archivo de anotaciones no es válido");
@@ -2348,6 +2792,7 @@ function annotationStyle(color, opacity) {
   return `rgba(${rgb},${alpha})`;
 }
 function annotationLabel(type) {
+  if (type === "sticky") return "Nota adhesiva";
   return type === "note"
     ? "Nota"
     : type === "pen"
@@ -2461,6 +2906,7 @@ function renderAnnotations() {
   layer.innerHTML = "";
   if (!currentBook) return;
   for (const mark of annotations().filter((a) => a.page === currentPage)) {
+    if (mark.type === "sticky") continue;
     if ((mark.type === "pen" || mark.type === "arrow") && mark.points?.length) {
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 1 1");
@@ -2504,6 +2950,7 @@ function renderAnnotations() {
       layer.appendChild(el);
     }
   }
+  renderStickyNotes();
 }
 function renderAnnotationList() {
   const list = $("annotationList");
@@ -2527,7 +2974,9 @@ function renderAnnotationList() {
         ? all
         : annotationFilter === "drawing"
           ? all.filter((mark) => ["pen", "box", "arrow"].includes(mark.type))
-          : all.filter((mark) => mark.type === annotationFilter);
+          : annotationFilter === "note"
+            ? all.filter((mark) => mark.type === "note" || mark.type === "sticky")
+            : all.filter((mark) => mark.type === annotationFilter);
   list.innerHTML = marks.length
     ? marks
         .map(
@@ -2542,7 +2991,9 @@ function renderAnnotationList() {
       (button) =>
         (button.onclick = async () => {
           await jumpToPage(Number(button.dataset.annotationPage));
-          openAnnotationEditor(button.dataset.annotationId);
+          const mark = annotations().find((item) => item.id === button.dataset.annotationId);
+          if (mark?.type === "sticky") openStickyEditor(mark.id);
+          else openAnnotationEditor(button.dataset.annotationId);
         }),
     );
   document.querySelectorAll("[data-remove-annotation]").forEach(
@@ -2551,6 +3002,8 @@ function renderAnnotationList() {
         deleteAnnotation(button.dataset.removeAnnotation);
       }),
   );
+  updateThumbNoteBadges();
+  if (!$("notebookPanel").hidden && !$("notebookPanel").contains(document.activeElement)) renderNotebook();
 }
 function selectedRects() {
   const sel = window.getSelection(),
@@ -4050,6 +4503,8 @@ async function streamWebLlmVision(question) {
 function showEmpty() {
   if (ttsActive) stopReadAloud();
   document.body.classList.remove("has-doc");
+  setStickyPlacement(false);
+  if (!$("notebookPanel").hidden) closeNotebook();
   $("emptyState").hidden = false;
   $("canvasWrap").hidden = true;
   $("reflowReader").hidden = true;
@@ -4195,8 +4650,12 @@ async function askLocalAi() {
     aiAbortController = null;
   }
 }
+// Por debajo de 1180px la barra lateral es un cajón flotante (ver CSS).
+function isDrawerLayout() {
+  return window.innerWidth < 1180;
+}
 function toggleSidebar() {
-  if (window.innerWidth <= 900) {
+  if (isDrawerLayout()) {
     document.body.classList.toggle("sidebar-open");
     return;
   }
@@ -4358,6 +4817,8 @@ document.querySelectorAll("[data-palette-opt]").forEach((button) => {
   };
 });
 $("closeShortcuts").onclick = closeShortcuts;
+bindStickyInteractions();
+bindNotebook();
 $("shortcutsPanel").addEventListener("pointerdown", (event) => {
   if (event.target === $("shortcutsPanel")) closeShortcuts();
 });
@@ -4374,7 +4835,7 @@ $("openSidebar").onclick = toggleSidebar;
 $("sidebarContentsTab").onclick = () => setSidebarPanel("contents");
 $("sidebarNotesTab").onclick = () => setSidebarPanel("notes");
 $("closeSidebar").onclick = () => {
-  if (window.innerWidth <= 900) document.body.classList.remove("sidebar-open");
+  if (isDrawerLayout()) document.body.classList.remove("sidebar-open");
   else {
     document.body.classList.add("sidebar-collapsed");
     scheduleLayoutRefit();
@@ -4900,7 +5361,7 @@ function configureResponsiveUi() {
   const syncViewport = () => {
     document.body.classList.toggle("is-mobile", window.innerWidth <= 700);
     document.body.classList.toggle("is-tablet", window.innerWidth > 700 && window.innerWidth < 1180);
-    if (window.innerWidth <= 900) document.body.classList.remove("sidebar-collapsed");
+    if (isDrawerLayout()) document.body.classList.remove("sidebar-collapsed");
     if (window.innerWidth >= 1180) document.body.classList.remove("sidebar-open");
   };
   syncViewport();
@@ -5177,6 +5638,23 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "f" || e.key === "F") toggleFocusMode();
   if (e.key === "l" || e.key === "L") setReadingMode(reflowMode ? "pdf" : "reflow");
   if (e.key === "s" || e.key === "S") setAnnotationSelectMode();
+  // preventDefault: el carácter no debe acabar escrito en el campo que se enfoca.
+  if ((e.key === "n" || e.key === "N") && pdfDoc) {
+    e.preventDefault();
+    setStickyPlacement(!stickyPlacement);
+  }
+  if ((e.key === "c" || e.key === "C") && currentBook) {
+    e.preventDefault();
+    toggleNotebook();
+  }
+  if (e.key === "Escape" && stickyPlacement) {
+    setStickyPlacement(false);
+    return;
+  }
+  if (e.key === "Escape" && !$("stickyEditor").hidden) {
+    closeStickyEditor();
+    return;
+  }
   if (e.key === "Escape") {
     if (presentationMode) {
       exitPresentation();
