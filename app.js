@@ -546,6 +546,7 @@ async function openStored(id) {
     resetAiDocumentState();
     resetAnnotationHistory();
     migrateLegacyPageNotes();
+    teardownReflowDocument();
     resetNavHistory();
     // Empezar siempre desde una vista limpia; el modo guardado se aplica al final.
     teardownContinuous();
@@ -671,6 +672,9 @@ function renderPage(num, options = {}) {
   if (viewMode === "continuous" && !reflowMode) {
     scrollToContinuousPage(pageNumber, options);
     return Promise.resolve(true);
+  }
+  if (reflowMode && currentBook && reflowBuiltFor === currentBook.id) {
+    return scrollToReflowPage(pageNumber, { smooth: false }).then(() => true);
   }
   const requestId = ++pageRenderRequestId;
   return new Promise((resolve) => {
@@ -3113,7 +3117,11 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   await renderTextLayer(page, viewport);
   if (token !== renderToken || requestId !== pageRenderRequestId) return false;
   renderLinkLayer(page, viewport, token);
-  if (reflowMode) await renderReflowPage(page);
+  if (reflowMode) {
+    $("canvasWrap").hidden = true;
+    $("reflowReader").hidden = false;
+    await scrollToReflowPage(currentPage);
+  }
   $("canvasWrap").hidden = reflowMode;
   $("reflowReader").hidden = !reflowMode;
   renderAnnotations();
@@ -3198,35 +3206,124 @@ function reflowBlocks(items) {
   flush();
   return blocks;
 }
-async function renderReflowPage(page) {
-  const reader = $("reflowReader");
-  const content = await getCachedTextContent(page);
-  const blocks = reflowBlocks(content.items);
-  if (!blocks.length) {
-    reader.innerHTML = '<div class="reflow-empty"><strong>Esta página no contiene texto extraíble.</strong><p>Puedes volver a PDF para conservar la composición original.</p></div>';
-    return;
-  }
-  const fragment = document.createDocumentFragment();
-  const marker = document.createElement("div");
-  marker.className = "reflow-page-marker";
-  marker.innerHTML = `<span>Página</span><strong>${currentPage}</strong><small>de ${pdfDoc.numPages}</small>`;
-  fragment.append(marker);
-  blocks.forEach((block) => {
-    if (block.type === "list") {
-      const list = document.createElement("ul");
-      block.items.forEach((text) => {
-        const item = document.createElement("li");
-        item.textContent = text;
-        list.append(item);
-      });
-      fragment.append(list);
-      return;
+// ---- Modo lectura continuo ----
+// El modo lectura presenta todo el PDF como un único texto adaptable: una
+// sección por página que se rellena al acercarse (y se queda rellena), con la
+// misma tipografía, tamaño y ancho en todo el documento.
+let reflowObserver = null;
+let reflowBuiltFor = "";
+let reflowScrollFrame = 0;
+const reflowFilled = new Set();
+function reflowTextHtml(text) {
+  if (!searchRegex) return escapeHtml(text);
+  const matcher = new RegExp(searchRegex.source, searchRegex.flags.includes("g") ? searchRegex.flags : `${searchRegex.flags}g`);
+  let html = "",
+    last = 0,
+    match;
+  while ((match = matcher.exec(text))) {
+    if (!match[0]) {
+      matcher.lastIndex++;
+      continue;
     }
-    const element = document.createElement(block.type);
-    element.textContent = block.text;
-    fragment.append(element);
+    html += `${escapeHtml(text.slice(last, match.index))}<mark class="search-hit">${escapeHtml(match[0])}</mark>`;
+    last = match.index + match[0].length;
+  }
+  return html + escapeHtml(text.slice(last));
+}
+function reflowBlocksHtml(blocks) {
+  return blocks
+    .map((block) =>
+      block.type === "list"
+        ? `<ul>${block.items.map((text) => `<li>${reflowTextHtml(text)}</li>`).join("")}</ul>`
+        : `<${block.type}>${reflowTextHtml(block.text)}</${block.type}>`,
+    )
+    .join("");
+}
+// Vuelve a pintar las páginas ya preparadas (p. ej. tras una búsqueda).
+function refreshReflowSections() {
+  if (!reflowMode || reflowBuiltFor !== currentBook?.id) return;
+  const filled = [...reflowFilled];
+  reflowFilled.clear();
+  filled.forEach((page) => {
+    const section = $("reflowReader").querySelector(`.reflow-page[data-page="${page}"]`);
+    if (section) fillReflowSection(section);
   });
+}
+async function fillReflowSection(section) {
+  const pageNumber = Number(section.dataset.page);
+  if (reflowFilled.has(pageNumber) || !pdfDoc) return;
+  reflowFilled.add(pageNumber);
+  try {
+    const page = await getCachedPage(pageNumber);
+    const content = await getCachedTextContent(page);
+    if (!reflowMode || !section.isConnected) return;
+    const blocks = reflowBlocks(content.items);
+    const viewer = $("viewer");
+    const before = section.offsetHeight;
+    const above = section.offsetTop + before <= viewer.scrollTop + 4;
+    section.classList.remove("is-pending");
+    section.querySelector(".reflow-page-body").innerHTML = blocks.length
+      ? reflowBlocksHtml(blocks)
+      : '<p class="reflow-empty-page">Esta página no contiene texto extraíble (puede ser una imagen o un escaneo).</p>';
+    // Si la sección estaba por encima de lo visible, se compensa su cambio de
+    // altura para que el texto que estás leyendo no salte.
+    if (above) viewer.scrollTop += section.offsetHeight - before;
+  } catch (error) {
+    reflowFilled.delete(pageNumber);
+    console.error("No se pudo preparar la página en modo lectura", error);
+  }
+}
+async function ensureReflowDocument() {
+  if (!pdfDoc || !currentBook) return;
+  const reader = $("reflowReader");
+  if (reflowBuiltFor === currentBook.id && reader.querySelector(".reflow-page")) return;
+  reflowObserver?.disconnect();
+  reflowFilled.clear();
+  reflowBuiltFor = currentBook.id;
+  const fragment = document.createDocumentFragment();
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    const section = document.createElement("section");
+    section.className = "reflow-page is-pending";
+    section.dataset.page = String(i);
+    section.innerHTML = `<div class="reflow-page-marker"><span>Página</span><strong>${i}</strong><small>de ${pdfDoc.numPages}</small></div><div class="reflow-page-body"><p class="reflow-skeleton"></p><p class="reflow-skeleton"></p><p class="reflow-skeleton short"></p></div>`;
+    fragment.append(section);
+  }
   reader.replaceChildren(fragment);
+  reflowObserver = new IntersectionObserver(
+    (entries) => entries.forEach((entry) => entry.isIntersecting && fillReflowSection(entry.target)),
+    { root: $("viewer"), rootMargin: "1400px 0px" },
+  );
+  reader.querySelectorAll(".reflow-page").forEach((section) => reflowObserver.observe(section));
+}
+function teardownReflowDocument() {
+  reflowObserver?.disconnect();
+  reflowObserver = null;
+  reflowFilled.clear();
+  reflowBuiltFor = "";
+  if (!markdownContent) $("reflowReader").replaceChildren();
+}
+async function scrollToReflowPage(pageNumber, options = {}) {
+  await ensureReflowDocument();
+  const section = $("reflowReader").querySelector(`.reflow-page[data-page="${pageNumber}"]`);
+  if (!section) return;
+  // Rellenar antes de desplazarse evita aterrizar en un hueco que luego crece.
+  await fillReflowSection(section);
+  syncCurrentFromScroll(pageNumber);
+  $("viewer").scrollTo({ top: section.offsetTop - 8, behavior: options.smooth ? "smooth" : "auto" });
+}
+function onReflowScroll() {
+  if (!reflowMode || !pdfDoc || reflowScrollFrame || reflowBuiltFor !== currentBook?.id) return;
+  reflowScrollFrame = requestAnimationFrame(() => {
+    reflowScrollFrame = 0;
+    const viewer = $("viewer");
+    const probe = viewer.scrollTop + Math.min(120, viewer.clientHeight * 0.2);
+    let page = currentPage;
+    for (const section of $("reflowReader").querySelectorAll(".reflow-page")) {
+      if (section.offsetTop <= probe) page = Number(section.dataset.page);
+      else break;
+    }
+    if (page !== currentPage) syncCurrentFromScroll(page);
+  });
 }
 function prefetchAdjacentPages(pageNumber) {
   if (!pdfDoc) return;
@@ -5807,6 +5904,7 @@ function updateSearchCounter() {
 }
 async function openSearchMatch(index) {
   if (index < 0 || index >= searchMatches.length) return;
+  refreshReflowSections();
   searchIndex = index;
   const match = searchMatches[index];
   if (match.docId && match.docId !== currentBook?.id) {
@@ -6339,6 +6437,7 @@ $("pageJump").onchange = (e) => {
 };
 $("pageScrubber").oninput = (e) => scheduleScrubPage(Number(e.target.value));
 $("viewer").addEventListener("scroll", onContinuousScroll, { passive: true });
+$("viewer").addEventListener("scroll", onReflowScroll, { passive: true });
 $("viewer").addEventListener("wheel", (event) => {
   // Ctrl/⌘ + rueda (o pellizco de trackpad) hace zoom sobre el punto que se
   // está mirando. El documento se vuelve a renderizar, no se escala por CSS.
@@ -6389,7 +6488,22 @@ document.querySelectorAll("[data-reader-margin]").forEach(
         .forEach((item) => item.classList.toggle("active", item === button));
     }),
 );
+// Posición de lectura dentro del modo lectura: página y fracción recorrida de
+// esa página, para conservarla al cambiar tamaño, fuente o ancho.
+function reflowReadingAnchor() {
+  if (!reflowMode || reflowBuiltFor !== currentBook?.id) return null;
+  const viewer = $("viewer");
+  const section = $("reflowReader").querySelector(`.reflow-page[data-page="${currentPage}"]`);
+  if (!section) return null;
+  return { page: currentPage, ratio: Math.max(0, Math.min(1, (viewer.scrollTop - section.offsetTop) / Math.max(1, section.offsetHeight))) };
+}
+function restoreReflowAnchor(anchor) {
+  if (!anchor) return;
+  const section = $("reflowReader").querySelector(`.reflow-page[data-page="${anchor.page}"]`);
+  if (section) $("viewer").scrollTop = section.offsetTop + anchor.ratio * section.offsetHeight;
+}
 function applyReflowPreferences() {
+  const anchor = reflowReadingAnchor();
   const reader = $("reflowReader");
   const size = Number(localStorage.getItem("paper.reflow-size") || 20);
   const spacing = localStorage.getItem("paper.reflow-spacing") || "normal";
@@ -6421,6 +6535,7 @@ function applyReflowPreferences() {
   document.querySelectorAll("[data-reflow-tracking]").forEach((button) => button.classList.toggle("active", button.dataset.reflowTracking === tracking));
   document.querySelectorAll("[data-reflow-alignment]").forEach((button) => button.classList.toggle("active", button.dataset.reflowAlignment === alignment));
   document.querySelectorAll("[data-reflow-theme]").forEach((button) => button.classList.toggle("active", button.dataset.reflowTheme === theme));
+  if (anchor) requestAnimationFrame(() => restoreReflowAnchor(anchor));
 }
 async function setReadingMode(mode) {
   reflowMode = mode === "reflow";
@@ -6438,6 +6553,7 @@ async function setReadingMode(mode) {
   }
   localStorage.setItem("paper.reading-mode", mode);
   document.body.classList.toggle("reflow-mode", reflowMode);
+  if (!reflowMode) teardownReflowDocument();
   $("markerModeBtn").disabled = reflowMode;
   $("eraserModeBtn").disabled = reflowMode;
   $("reflowControls").hidden = !reflowMode;

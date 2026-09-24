@@ -607,3 +607,21 @@ html.ui4 .paper-mark { width: 34px !important; height: 34px; flex: 0 0 34px; pad
 html.ui4 .brand-logo { display: block; width: 100%; height: 100%; }
 html.ui4 .brand h1 { font-size: 16px !important; letter-spacing: -.03em !important; }
 html.ui4 .brand small { color: var(--muted); letter-spacing: .16em !important; }
+
+/* ---- Modo lectura continuo ------------------------------------------------ */
+/* Las columnas se aplican dentro de cada página, no al documento entero. */
+html.ui4 .reflow-reader.columns-2, html.ui4 .reflow-reader.columns-auto, html.ui4 .reflow-reader.columns-1 { column-count: auto !important; column-rule: none !important; }
+html.ui4 .reflow-reader.columns-2 .reflow-page-body { column-count: 2; column-gap: 3em; }
+@media (min-width: 1200px) { html.ui4 .reflow-reader.columns-auto .reflow-page-body { column-count: 2; column-gap: clamp(42px, 6vw, 76px); column-rule: 1px solid var(--line); } }
+@media (max-width: 800px) { html.ui4 .reflow-reader .reflow-page-body { column-count: 1 !important; } }
+.reflow-page { scroll-margin-top: 8px; }
+.reflow-page + .reflow-page { margin-top: 2.2em; padding-top: 1.4em; border-top: 1px solid var(--line); }
+html.ui4 .reflow-page .reflow-page-marker { display: flex !important; align-items: baseline; gap: .45em; margin: 0 0 1em !important; color: var(--muted); font: 600 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .06em; text-transform: uppercase; }
+html.ui4 .reflow-page .reflow-page-marker strong { color: var(--text); font-size: 13px; }
+.reflow-page.is-pending .reflow-page-body { min-height: 55vh; }
+.reflow-skeleton { height: .9em; margin: 0 0 .9em !important; border-radius: 6px; background: linear-gradient(90deg, var(--soft), color-mix(in srgb, var(--soft) 40%, transparent), var(--soft)); background-size: 200% 100%; animation: reflow-shimmer 1.4s linear infinite; }
+.reflow-skeleton.short { width: 60%; }
+@keyframes reflow-shimmer { to { background-position: -200% 0; } }
+.reflow-empty-page { color: var(--muted); font-style: italic; }
+.reflow-reader mark.search-hit { background: rgba(255, 205, 63, .55); color: inherit; border-radius: 3px; padding: 0 1px; }
+@media (prefers-reduced-motion: reduce) { .reflow-skeleton { animation: none; } }
