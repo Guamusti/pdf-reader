@@ -25,3 +25,15 @@ Incluye:
 - Búsqueda avanzada: distinguir mayúsculas, palabra completa y expresiones regulares, con contador de coincidencias y navegación anterior/siguiente entre todas las apariciones.
 - Búsqueda en toda la biblioteca: encuentra un término en el texto de todos los PDFs guardados, con resultados agrupados por documento; al pulsar uno se abre el documento en la página correspondiente.
 - Lectura en voz alta (Text-to-Speech) con la voz local del navegador: barra con reproducir/pausar, frase anterior/siguiente, velocidad y selección de voz. Lee frase a frase mostrando la actual como subtítulo y pasa de página automáticamente al terminar.
+
+### Novedades v3
+
+- **Paleta de comandos** (`Ctrl/⌘ + K`, `Ctrl/⌘ + F` o `/`): busca en el texto del documento mientras escribes, salta a una página («p 12») o a una sección del índice, abre documentos de la biblioteca y ejecuta cualquier acción. Respeta las opciones de mayúsculas, palabra completa y expresiones regulares.
+- **Notas adhesivas** (`N`): pega una nota en cualquier punto de la página, arrástrala para moverla y cámbiale el color. Se incluyen en la lista de anotaciones, en el deshacer y en las exportaciones.
+- **Cuaderno** (`C`): apuntes libres para cada página, que siguen a la página que lees, más una nota general del documento y una vista con todas las notas. Las miniaturas marcan las páginas con notas.
+- **Regla de lectura** (`G`): oscurece todo menos una franja que sigue al puntero; avanza con `↑`/`↓`.
+- **Desplazamiento automático** (`A`): diez velocidades, pausa con espacio y cambio de página automático.
+- **Estudio con repaso espaciado** (`E`): tarjetas creadas solas desde tus resaltados (ejercicios de huecos), desde notas escritas como `pregunta :: respuesta` (también en el cuaderno), desde una selección o generadas por la IA local; se programan con el algoritmo SM-2.
+- **IA en un paso**: resumir la página, explicar la selección o generar tarjetas desde la paleta.
+- **Página actual**: guardarla como PNG, copiar su imagen o su texto. El pie muestra el tiempo de lectura restante según tu ritmo.
+- **Atajos** (`?`) y `Ctrl/⌘ + Z` para deshacer anotaciones.

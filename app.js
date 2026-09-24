@@ -592,6 +592,7 @@ async function openStored(id) {
     renderLibrary();
     if (!$("notebookPanel").hidden) renderNotebook();
     if (localStorage.getItem("paper.ruler") === "1") setReadingRuler(true, true);
+    updateStudyLaunch();
     document.body.classList.remove("sidebar-open");
     markReadingActivity();
   } catch (e) {
@@ -1224,6 +1225,11 @@ function paletteActions() {
     { icon: "⧉", title: "Copiar la imagen de esta página", keys: "portapapeles captura", when: hasPdf, run: copyPageImage },
     { icon: "¶", title: "Copiar el texto de esta página", keys: "portapapeles extraer", when: hasPdf, run: copyPageText },
     { icon: "↶", title: "Deshacer anotación", keys: "undo", shortcut: ["Ctrl", "Z"], when: hasDoc && annotationUndo.length > 0, run: undoAnnotation },
+    { icon: "◆", title: "Estudiar: repasar tarjetas", keys: "flashcards repaso memoria examen tarjetas srs", shortcut: ["E"], when: hasDoc, run: () => openStudy() },
+    { icon: "◆", title: "Nueva tarjeta de estudio", keys: "flashcard crear pregunta", when: hasDoc, run: () => renderStudyEditor() },
+    { icon: "✦", title: "Generar tarjetas de esta página con IA", keys: "flashcards ia estudiar automatico", when: hasPdf, run: generateCardsWithAi },
+    { icon: "✦", title: "Resumir esta página con IA", keys: "resumen sintesis puntos clave", when: hasDoc, run: () => runAiPreset("page", "Resume esta página en 5 puntos clave, citando [p. N].") },
+    { icon: "✦", title: "Explicar la selección con IA", keys: "explicar simplificar entender", when: hasDoc, run: () => runAiPreset("selection", "Explícame este fragmento de forma sencilla, con un ejemplo.") },
     { icon: "✦", title: "Preguntar al documento (IA local)", keys: "asistente ia chat pregunta", when: hasDoc, run: openAssistantForDocument },
     { icon: "☀", title: "Tema claro", keys: "apariencia color", run: () => setTheme("light") },
     { icon: "☾", title: "Tema oscuro", keys: "apariencia noche", run: () => setTheme("dark") },
@@ -1473,6 +1479,7 @@ const SHORTCUT_GROUPS = [
   ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
   ["Lectura", [["Regla de lectura", ["G"]], ["Mover la regla", ["↑", "↓"]], ["Desplazamiento automático", ["A"]], ["Pausar / velocidad (auto-scroll)", ["Espacio", "[", "]"]], ["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
   ["Notas y anotaciones", [["Nota adhesiva en la página", ["N"]], ["Cuaderno de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
+  ["Estudio", [["Abrir tarjetas de estudio", ["E"]], ["Mostrar respuesta", ["Espacio"]], ["Calificar: otra vez · difícil · bien · fácil", ["1", "2", "3", "4"]]]],
   ["General", [["Atajos de teclado", ["?"]], ["Cerrar paneles", ["Esc"]]]],
 ];
 function openShortcuts() {
@@ -2055,6 +2062,347 @@ function updateThumbNoteBadges() {
     if (mark.type === "sticky") pages.add(mark.page);
   });
   document.querySelectorAll(".thumb[data-page]").forEach((card) => card.classList.toggle("has-notes", pages.has(Number(card.dataset.page))));
+}
+// ---- Estudio: tarjetas con repaso espaciado (SM-2) ----
+// Las tarjetas se guardan por documento. Pueden venir de resaltados (ejercicio
+// de huecos), de notas «pregunta :: respuesta» (también líneas del cuaderno),
+// de una selección, de la IA local o crearse a mano.
+const DAY_MS = 86_400_000;
+const CLOZE_STOP_WORDS = new Set("además ahora antes aquel aquella aunque cada cierto como cómo desde después donde durante ejemplo entonces entre esta estas este esto estos hasta hacia incluso luego mientras mismo mucho muchos nada nosotros nuestra nuestro otras otros parte porque puede pueden según siempre sobre también tanto tiene tienen todas todos través usted veces vuestra where which would their there these those about because through between before after other which while".split(" "));
+let studyQueue = [];
+let studyIndex = 0;
+let studyRevealed = false;
+let studyReviewed = 0;
+function studyCards() {
+  return currentBook ? getJSON(key(currentBook.id, "cards"), []) : [];
+}
+function saveStudyCards(cards) {
+  if (currentBook) setJSON(key(currentBook.id, "cards"), cards);
+  updateStudyLaunch();
+}
+function newCard(front, back, source = {}) {
+  return {
+    id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+    front: String(front).trim().slice(0, 1200),
+    back: String(back).trim().slice(0, 3000),
+    page: Number(source.page) || currentPage || 1,
+    sourceKey: source.sourceKey || "",
+    origin: source.origin || "manual",
+    ease: 2.5,
+    interval: 0,
+    reps: 0,
+    lapses: 0,
+    due: Date.now(),
+    createdAt: Date.now(),
+  };
+}
+function hashText(text) {
+  let hash = 0;
+  for (const char of String(text)) hash = (Math.imul(31, hash) + char.charCodeAt(0)) | 0;
+  return (hash >>> 0).toString(36);
+}
+// Oculta las palabras más significativas de un fragmento (las más largas que
+// no son palabras vacías) para practicar el recuerdo activo.
+function makeCloze(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  const words = [...new Set(clean.match(/[\p{L}][\p{L}\p{N}-]{5,}/gu) || [])].filter(
+    (word) => !CLOZE_STOP_WORDS.has(normalizeText(word)) && !AI_STOP_WORDS.has(normalizeText(word)),
+  );
+  if (!words.length) return null;
+  const count = Math.max(1, Math.min(3, Math.round(clean.split(" ").length / 14)));
+  const hidden = words.sort((a, b) => b.length - a.length).slice(0, count);
+  let front = clean;
+  for (const word of hidden) {
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "u");
+    front = front.replace(pattern, "⟦…⟧");
+  }
+  return { front, hidden };
+}
+function parseQuestionAnswer(text) {
+  const match = String(text || "").match(/^\s*(.+?)\s*::\s*(.+?)\s*$/s);
+  return match ? { question: match[1], answer: match[2] } : null;
+}
+// Crea las tarjetas que falten a partir de resaltados, notas y cuaderno.
+function syncCardsFromNotes() {
+  if (!currentBook) return 0;
+  const cards = studyCards();
+  const known = new Set(cards.map((card) => card.sourceKey).filter(Boolean));
+  const added = [];
+  const add = (card) => {
+    if (card.sourceKey && known.has(card.sourceKey)) return;
+    known.add(card.sourceKey);
+    added.push(card);
+  };
+  for (const mark of annotations()) {
+    const qa = parseQuestionAnswer(mark.note);
+    if (qa) {
+      add(newCard(qa.question, qa.answer, { page: mark.page, sourceKey: `ann:${mark.id}:qa`, origin: "nota" }));
+      continue;
+    }
+    if (!["highlight", "underline", "wavy", "note"].includes(mark.type)) continue;
+    const text = String(mark.text || "").trim();
+    if (text.split(/\s+/).length < 4) continue;
+    const cloze = makeCloze(text);
+    if (!cloze) continue;
+    add(newCard(cloze.front, text + (mark.note ? `\n\nTu nota: ${mark.note}` : ""), { page: mark.page, sourceKey: `ann:${mark.id}`, origin: "resaltado" }));
+  }
+  for (const [page, entry] of Object.entries(pageNotesStore())) {
+    for (const line of String(entry.text || "").split(/\n+/)) {
+      const qa = parseQuestionAnswer(line);
+      if (qa) add(newCard(qa.question, qa.answer, { page: Number(page), sourceKey: `pn:${page}:${hashText(line)}`, origin: "cuaderno" }));
+    }
+  }
+  if (added.length) saveStudyCards([...cards, ...added]);
+  return added.length;
+}
+function scheduleCard(card, grade) {
+  const next = { ...card };
+  if (grade === 0) {
+    next.reps = 0;
+    next.lapses = (next.lapses || 0) + 1;
+    next.interval = 0;
+    next.ease = Math.max(1.3, next.ease - 0.2);
+    next.due = Date.now() + 10 * 60_000;
+    return next;
+  }
+  if (next.reps === 0) next.interval = grade === 3 ? 4 : grade === 1 ? 0.5 : 1;
+  else if (next.reps === 1) next.interval = grade === 3 ? 8 : grade === 1 ? 3 : 6;
+  else next.interval = Math.round(next.interval * (grade === 1 ? 1.2 : grade === 3 ? next.ease * 1.3 : next.ease) * 10) / 10;
+  next.ease = Math.max(1.3, Math.min(3.2, next.ease + (grade === 1 ? -0.15 : grade === 3 ? 0.15 : 0)));
+  next.reps++;
+  next.due = Date.now() + next.interval * DAY_MS;
+  return next;
+}
+function formatInterval(days) {
+  if (days <= 0) return "10 min";
+  if (days < 1) return `${Math.round(days * 24)} h`;
+  if (days < 30) return `${Math.round(days)} d`;
+  if (days < 365) return `${Math.round(days / 30)} mes${Math.round(days / 30) > 1 ? "es" : ""}`;
+  return `${(days / 365).toFixed(1)} años`;
+}
+function dueCards(cards = studyCards()) {
+  const now = Date.now();
+  return cards.filter((card) => card.due <= now).sort((a, b) => a.due - b.due);
+}
+function updateStudyLaunch() {
+  const badge = $("studyLaunchDue");
+  if (!badge) return;
+  const cards = studyCards();
+  const due = dueCards(cards).length;
+  badge.hidden = !due;
+  badge.textContent = String(due);
+  $("studyLaunchMeta").textContent = cards.length ? `${cards.length} tarjeta${cards.length > 1 ? "s" : ""} · ${due ? `${due} para hoy` : "al día"}` : "Tarjetas con repaso espaciado";
+}
+function openStudy(view = "overview") {
+  if (!currentBook) return toast("Abre un documento primero");
+  $("studyTitle").textContent = currentBook.name;
+  $("studyPanel").hidden = false;
+  if (view === "overview") {
+    const added = syncCardsFromNotes();
+    renderStudyOverview(added);
+  }
+  $("studyPanel").querySelector(".study-card").focus();
+}
+function closeStudy() {
+  $("studyPanel").hidden = true;
+  updateStudyLaunch();
+}
+function renderStudyOverview(added = 0) {
+  const cards = studyCards();
+  const due = dueCards(cards);
+  const learned = cards.filter((card) => card.interval >= 21).length;
+  const fresh = cards.filter((card) => card.reps === 0).length;
+  const next = cards.filter((card) => card.due > Date.now()).sort((a, b) => a.due - b.due)[0];
+  $("studyBody").innerHTML = `<div class="study-stats"><div class="study-stat study-stat-main"><strong>${due.length}</strong><small>para repasar hoy</small></div><div class="study-stat"><strong>${fresh}</strong><small>nuevas</small></div><div class="study-stat"><strong>${learned}</strong><small>aprendidas (≥ 3 sem.)</small></div><div class="study-stat"><strong>${cards.length}</strong><small>en total</small></div></div>
+  <div class="study-actions">
+    <button class="btn primary-action" data-study="review" ${due.length ? "" : "disabled"}>${due.length ? `Empezar repaso · ${due.length} tarjeta${due.length > 1 ? "s" : ""}` : "Nada pendiente por hoy"}<small>${due.length ? "Espacio muestra la respuesta · 1–4 para calificar" : next ? `Próxima tarjeta ${new Date(next.due).toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "short" })}` : "Crea tarjetas para empezar"}</small></button>
+    <button class="btn" data-study="ai">Generar tarjetas de la página ${currentPage} con IA local<small>El texto no sale de tu dispositivo</small></button>
+    <button class="btn" data-study="new">Nueva tarjeta<small>Escribe una pregunta y su respuesta</small></button>
+  </div>
+  <p class="study-hint">${added ? `<b>${added} tarjeta${added > 1 ? "s nuevas" : " nueva"}</b> a partir de tus notas. ` : ""}Las tarjetas se crean solas desde tus resaltados (ejercicio de huecos) y desde las notas escritas como <code>pregunta :: respuesta</code>, también en el cuaderno.</p>
+  ${cards.length ? `<div class="study-list"><h3>Tarjetas</h3>${[...cards]
+    .sort((a, b) => a.page - b.page || a.createdAt - b.createdAt)
+    .map((card) => `<div class="study-item"><span title="${escapeHtml(card.front)}">${escapeHtml(card.front.replace(/⟦…⟧/g, "___"))}</span><small>p. ${card.page} · ${card.reps ? formatInterval(card.interval) : "nueva"}</small><button class="btn icon" data-study-delete="${card.id}" aria-label="Eliminar tarjeta">×</button></div>`)
+    .join("")}</div>` : ""}`;
+}
+function startStudyReview() {
+  studyQueue = dueCards().map((card) => card.id);
+  studyIndex = 0;
+  studyReviewed = 0;
+  studyRevealed = false;
+  if (!studyQueue.length) return renderStudyOverview();
+  renderStudyCard();
+  $("studyPanel").querySelector(".study-card").focus();
+}
+function renderStudyCard() {
+  const cards = studyCards();
+  const card = cards.find((item) => item.id === studyQueue[studyIndex]);
+  if (!card) {
+    $("studyBody").innerHTML = `<div class="study-done"><strong>¡Repaso completado!</strong><p>${studyReviewed} tarjeta${studyReviewed === 1 ? "" : "s"} repasada${studyReviewed === 1 ? "" : "s"}. Vuelve cuando toque: el repaso espaciado hace el resto.</p><div class="study-reveal"><button class="btn" data-study="overview">Volver al resumen</button></div></div>`;
+    updateStudyLaunch();
+    return;
+  }
+  const front = escapeHtml(card.front).replace(/⟦…⟧/g, '<span class="cloze">_____</span>');
+  let back = escapeHtml(card.back);
+  if (card.front.includes("⟦…⟧") && studyRevealed) {
+    // Resalta en la respuesta las palabras que estaban ocultas.
+    const hidden = makeCloze(card.back.split("\n\nTu nota:")[0])?.hidden || [];
+    for (const word of hidden) back = back.replace(new RegExp(`(?<![\\p{L}\\p{N}])(${escapeHtml(word).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?![\\p{L}\\p{N}])`, "u"), "<mark>$1</mark>");
+  }
+  const previews = [0, 1, 2, 3].map((grade) => formatInterval(scheduleCard(card, grade).interval));
+  const labels = ["Otra vez", "Difícil", "Bien", "Fácil"];
+  $("studyBody").innerHTML = `<div class="study-progress"><b style="width:${(studyIndex / studyQueue.length) * 100}%"></b></div>
+  <div class="flashcard"><div class="flashcard-front">${front}</div>${studyRevealed ? `<div class="flashcard-back">${back}</div>` : ""}<div class="flashcard-source">Tarjeta ${studyIndex + 1} de ${studyQueue.length} · ${escapeHtml(card.origin || "manual")} · <button data-study-page="${card.page}">página ${card.page}</button></div></div>
+  ${studyRevealed
+    ? `<div class="study-grades">${labels.map((label, grade) => `<button data-grade="${grade}"><span>${grade + 1} · ${label}</span><small>${previews[grade]}</small></button>`).join("")}</div>`
+    : `<div class="study-reveal"><button class="btn" data-study="reveal">Mostrar respuesta</button></div>`}`;
+}
+function gradeStudyCard(grade) {
+  if (!studyRevealed) return;
+  const cards = studyCards();
+  const index = cards.findIndex((item) => item.id === studyQueue[studyIndex]);
+  if (index < 0) return;
+  cards[index] = scheduleCard(cards[index], grade);
+  saveStudyCards(cards);
+  // «Otra vez» vuelve a aparecer al final de esta misma sesión.
+  if (grade === 0) studyQueue.push(cards[index].id);
+  studyReviewed++;
+  studyIndex++;
+  studyRevealed = false;
+  renderStudyCard();
+}
+function renderStudyEditor(front = "", back = "", page = currentPage) {
+  $("studyPanel").hidden = false;
+  $("studyTitle").textContent = currentBook?.name || "Tarjetas";
+  $("studyBody").innerHTML = `<div class="study-editor"><label>Pregunta o texto con huecos (escribe ⟦…⟧ para un hueco)<textarea id="studyFront">${escapeHtml(front)}</textarea></label><label>Respuesta<textarea id="studyBack">${escapeHtml(back)}</textarea></label><footer><button class="btn" data-study="overview">Cancelar</button><button class="btn primary-action" data-study="save" data-page="${page}">Guardar tarjeta</button></footer></div>`;
+  $("studyFront").focus();
+}
+function createCardFromSelection() {
+  const text = window.getSelection()?.toString().replace(/\s+/g, " ").trim();
+  if (!text) return toast("Selecciona un fragmento primero");
+  hideAnnotationActions();
+  const cloze = makeCloze(text);
+  renderStudyEditor(cloze?.front || "", text, currentPage);
+}
+// Completa un prompt con la IA local sin pasar por el panel del asistente.
+async function completeLocalAi(prompt) {
+  const capability = await inspectAiCapability();
+  if (capability.kind === "none") throw new Error(capability.reason);
+  if (capability.kind === "builtin") {
+    const base = await getBuiltInAi();
+    if (!base) throw new Error("La IA integrada no está disponible.");
+    const session = base.clone ? await base.clone() : base;
+    try {
+      return String(await session.prompt(prompt));
+    } finally {
+      if (session !== base) session.destroy?.();
+    }
+  }
+  const engine = await getWebLlmAi();
+  const reply = await engine.chat.completions.create({
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.2,
+    max_tokens: 700,
+  });
+  return reply.choices?.[0]?.message?.content || "";
+}
+async function generateCardsWithAi() {
+  if (!pdfDoc || !currentBook) return toast("Abre un PDF primero");
+  const text = (await getPagePlainText(currentPage)).slice(0, 6000);
+  if (text.trim().length < 80) return toast("Esta página tiene poco texto para generar tarjetas");
+  $("studyPanel").hidden = false;
+  $("studyBody").innerHTML = '<div class="study-done"><strong>Generando tarjetas…</strong><p>La IA local está leyendo la página. La primera vez puede tardar mientras se prepara el modelo.</p></div>';
+  try {
+    const answer = await completeLocalAi(`Eres un profesor. A partir del TEXTO, crea entre 3 y 6 tarjetas de estudio en español sobre las ideas más importantes. Responde SOLO con líneas con este formato exacto, una tarjeta por línea:\nP: <pregunta concreta> || R: <respuesta breve y correcta>\n\nTEXTO (página ${currentPage}):\n"""${text}"""`);
+    const cards = String(answer)
+      .split(/\n+/)
+      .map((line) => line.match(/P\s*:\s*(.+?)\s*\|\|\s*R\s*:\s*(.+)/i))
+      .filter(Boolean)
+      .map((match) => newCard(match[1], match[2], { page: currentPage, sourceKey: `ai:${currentPage}:${hashText(match[1])}`, origin: "IA" }));
+    const known = new Set(studyCards().map((card) => card.sourceKey));
+    const fresh = cards.filter((card) => !known.has(card.sourceKey));
+    if (!fresh.length) throw new Error("La IA no devolvió tarjetas con el formato esperado.");
+    saveStudyCards([...studyCards(), ...fresh]);
+    renderStudyOverview();
+    toast(`${fresh.length} tarjeta${fresh.length > 1 ? "s" : ""} creada${fresh.length > 1 ? "s" : ""} con IA`);
+  } catch (error) {
+    console.error(error);
+    renderStudyOverview();
+    toast(friendlyAiError(error));
+  }
+}
+// Lanza el asistente con un ámbito y una pregunta ya preparados.
+async function runAiPreset(scope, question) {
+  if (!currentBook) return toast("Abre un documento primero");
+  if (scope === "selection" && !window.getSelection()?.toString().trim()) return toast("Selecciona un fragmento primero");
+  if (scope === "selection") await openAiAssistant();
+  else {
+    $("aiCard")?._expandAi?.();
+    $("aiScope").value = scope;
+    $("aiScope").dispatchEvent(new Event("change"));
+    $("aiPanel").hidden = false;
+    setAssistantButton(true);
+  }
+  $("aiQuestion").value = question;
+  askLocalAi();
+}
+function bindStudy() {
+  $("studyLaunchBtn").onclick = () => openStudy();
+  $("closeStudy").onclick = closeStudy;
+  $("cardFromSelectionBtn").onclick = createCardFromSelection;
+  $("studyPanel").addEventListener("pointerdown", (event) => {
+    if (event.target === $("studyPanel")) closeStudy();
+  });
+  $("studyBody").addEventListener("click", (event) => {
+    const action = event.target.closest("[data-study]")?.dataset.study;
+    const grade = event.target.closest("[data-grade]")?.dataset.grade;
+    const remove = event.target.closest("[data-study-delete]")?.dataset.studyDelete;
+    const page = event.target.closest("[data-study-page]")?.dataset.studyPage;
+    if (grade !== undefined) return gradeStudyCard(Number(grade));
+    if (remove) {
+      saveStudyCards(studyCards().filter((card) => card.id !== remove));
+      return renderStudyOverview();
+    }
+    if (page) {
+      closeStudy();
+      return jumpToPage(Number(page));
+    }
+    if (action === "review") startStudyReview();
+    else if (action === "reveal") {
+      studyRevealed = true;
+      renderStudyCard();
+    } else if (action === "overview") renderStudyOverview();
+    else if (action === "new") renderStudyEditor();
+    else if (action === "ai") generateCardsWithAi();
+    else if (action === "save") {
+      const front = $("studyFront").value.trim();
+      const back = $("studyBack").value.trim();
+      if (!front || !back) return toast("Escribe la pregunta y la respuesta");
+      saveStudyCards([...studyCards(), newCard(front, back, { page: Number(event.target.closest("[data-page]")?.dataset.page) || currentPage, origin: "manual" })]);
+      renderStudyOverview();
+      toast("Tarjeta guardada");
+    }
+  });
+  $("studyPanel").addEventListener("keydown", (event) => {
+    if (event.target.matches("textarea, input")) {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        renderStudyOverview();
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closeStudy();
+    } else if (event.key === " " && !studyRevealed && $("studyBody").querySelector('[data-study="reveal"]')) {
+      event.preventDefault();
+      studyRevealed = true;
+      renderStudyCard();
+    } else if (/^[1-4]$/.test(event.key) && studyRevealed) {
+      event.preventDefault();
+      gradeStudyCard(Number(event.key) - 1);
+    }
+  });
 }
 function bindNotebook() {
   $("notebookBtn").onclick = toggleNotebook;
@@ -4739,6 +5087,7 @@ function showEmpty() {
   setStickyPlacement(false);
   if (!$("notebookPanel").hidden) closeNotebook();
   setAutoScroll(false);
+  closeStudy();
   if (rulerOn) {
     rulerOn = false;
     $("readingRuler").hidden = true;
@@ -5059,6 +5408,7 @@ $("closeShortcuts").onclick = closeShortcuts;
 bindStickyInteractions();
 bindNotebook();
 bindReadingTools();
+bindStudy();
 $("shortcutsPanel").addEventListener("pointerdown", (event) => {
   if (event.target === $("shortcutsPanel")) closeShortcuts();
 });
@@ -5817,10 +6167,11 @@ window.addEventListener("keydown", (e) => {
     openPalette(window.getSelection()?.toString().trim().slice(0, 80) || "");
     return;
   }
-  if (!$("palette").hidden || !$("shortcutsPanel").hidden) {
+  if (!$("palette").hidden || !$("shortcutsPanel").hidden || !$("studyPanel").hidden) {
     if (e.key === "Escape") {
       closePalette();
       closeShortcuts();
+      if (!$("studyPanel").hidden) closeStudy();
     }
     return;
   }
@@ -5873,6 +6224,10 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if ((e.key === "g" || e.key === "G") && currentBook) setReadingRuler(!rulerOn);
+  if ((e.key === "e" || e.key === "E") && currentBook) {
+    e.preventDefault();
+    openStudy();
+  }
   if ((e.key === "a" || e.key === "A") && currentBook) setAutoScroll(!autoScroll.on);
   if (presentationMode && e.key === " ") {
     e.preventDefault();
