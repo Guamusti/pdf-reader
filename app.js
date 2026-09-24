@@ -485,6 +485,7 @@ async function openMarkdownStored(rec) {
   $("emptyState").hidden = true;
   $("canvasWrap").hidden = true;
   $("reflowReader").hidden = false;
+  document.body.classList.add("has-doc");
   $("reflowReader").innerHTML = markdownToHtml(markdownContent);
   $("docTitle").textContent = rec.name;
   $("docMeta").textContent = "Markdown · guardado localmente";
@@ -559,10 +560,16 @@ async function openStored(id) {
       Number(localStorage.getItem(key(id, "page")) || 1),
       pdfDoc.numPages,
     );
-    scale = Number(localStorage.getItem(key(id, "scale")) || 1.25);
+    const storedScale = Number(localStorage.getItem(key(id, "scale")));
+    scale = storedScale > 0 ? storedScale : 1.25;
     rotation = Number(localStorage.getItem(key(id, "rotation")) || 0) % 360;
     $("emptyState").hidden = true;
     $("canvasWrap").hidden = false;
+    document.body.classList.add("has-doc");
+    // Primera apertura: encajar al ancho (con tope cómodo en escritorio). En
+    // pantallas estrechas siempre se ajusta para no cortar la página.
+    if (window.innerWidth <= 700) scale = await computeFitScale();
+    else if (!(storedScale > 0)) scale = Math.min(1.6, await computeFitScale());
     $("docTitle").textContent = rec.name;
     $("docMeta").textContent =
       `${pdfDoc.numPages} páginas · guardado localmente`;
@@ -1144,6 +1151,325 @@ function ttsSkip(direction) {
   speakSentence();
 }
 
+// ---- Paleta de comandos (Ctrl/⌘+K) ----
+// Un único punto de entrada para buscar texto, saltar a una página o sección,
+// abrir documentos y ejecutar cualquier acción de la aplicación.
+let paletteItems = [];
+let paletteIndex = 0;
+let paletteLibrary = [];
+let paletteTextIndex = null;
+let paletteRenderFrame = 0;
+let paletteReturnFocus = null;
+function normalizeText(value) {
+  return String(value || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+function paletteScore(query, text) {
+  const q = normalizeText(query).trim();
+  if (!q) return 1;
+  const t = normalizeText(text);
+  const at = t.indexOf(q);
+  if (at === 0) return 100;
+  if (at > 0) return /[\s·:(-]/.test(t[at - 1]) ? 80 : 60;
+  const words = q.split(/\s+/).filter(Boolean);
+  if (words.every((word) => t.includes(word))) return 40;
+  let cursor = 0;
+  for (const char of t) {
+    if (char === q[cursor]) cursor++;
+    if (cursor === q.length) return 12;
+  }
+  return 0;
+}
+function paletteActions() {
+  const hasPdf = Boolean(pdfDoc);
+  const hasDoc = Boolean(currentBook);
+  const actions = [
+    { icon: "▤", title: "Abrir biblioteca", keys: "biblioteca documentos inicio home", run: () => $("homeBtn").click() },
+    { icon: "＋", title: "Añadir PDF o Markdown", keys: "importar subir abrir archivo nuevo", run: () => $("fileInput").click() },
+    { icon: "⤒", title: "Ir a la primera página", shortcut: ["Inicio"], when: hasPdf, run: () => jumpToPage(1) },
+    { icon: "⤓", title: "Ir a la última página", shortcut: ["Fin"], when: hasPdf, run: () => jumpToPage(pdfDoc.numPages) },
+    { icon: "⟲", title: "Volver a la vista anterior", shortcut: ["Alt", "←"], when: hasPdf && navBackStack.length > 0, run: navigateBack },
+    { icon: "▯", title: "Diseño: una página", keys: "vista simple", when: hasPdf, run: () => setViewMode("single") },
+    { icon: "▯▯", title: "Diseño: doble página (libro)", keys: "vista libro spread dos paginas", when: hasPdf, run: () => setViewMode("double") },
+    { icon: "↕", title: "Diseño: scroll continuo", keys: "vista desplazamiento vertical", when: hasPdf, run: () => setViewMode("continuous") },
+    { icon: "¶", title: reflowMode ? "Volver al PDF original" : "Modo lectura (texto adaptable)", keys: "reflow lectura maquetado texto fuente", shortcut: ["L"], when: hasPdf, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
+    { icon: "▶", title: "Presentación a pantalla completa", keys: "diapositivas slides", shortcut: ["P"], when: hasPdf, run: enterPresentation },
+    { icon: "🔊", title: ttsActive ? "Detener lectura en voz alta" : "Leer en voz alta", keys: "tts voz audio escuchar", when: hasPdf && speechSupported, run: toggleReadAloud },
+    { icon: "⛶", title: "Modo enfoque / pantalla completa", keys: "inmersivo", shortcut: ["F"], when: hasDoc, run: toggleFocusMode },
+    { icon: "▣", title: "Ajustar al ancho", keys: "zoom encajar", when: hasPdf, run: fitWidth },
+    { icon: "＋", title: "Acercar", keys: "zoom aumentar", shortcut: ["+"], when: hasDoc, run: () => changeReaderZoom(ZOOM_STEP) },
+    { icon: "−", title: "Alejar", keys: "zoom reducir", shortcut: ["−"], when: hasDoc, run: () => changeReaderZoom(-ZOOM_STEP) },
+    { icon: "↻", title: "Girar página", keys: "rotar", shortcut: ["R"], when: hasPdf, run: () => $("rotateBtn").click() },
+    { icon: "▦", title: "Miniaturas de páginas", keys: "thumbnails vista previa", when: hasPdf, run: toggleThumbnails },
+    { icon: "☰", title: "Mostrar u ocultar el panel lateral", keys: "indice sidebar contenido", when: hasDoc, run: toggleSidebar },
+    { icon: "◇", title: "Marcar o desmarcar esta página", keys: "marcador bookmark", shortcut: ["B"], when: hasPdf, run: toggleBookmark },
+    { icon: "✐", title: "Herramientas Ink (resaltar, subrayar, dibujar)", keys: "anotar marcador subrayado pluma", when: hasPdf && !reflowMode, run: () => $("markerModeBtn").click() },
+    { icon: "↶", title: "Deshacer anotación", keys: "undo", shortcut: ["Ctrl", "Z"], when: hasDoc && annotationUndo.length > 0, run: undoAnnotation },
+    { icon: "✦", title: "Preguntar al documento (IA local)", keys: "asistente ia chat pregunta", when: hasDoc, run: openAssistantForDocument },
+    { icon: "☀", title: "Tema claro", keys: "apariencia color", run: () => setTheme("light") },
+    { icon: "☾", title: "Tema oscuro", keys: "apariencia noche", run: () => setTheme("dark") },
+    { icon: "◐", title: "Tema sepia", keys: "apariencia papel", run: () => setTheme("sepia") },
+    { icon: "↗", title: "Exportar anotaciones a Markdown", keys: "descargar notas md", when: hasDoc, run: exportMarkdown },
+    { icon: "↓", title: "Exportar copia de las anotaciones (JSON)", keys: "descargar backup", when: hasDoc, run: exportAnnotations },
+    { icon: "⌨", title: "Ver atajos de teclado", keys: "ayuda teclas", shortcut: ["?"], run: openShortcuts },
+  ];
+  return actions.filter((action) => action.when === undefined || action.when);
+}
+function ensurePaletteTextIndex() {
+  if (!pdfDoc || !currentBook) return null;
+  if (paletteTextIndex?.bookId === currentBook.id) return paletteTextIndex;
+  const doc = pdfDoc;
+  const index = { bookId: currentBook.id, pages: new Array(doc.numPages).fill(null), done: 0 };
+  paletteTextIndex = index;
+  (async () => {
+    for (let i = 1; i <= doc.numPages; i++) {
+      if (paletteTextIndex !== index || pdfDoc !== doc) return;
+      try {
+        const page = await doc.getPage(i);
+        const content = await page.getTextContent();
+        index.pages[i - 1] = content.items.map((item) => item.str).join(" ").replace(/\s+/g, " ");
+      } catch {
+        index.pages[i - 1] = "";
+      }
+      index.done = i;
+      if (i % 12 === 0 || i === doc.numPages) schedulePaletteRender();
+    }
+  })();
+  return index;
+}
+function paletteHighlight(text, regex) {
+  if (!regex) return escapeHtml(text);
+  const matcher = new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : `${regex.flags}g`);
+  let html = "",
+    last = 0,
+    match,
+    guard = 0;
+  while ((match = matcher.exec(text)) && guard++ < 20) {
+    if (!match[0]) {
+      matcher.lastIndex++;
+      continue;
+    }
+    html += escapeHtml(text.slice(last, match.index)) + `<mark>${escapeHtml(match[0])}</mark>`;
+    last = match.index + match[0].length;
+  }
+  return html + escapeHtml(text.slice(last));
+}
+function buildPaletteItems(query) {
+  const raw = query.trim();
+  const items = [];
+  const push = (group, entries) => entries.forEach((entry) => items.push({ group, ...entry }));
+  // 1) Número de página: "12", "p 12", "pág. 12"
+  const pageMatch = raw.match(/^(?:p(?:[aá]g(?:ina)?)?\.?\s*)?(\d{1,5})$/i);
+  if (pdfDoc && pageMatch) {
+    const target = Math.max(1, Math.min(pdfDoc.numPages, Number(pageMatch[1])));
+    push("Ir a", [{ icon: "#", title: `Ir a la página ${target}`, subtitle: `de ${pdfDoc.numPages}`, run: () => jumpToPage(target) }]);
+  }
+  // 2) Texto del documento
+  if (pdfDoc && raw.length >= 2 && !pageMatch) {
+    const index = ensurePaletteTextIndex();
+    const regex = buildSearchRegex(raw);
+    if (index && regex) {
+      const hits = [];
+      let total = 0;
+      index.pages.forEach((text, i) => {
+        if (!text) return;
+        const found = collectPageMatches(text, regex, i + 1);
+        total += found.length;
+        found.slice(0, 2).forEach((hit, occurrence) => hits.push({ ...hit, occurrence }));
+      });
+      const pending = index.done < index.pages.length;
+      const entries = hits.slice(0, 7).map((hit) => ({
+        icon: "¶",
+        title: `Página ${hit.page}`,
+        subtitleHtml: paletteHighlight(hit.snippet, regex),
+        meta: [`p. ${hit.page}`],
+        run: () => applyPaletteSearch(raw, hit.page, hit.occurrence),
+      }));
+      if (total) {
+        entries.push({
+          icon: "⌕",
+          title: total === 1 ? "Ver la coincidencia en el panel lateral" : `Ver las ${total} coincidencias en el panel lateral`,
+          subtitle: pending ? `Indexando… ${index.done}/${index.pages.length} páginas` : "Navega entre ellas con ↑ ↓ o Enter en el buscador",
+          run: () => applyPaletteSearch(raw),
+        });
+      } else if (pending) {
+        entries.push({ icon: "…", title: "Buscando en el documento…", subtitle: `${index.done}/${index.pages.length} páginas indexadas`, run: () => applyPaletteSearch(raw) });
+      }
+      push("En este documento", entries);
+    } else if (!regex && searchOptions.regex) {
+      push("En este documento", [{ icon: "!", title: "Expresión regular no válida", subtitle: "Revisa el patrón o desactiva .*", run: () => {} }]);
+    }
+  }
+  // 3) Secciones del índice
+  const outline = [...document.querySelectorAll("#outlineList .outline-item[data-page]")].map((node) => ({
+    title: node.querySelector(".outline-name")?.textContent || node.textContent,
+    page: Number(node.dataset.page),
+  }));
+  const outlineHits = outline
+    .map((entry) => ({ entry, score: paletteScore(raw, entry.title) }))
+    .filter((hit) => hit.score > (raw ? 11 : 0))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, raw ? 6 : 5)
+    .map(({ entry }) => ({ icon: "§", title: entry.title, meta: [`p. ${entry.page}`], run: () => jumpToPage(entry.page) }));
+  push("Índice", outlineHits);
+  // 4) Acciones
+  const actionHits = paletteActions()
+    .map((action) => ({ action, score: paletteScore(raw, `${action.title} ${action.keys || ""}`) }))
+    .filter((hit) => hit.score > (raw ? 11 : 0))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, raw ? 8 : 9)
+    .map(({ action }) => ({ icon: action.icon, title: action.title, shortcut: action.shortcut, run: action.run }));
+  push("Acciones", actionHits);
+  // 5) Biblioteca
+  const libraryHits = paletteLibrary
+    .filter((record) => record.id !== currentBook?.id)
+    .map((record) => ({ record, score: paletteScore(raw, record.name) }))
+    .filter((hit) => hit.score > (raw ? 11 : 0))
+    .sort((a, b) => b.score - a.score || (b.record.openedAt || 0) - (a.record.openedAt || 0))
+    .slice(0, raw ? 5 : 4)
+    .map(({ record }) => ({
+      icon: record.kind === "markdown" ? "MD" : "PDF",
+      title: record.name,
+      subtitle: record.pages ? `${record.pages} páginas` : "Documento local",
+      run: () => openStored(record.id),
+    }));
+  push(raw ? "Biblioteca" : "Recientes", libraryHits);
+  return items;
+}
+function schedulePaletteRender() {
+  if ($("palette").hidden || paletteRenderFrame) return;
+  paletteRenderFrame = requestAnimationFrame(() => {
+    paletteRenderFrame = 0;
+    renderPalette(true);
+  });
+}
+function renderPalette(keepSelection = false) {
+  const list = $("paletteList");
+  const previous = keepSelection ? paletteItems[paletteIndex]?.title : null;
+  paletteItems = buildPaletteItems($("paletteInput").value);
+  paletteIndex = previous ? Math.max(0, paletteItems.findIndex((item) => item.title === previous)) : 0;
+  document.querySelectorAll("[data-palette-opt]").forEach((button) =>
+    button.classList.toggle("active", Boolean(searchOptions[button.dataset.paletteOpt])),
+  );
+  const index = paletteTextIndex?.bookId === currentBook?.id ? paletteTextIndex : null;
+  $("paletteStatus").textContent = index && index.done < index.pages.length ? `Indexando ${index.done}/${index.pages.length}` : "";
+  if (!paletteItems.length) {
+    list.innerHTML = `<div class="palette-empty">Sin resultados para «${escapeHtml($("paletteInput").value.trim())}».</div>`;
+    return;
+  }
+  let html = "",
+    group = "";
+  paletteItems.forEach((item, i) => {
+    if (item.group !== group) {
+      group = item.group;
+      html += `<div class="palette-group" role="presentation">${escapeHtml(group)}</div>`;
+    }
+    const meta = [
+      ...(item.meta || []).map((value) => `<span>${escapeHtml(value)}</span>`),
+      ...(item.shortcut || []).map((keyName) => `<kbd>${escapeHtml(keyName)}</kbd>`),
+    ].join("");
+    const subtitle = item.subtitleHtml || (item.subtitle ? escapeHtml(item.subtitle) : "");
+    html += `<button class="palette-item" role="option" id="palette-opt-${i}" data-palette-index="${i}" aria-selected="${i === paletteIndex}"><span class="palette-item-icon">${escapeHtml(item.icon || "•")}</span><span class="palette-item-copy"><strong>${escapeHtml(item.title)}</strong>${subtitle ? `<small>${subtitle}</small>` : ""}</span>${meta ? `<span class="palette-item-meta">${meta}</span>` : ""}</button>`;
+  });
+  list.innerHTML = html;
+  $("paletteInput").setAttribute("aria-activedescendant", `palette-opt-${paletteIndex}`);
+}
+function movePaletteSelection(delta) {
+  if (!paletteItems.length) return;
+  paletteIndex = (paletteIndex + delta + paletteItems.length) % paletteItems.length;
+  $("paletteList")
+    .querySelectorAll(".palette-item")
+    .forEach((node) => node.setAttribute("aria-selected", String(Number(node.dataset.paletteIndex) === paletteIndex)));
+  $(`palette-opt-${paletteIndex}`)?.scrollIntoView({ block: "nearest" });
+  $("paletteInput").setAttribute("aria-activedescendant", `palette-opt-${paletteIndex}`);
+}
+function runPaletteItem(i) {
+  const item = paletteItems[i];
+  if (!item) return;
+  closePalette(false);
+  Promise.resolve()
+    .then(() => item.run())
+    .catch((error) => console.error("La acción de la paleta falló", error));
+}
+async function openPalette(initial = "") {
+  paletteReturnFocus = document.activeElement;
+  $("palette").hidden = false;
+  const input = $("paletteInput");
+  input.value = initial;
+  paletteIndex = 0;
+  ensurePaletteTextIndex();
+  renderPalette();
+  input.focus();
+  input.select();
+  try {
+    paletteLibrary = await dbAll();
+    if (!$("palette").hidden) renderPalette(true);
+  } catch {}
+}
+function closePalette(restoreFocus = true) {
+  $("palette").hidden = true;
+  if (restoreFocus && paletteReturnFocus?.focus) paletteReturnFocus.focus();
+  paletteReturnFocus = null;
+}
+function togglePalette(initial = "") {
+  if ($("palette").hidden) openPalette(initial);
+  else closePalette();
+}
+// Lleva una búsqueda de la paleta al buscador principal (resultados en el panel
+// lateral, resaltado en la página y navegación ↑/↓) usando el índice ya creado.
+async function applyPaletteSearch(raw, page = 0, occurrence = 0) {
+  const regex = buildSearchRegex(raw);
+  if (!regex || !pdfDoc) return;
+  $("searchInput").value = raw;
+  searchScope = "document";
+  document.querySelectorAll("[data-search-scope]").forEach((button) =>
+    button.classList.toggle("active", button.dataset.searchScope === "document"),
+  );
+  const index = paletteTextIndex?.bookId === currentBook?.id ? paletteTextIndex : null;
+  if (!index || index.done < index.pages.length) {
+    await search(raw);
+  } else {
+    searchSignature = currentSearchSignature(raw);
+    searchRawQuery = raw;
+    searchQuery = raw.toLowerCase();
+    searchRegex = regex;
+    searchMatches = index.pages.flatMap((text, i) => (text ? collectPageMatches(text, regex, i + 1) : []));
+    searchIndex = -1;
+    if (!searchMatches.length) {
+      renderSearchResults();
+      toast("Sin coincidencias");
+      return;
+    }
+    let target = page ? searchMatches.findIndex((match) => match.page === page) : searchMatches.findIndex((match) => match.page >= currentPage);
+    if (target < 0) target = 0;
+    target = Math.min(searchMatches.length - 1, target + (page ? occurrence : 0));
+    await openSearchMatch(target);
+    toast(`${searchMatches.length} coincidencia${searchMatches.length > 1 ? "s" : ""}`);
+  }
+  if (window.innerWidth > 900 && document.body.classList.contains("sidebar-collapsed")) toggleSidebar();
+  setSidebarPanel("contents");
+}
+// ---- Atajos de teclado ----
+const SHORTCUT_GROUPS = [
+  ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
+  ["Lectura", [["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
+  ["Anotaciones", [["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
+  ["General", [["Atajos de teclado", ["?"]], ["Cerrar paneles", ["Esc"]]]],
+];
+function openShortcuts() {
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  $("shortcutsGrid").innerHTML = SHORTCUT_GROUPS.map(
+    ([title, rows]) =>
+      `<section><h3>${title}</h3>${rows
+        .map(([label, keys]) => `<div class="shortcut-row"><span>${label}</span><span>${keys.map((keyName) => `<kbd>${keyName === "Ctrl" && isMac ? "⌘" : keyName}</kbd>`).join("")}</span></div>`)
+        .join("")}</section>`,
+  ).join("");
+  $("shortcutsPanel").hidden = false;
+  $("closeShortcuts").focus();
+}
+function closeShortcuts() {
+  $("shortcutsPanel").hidden = true;
+}
+
 async function drainPageRenderQueue() {
   if (pageRenderActive) return;
   pageRenderActive = true;
@@ -1458,12 +1784,20 @@ function paintSearchHits() {
     .forEach((span) => span.classList.toggle("search-hit", matcher.test(span.textContent)));
 }
 
+// Escala que hace caber la página (o las dos páginas del modo libro) en el
+// ancho útil del visor, descontando su padding real.
+async function computeFitScale(pageNumber = currentPage) {
+  const page = await getCachedPage(pageNumber);
+  const base = page.getViewport({ scale: 1, rotation });
+  const viewer = $("viewer");
+  const style = getComputedStyle(viewer);
+  const available = viewer.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0) - 4;
+  const perPage = viewMode === "double" && window.innerWidth > 760 ? (available - 14) / 2 : available;
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, perPage / base.width));
+}
 async function fitWidth() {
   if (!pdfDoc) return;
-  const p = await getCachedPage(currentPage);
-  const base = p.getViewport({ scale: 1, rotation });
-  const available = $("viewer").clientWidth - 24;
-  scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, available / base.width));
+  scale = await computeFitScale();
   refreshCurrentView();
   updateZoomLabel();
 }
@@ -3715,6 +4049,7 @@ async function streamWebLlmVision(question) {
 
 function showEmpty() {
   if (ttsActive) stopReadAloud();
+  document.body.classList.remove("has-doc");
   $("emptyState").hidden = false;
   $("canvasWrap").hidden = true;
   $("reflowReader").hidden = true;
@@ -3975,6 +4310,57 @@ if (speechSupported) {
   $("readAloudBtn").disabled = true;
   $("readAloudBtn").title = "Lectura en voz alta no disponible en este navegador";
 }
+// Paleta de comandos y atajos
+$("paletteBtn").onclick = () => openPalette();
+if (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) {
+  document.querySelectorAll(".palette-kbd").forEach((node) => (node.textContent = "⌘ K"));
+}
+$("paletteInput").addEventListener("input", () => renderPalette());
+$("paletteInput").addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown" || (event.key === "Tab" && !event.shiftKey)) {
+    event.preventDefault();
+    movePaletteSelection(1);
+  } else if (event.key === "ArrowUp" || (event.key === "Tab" && event.shiftKey)) {
+    event.preventDefault();
+    movePaletteSelection(-1);
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    runPaletteItem(paletteIndex);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closePalette();
+  }
+});
+$("paletteList").addEventListener("pointermove", (event) => {
+  const item = event.target.closest("[data-palette-index]");
+  if (!item) return;
+  const next = Number(item.dataset.paletteIndex);
+  if (next !== paletteIndex) movePaletteSelection(next - paletteIndex);
+});
+$("paletteList").addEventListener("click", (event) => {
+  const item = event.target.closest("[data-palette-index]");
+  if (item) runPaletteItem(Number(item.dataset.paletteIndex));
+});
+$("palette").addEventListener("pointerdown", (event) => {
+  if (event.target === $("palette")) closePalette();
+});
+document.querySelectorAll("[data-palette-opt]").forEach((button) => {
+  button.onclick = () => {
+    const option = button.dataset.paletteOpt;
+    searchOptions[option] = !searchOptions[option];
+    if (option === "regex" && searchOptions.regex) searchOptions.wholeWord = false;
+    setJSON("paper.search-options", searchOptions);
+    applySearchOptionButtons();
+    searchSignature = "";
+    renderPalette(true);
+    $("paletteInput").focus();
+  };
+});
+$("closeShortcuts").onclick = closeShortcuts;
+$("shortcutsPanel").addEventListener("pointerdown", (event) => {
+  if (event.target === $("shortcutsPanel")) closeShortcuts();
+});
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("paper.theme", theme);
@@ -4718,7 +5104,48 @@ window.addEventListener("keydown", (e) => {
     closeCapture();
     return;
   }
-  if (e.target.matches?.("input,select,textarea")) return;
+  const commandKey = e.ctrlKey || e.metaKey;
+  // Paleta de comandos: disponible incluso escribiendo en un campo.
+  if (commandKey && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    togglePalette();
+    return;
+  }
+  if (commandKey && !e.altKey && e.key.toLowerCase() === "f" && pdfDoc) {
+    e.preventDefault();
+    openPalette(window.getSelection()?.toString().trim().slice(0, 80) || "");
+    return;
+  }
+  if (!$("palette").hidden || !$("shortcutsPanel").hidden) {
+    if (e.key === "Escape") {
+      closePalette();
+      closeShortcuts();
+    }
+    return;
+  }
+  if (e.target.matches?.("input,select,textarea") || e.target.isContentEditable) return;
+  if (commandKey && e.key.toLowerCase() === "z" && currentBook) {
+    e.preventDefault();
+    if (e.shiftKey) redoAnnotation();
+    else undoAnnotation();
+    return;
+  }
+  if (commandKey && e.key.toLowerCase() === "y" && currentBook) {
+    e.preventDefault();
+    redoAnnotation();
+    return;
+  }
+  if (commandKey || (e.altKey && !e.key.startsWith("Arrow"))) return;
+  if (e.key === "/") {
+    e.preventDefault();
+    openPalette();
+    return;
+  }
+  if (e.key === "?") {
+    e.preventDefault();
+    openShortcuts();
+    return;
+  }
   if (e.altKey && e.key === "ArrowLeft") {
     e.preventDefault();
     navigateBack();
