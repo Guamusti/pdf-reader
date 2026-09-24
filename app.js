@@ -474,6 +474,7 @@ async function openMarkdownStored(rec) {
   currentBook = rec;
   resetAiDocumentState();
   resetAnnotationHistory();
+  migrateLegacyPageNotes();
   currentPage = 1;
   reflowMode = true;
   document.body.classList.add("reflow-mode");
@@ -544,6 +545,7 @@ async function openStored(id) {
     currentBook = rec;
     resetAiDocumentState();
     resetAnnotationHistory();
+    migrateLegacyPageNotes();
     resetNavHistory();
     // Empezar siempre desde una vista limpia; el modo guardado se aplica al final.
     teardownContinuous();
@@ -1234,9 +1236,10 @@ function paletteActions() {
     { icon: "☰", title: "Mostrar u ocultar el panel lateral", keys: "indice sidebar contenido", when: hasDoc, run: toggleSidebar },
     { icon: "◇", title: "Marcar o desmarcar esta página", keys: "marcador bookmark", shortcut: ["B"], when: hasPdf, run: toggleBookmark },
     { icon: "✐", title: "Herramientas Ink (resaltar, subrayar, dibujar)", keys: "anotar marcador subrayado pluma", when: hasPdf && !reflowMode, run: () => $("markerModeBtn").click() },
-    { icon: "✎", title: "Añadir nota adhesiva en esta página", keys: "post-it comentario apunte pegar", shortcut: ["N"], when: hasPdf && !reflowMode, run: () => setStickyPlacement(true) },
-    { icon: "▥", title: $("notebookPanel").hidden ? "Abrir cuaderno de notas" : "Cerrar cuaderno de notas", keys: "apuntes notas pagina resumen", shortcut: ["C"], when: hasDoc, run: toggleNotebook },
-    { icon: "▥", title: "Escribir la nota del documento", keys: "resumen general apuntes", when: hasDoc, run: () => openNotebook("doc") },
+    { icon: "✎", title: "Nota en un punto de la página", keys: "post-it adhesiva comentario pegar anclar", shortcut: ["N"], when: hasPdf && !reflowMode, run: () => setStickyPlacement(true) },
+    { icon: "✎", title: "Nuevo apunte de esta página", keys: "nota escribir mano lapiz cuaderno", when: hasDoc, run: () => createPageNote() },
+    { icon: "▥", title: $("notebookPanel").hidden ? "Abrir notas" : "Cerrar notas", keys: "apuntes cuaderno notas pagina resumen", shortcut: ["C"], when: hasDoc, run: toggleNotebook },
+    { icon: "▥", title: "Nota del documento", keys: "resumen general apuntes", when: hasDoc, run: () => openNotebook("doc") },
     { icon: "▭", title: rulerOn ? "Quitar la regla de lectura" : "Regla de lectura (foco en una franja)", keys: "guia foco concentracion dislexia linea", shortcut: ["G"], when: hasDoc, run: () => setReadingRuler(!rulerOn) },
     { icon: "⇣", title: autoScroll.on ? "Detener el desplazamiento automático" : "Desplazamiento automático", keys: "autoscroll teleprompter scroll", shortcut: ["A"], when: hasDoc, run: () => setAutoScroll(!autoScroll.on) },
     { icon: "▧", title: "Guardar esta página como imagen (PNG)", keys: "exportar captura png descargar", when: hasPdf, run: exportPageImage },
@@ -1496,7 +1499,7 @@ async function applyPaletteSearch(raw, page = 0, occurrence = 0) {
 const SHORTCUT_GROUPS = [
   ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
   ["Lectura", [["Regla de lectura", ["G"]], ["Mover la regla", ["↑", "↓"]], ["Desplazamiento automático", ["A"]], ["Pausar / velocidad (auto-scroll)", ["Espacio", "[", "]"]], ["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
-  ["Notas y anotaciones", [["Nota adhesiva en la página", ["N"]], ["Cuaderno de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
+  ["Notas y anotaciones", [["Nota en un punto de la página", ["N"]], ["Ventana de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
   ["Estudio", [["Abrir tarjetas de estudio", ["E"]], ["Mostrar respuesta", ["Espacio"]], ["Calificar: otra vez · difícil · bien · fácil", ["1", "2", "3", "4"]]]],
   ["General", [["Atajos de teclado", ["?"]], ["Cerrar paneles", ["Esc"]]]],
 ];
@@ -1515,31 +1518,53 @@ function closeShortcuts() {
   $("shortcutsPanel").hidden = true;
 }
 
-// ---- Notas adhesivas en la página ----
-// Se guardan como anotaciones de tipo "sticky" con una posición normalizada
-// (x, y) y `rects: []`, así el resto del sistema (deshacer, borrar, listar,
-// exportar) las trata igual que cualquier otra anotación.
+// ---- Notas: apuntes de página y notas ancladas son la misma cosa ----
+// Cada nota es una anotación de tipo "sticky": { page, note (texto), ink
+// (escritura a mano), color, x/y }. Si tiene x/y está anclada a un punto de la
+// página y se ve como un marcador numerado; si no, es un apunte de la página.
+// Al ser anotaciones, el deshacer, la lista, los filtros, las exportaciones y
+// el estudio las tratan igual que al resto.
 const STICKY_COLORS = ["yellow", "green", "blue", "pink", "orange", "purple"];
+const NOTE_INK_COLORS = { black: "#1f2328", blue: "#2f6fe0", red: "#d23c3c", green: "#23955a", purple: "#8047c9" };
+const NOTE_HIGHLIGHT_COLORS = { yellow: "#ffd84a", green: "#86e39a", pink: "#ff9cc8", blue: "#99c8ff" };
+const NOTE_INK_WIDTHS = { fine: 1.6, medium: 2.6, thick: 4.2 };
+const NOTE_INK_REF_WIDTH = 320;
+const NOTE_INK_DEFAULT_RATIO = 0.55;
 let stickyPlacement = false;
+let placementTargetId = null;
 let activeStickyId = null;
 let freshStickyId = null;
-let stickySaveTimer = 0;
-let stickyPendingText = null;
+const freshNoteIds = new Set();
+const noteTool = {
+  mode: localStorage.getItem("paper.note-tool") || "text",
+  ink: localStorage.getItem("paper.note-ink") || "black",
+  highlight: localStorage.getItem("paper.note-highlight") || "yellow",
+  width: localStorage.getItem("paper.note-width") || "medium",
+};
 function stickyColorValue(color) {
   return annotationStyle(color || "yellow", 0.95);
+}
+function isPinned(mark) {
+  return Number.isFinite(mark?.x) && Number.isFinite(mark?.y);
+}
+function pageNoteMarks(page = currentPage) {
+  return annotations()
+    .filter((mark) => mark.type === "sticky" && mark.page === page)
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+function pinNumber(mark) {
+  return pageNoteMarks(mark.page).filter(isPinned).findIndex((item) => item.id === mark.id) + 1;
+}
+function noteHasContent(mark) {
+  return Boolean(String(mark?.note || "").trim() || mark?.ink?.strokes?.length);
 }
 function renderStickyNotes() {
   const layer = $("stickyLayer");
   if (!layer) return;
   layer.replaceChildren();
-  if (activeStickyId) {
-    const active = annotations().find((mark) => mark.id === activeStickyId);
-    if (!active || active.page !== currentPage) closeStickyEditor();
-  }
   if (!currentBook || !pdfDoc || reflowMode) return;
-  annotations()
-    .filter((mark) => mark.type === "sticky" && mark.page === currentPage)
-    .sort((a, b) => a.createdAt - b.createdAt)
+  pageNoteMarks()
+    .filter(isPinned)
     .forEach((mark, i) => {
       const pin = document.createElement("button");
       pin.className = "sticky-pin";
@@ -1549,12 +1574,15 @@ function renderStickyNotes() {
       pin.style.setProperty("--sticky", stickyColorValue(mark.color));
       pin.classList.toggle("active", mark.id === activeStickyId);
       pin.textContent = String(i + 1);
-      pin.title = (mark.note || "Nota vacía").slice(0, 180);
-      pin.setAttribute("aria-label", `Nota ${i + 1}: ${(mark.note || "vacía").slice(0, 80)}`);
+      const preview = String(mark.note || "").trim() || (mark.ink?.strokes?.length ? "Nota escrita a mano" : "Nota vacía");
+      pin.title = preview.slice(0, 180);
+      pin.setAttribute("aria-label", `Nota ${i + 1}: ${preview.slice(0, 80)}`);
       layer.append(pin);
     });
 }
-function setStickyPlacement(on) {
+// Modo de colocación: el siguiente toque en la página crea una nota anclada,
+// o ancla la nota `targetId` si se indica.
+function setStickyPlacement(on, targetId = null) {
   if (on) {
     if (!pdfDoc) return toast("Abre un PDF primero");
     if (reflowMode) return toast("Vuelve al PDF original para colocar notas en la página");
@@ -1563,124 +1591,82 @@ function setStickyPlacement(on) {
     if (eraserMode) toggleEraserMode(false);
   }
   stickyPlacement = Boolean(on);
+  placementTargetId = stickyPlacement ? targetId : null;
   document.body.classList.toggle("sticky-placing", stickyPlacement);
   $("stickyNoteBtn")?.setAttribute("aria-pressed", String(stickyPlacement));
-  if (stickyPlacement) toast("Toca la página donde quieras la nota · Esc para cancelar");
+  if (stickyPlacement) toast(targetId ? "Toca el punto de la página donde anclar la nota · Esc para cancelar" : "Toca la página donde quieras la nota · Esc para cancelar");
 }
-function createStickyAt(x, y) {
-  if (!currentBook) return;
-  const mark = {
+function newNoteMark(page, fields = {}) {
+  return {
     id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
-    page: currentPage,
+    page,
     type: "sticky",
     color: localStorage.getItem("paper.sticky-color") || "yellow",
-    x: Math.max(0.02, Math.min(0.98, x)),
-    y: Math.max(0.02, Math.min(0.98, y)),
+    x: null,
+    y: null,
     note: "",
     text: "",
     rects: [],
     createdAt: Date.now(),
+    ...fields,
   };
+}
+function createStickyAt(x, y) {
+  if (!currentBook) return;
+  const position = { x: Math.max(0.02, Math.min(0.98, x)), y: Math.max(0.02, Math.min(0.98, y)) };
+  if (placementTargetId) {
+    const id = placementTargetId;
+    placementTargetId = null;
+    updateAnnotation(id, { ...position, page: currentPage });
+    openStickyEditor(id);
+    return;
+  }
+  const mark = newNoteMark(currentPage, position);
   commitAnnotations([...annotations(), mark]);
   freshStickyId = mark.id;
+  freshNoteIds.add(mark.id);
   renderAnnotations();
   renderAnnotationList();
   openStickyEditor(mark.id);
 }
-function flushStickyText() {
-  clearTimeout(stickySaveTimer);
-  stickySaveTimer = 0;
-  if (!stickyPendingText) return;
-  const { id, text } = stickyPendingText;
-  stickyPendingText = null;
-  updateAnnotation(id, { note: text.slice(0, 4000) }, false);
+function createPageNote() {
+  if (!currentBook) return toast("Abre un documento primero");
+  const mark = newNoteMark(currentPage);
+  commitAnnotations([...annotations(), mark]);
+  freshNoteIds.add(mark.id);
+  renderAnnotationList();
+  openStickyEditor(mark.id);
 }
-function openStickyEditor(id) {
+// Las notas recién creadas que se abandonan vacías no dejan rastro.
+function purgeEmptyFreshNotes() {
+  if (!freshNoteIds.size || !currentBook) return;
+  const items = annotations();
+  // La nota activa se conserva sólo mientras sigas en su página.
+  const kept = items.filter((mark) => !(freshNoteIds.has(mark.id) && !(mark.id === activeStickyId && mark.page === currentPage) && !noteHasContent(mark)));
+  freshNoteIds.clear();
+  freshStickyId = null;
+  if (kept.length !== items.length) {
+    commitAnnotations(kept, false);
+    renderStickyNotes();
+    renderAnnotationList();
+  }
+}
+// Abrir una nota = mostrarla en la ventana de notas, lista para escribir.
+async function openStickyEditor(id) {
   const mark = annotations().find((item) => item.id === id);
   if (!mark) return;
-  if (activeStickyId && activeStickyId !== id) closeStickyEditor();
+  if (mark.page !== currentPage && pdfDoc) await jumpToPage(mark.page);
   activeStickyId = id;
+  notebookTab = "page";
   renderStickyNotes();
-  const editor = $("stickyEditor");
-  const index = annotations()
-    .filter((item) => item.type === "sticky" && item.page === mark.page)
-    .sort((a, b) => a.createdAt - b.createdAt)
-    .findIndex((item) => item.id === id);
-  editor.style.setProperty("--sticky", stickyColorValue(mark.color));
-  editor.innerHTML = `<header><div><strong>Nota ${index + 1}</strong><small>Página ${mark.page}${mark.createdAt ? ` · ${new Date(mark.createdAt).toLocaleDateString("es-ES", { day: "numeric", month: "short", year: "numeric" })}` : ""}</small></div><button class="btn icon" data-sticky-close aria-label="Cerrar nota">✕</button></header><textarea data-sticky-text placeholder="Escribe tu nota… (Ctrl+Enter para cerrar)" aria-label="Texto de la nota">${escapeHtml(mark.note || "")}</textarea><footer><div class="sticky-colors" role="group" aria-label="Color de la nota">${STICKY_COLORS.map((color) => `<button data-sticky-color="${color}" class="${color === (mark.color || "yellow") ? "active" : ""}" style="--swatch:${stickyColorValue(color)}" aria-label="Color ${color}"></button>`).join("")}</div><button class="btn danger" data-sticky-delete>Eliminar</button></footer>`;
-  editor.hidden = false;
-  positionStickyEditor();
-  const textarea = editor.querySelector("[data-sticky-text]");
-  textarea.addEventListener("input", () => {
-    stickyPendingText = { id, text: textarea.value };
-    clearTimeout(stickySaveTimer);
-    stickySaveTimer = setTimeout(flushStickyText, 350);
-  });
-  textarea.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" || ((event.ctrlKey || event.metaKey) && event.key === "Enter")) {
-      event.preventDefault();
-      event.stopPropagation();
-      closeStickyEditor();
-    }
-  });
-  editor.querySelector("[data-sticky-close]").onclick = () => closeStickyEditor();
-  editor.querySelector("[data-sticky-delete]").onclick = () => {
-    flushStickyText();
-    freshStickyId = null;
-    deleteAnnotation(id);
-    closeStickyEditor();
-  };
-  editor.querySelectorAll("[data-sticky-color]").forEach((button) => {
-    button.onclick = () => {
-      flushStickyText();
-      localStorage.setItem("paper.sticky-color", button.dataset.stickyColor);
-      updateAnnotation(id, { color: button.dataset.stickyColor });
-      editor.style.setProperty("--sticky", stickyColorValue(button.dataset.stickyColor));
-      editor.querySelectorAll("[data-sticky-color]").forEach((other) => other.classList.toggle("active", other === button));
-      renderStickyNotes();
-    };
-  });
-  textarea.focus();
-  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-}
-function positionStickyEditor() {
-  const editor = $("stickyEditor");
-  const pin = document.querySelector(`[data-sticky-id="${CSS.escape(activeStickyId || "")}"]`);
-  if (!pin || editor.hidden) return;
-  if (window.innerWidth <= 700) {
-    editor.style.left = "10px";
-    editor.style.top = "auto";
-    editor.style.bottom = "max(70px, env(safe-area-inset-bottom))";
-    return;
-  }
-  editor.style.bottom = "auto";
-  const box = pin.getBoundingClientRect();
-  const width = editor.offsetWidth || 300;
-  const height = editor.offsetHeight || 220;
-  let left = box.right + 12;
-  if (left + width > window.innerWidth - 10) left = box.left - width - 12;
-  left = Math.max(10, Math.min(left, window.innerWidth - width - 10));
-  const top = Math.max(66, Math.min(box.top - 12, window.innerHeight - height - 12));
-  editor.style.left = `${left}px`;
-  editor.style.top = `${top}px`;
+  openNotebook("page", { focusId: id });
 }
 function closeStickyEditor() {
-  const id = activeStickyId;
-  flushStickyText();
   activeStickyId = null;
-  $("stickyEditor").hidden = true;
-  // Una nota recién creada que se cierra vacía no deja rastro.
-  if (id && id === freshStickyId) {
-    const mark = annotations().find((item) => item.id === id);
-    if (mark && !mark.note?.trim()) {
-      commitAnnotations(annotations().filter((item) => item.id !== id), false);
-      renderAnnotationList();
-    }
-  }
-  freshStickyId = null;
   renderStickyNotes();
-  if (!$("notebookPanel").hidden) renderNotebook();
+  document.querySelectorAll(".nw-card.is-active").forEach((card) => card.classList.remove("is-active"));
 }
+function positionStickyEditor() {}
 function bindStickyInteractions() {
   // Colocar una nota: se captura antes que la capa de texto para no iniciar
   // una selección ni alternar la interfaz inmersiva.
@@ -1691,12 +1677,14 @@ function bindStickyInteractions() {
       event.preventDefault();
       event.stopPropagation();
       const box = $("canvasWrap").getBoundingClientRect();
+      const target = placementTargetId;
       setStickyPlacement(false);
+      placementTargetId = target;
       createStickyAt((event.clientX - box.left) / box.width, (event.clientY - box.top) / box.height);
     },
     true,
   );
-  // Pulsar abre la nota; arrastrar la recoloca.
+  // Pulsar un marcador abre su nota; arrastrarlo lo recoloca.
   let drag = null;
   $("stickyLayer").addEventListener("pointerdown", (event) => {
     const pin = event.target.closest("[data-sticky-id]");
@@ -1716,29 +1704,237 @@ function bindStickyInteractions() {
     drag.ny = Math.max(0.02, Math.min(0.98, (event.clientY - box.top) / box.height));
     drag.pin.style.left = `${drag.nx * 100}%`;
     drag.pin.style.top = `${drag.ny * 100}%`;
-    if (activeStickyId === drag.id) positionStickyEditor();
   });
   const finish = (event) => {
     if (!drag || drag.pointerId !== event.pointerId) return;
     const current = drag;
     drag = null;
     current.pin.classList.remove("dragging");
-    if (current.moved && current.nx !== undefined) {
-      updateAnnotation(current.id, { x: current.nx, y: current.ny });
-      if (activeStickyId === current.id) requestAnimationFrame(positionStickyEditor);
-    } else if (event.type === "pointerup") {
-      activeStickyId === current.id ? closeStickyEditor() : openStickyEditor(current.id);
-    }
+    if (current.moved && current.nx !== undefined) updateAnnotation(current.id, { x: current.nx, y: current.ny });
+    else if (event.type === "pointerup") openStickyEditor(current.id);
   };
   $("stickyLayer").addEventListener("pointerup", finish);
   $("stickyLayer").addEventListener("pointercancel", finish);
-  document.addEventListener("pointerdown", (event) => {
-    if ($("stickyEditor").hidden) return;
-    if (event.target.closest("#stickyEditor, [data-sticky-id], #notebookPanel")) return;
-    closeStickyEditor();
+}
+
+// ---- Escritura a mano en las notas ----
+// Los trazos se guardan normalizados al ancho del lienzo (x/ancho, y/ancho),
+// así se ven igual con la ventana estrecha o ancha. `h` es alto/ancho.
+let lastPenInput = 0;
+const noteInkUndo = [];
+function inkCanvasSize(host) {
+  const canvas = host.querySelector("canvas");
+  const width = Math.max(120, host.clientWidth);
+  const ratio = Number(host.dataset.ratio) || NOTE_INK_DEFAULT_RATIO;
+  canvas.style.height = `${Math.round(width * ratio)}px`;
+  return { canvas, width, height: Math.round(width * ratio) };
+}
+function drawInkStroke(ctx, stroke, width) {
+  const points = stroke.p || [];
+  if (!points.length) return;
+  const scale = width / NOTE_INK_REF_WIDTH;
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = stroke.c;
+  ctx.fillStyle = stroke.c;
+  const at = (point) => [point[0] * width, point[1] * width];
+  if (stroke.t === "highlight") {
+    // El marcador se pinta como un único trazo translúcido para que los
+    // solapamientos internos no oscurezcan el color.
+    ctx.globalAlpha = 0.42;
+    ctx.globalCompositeOperation = "multiply";
+    ctx.lineWidth = stroke.w * scale;
+    ctx.beginPath();
+    const [x0, y0] = at(points[0]);
+    ctx.moveTo(x0, y0);
+    for (let i = 1; i < points.length; i++) {
+      const [x, y] = at(points[i]);
+      ctx.lineTo(x, y);
+    }
+    if (points.length === 1) ctx.lineTo(x0 + 0.1, y0);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+  const pressureWidth = (point) => stroke.w * scale * (point[2] ? 0.45 + point[2] * 1.1 : 1);
+  if (points.length === 1) {
+    const [x, y] = at(points[0]);
+    ctx.beginPath();
+    ctx.arc(x, y, pressureWidth(points[0]) / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+  // Curvas cuadráticas entre puntos medios: trazo suave aunque lleguen pocos
+  // eventos del puntero; el grosor sigue la presión del lápiz.
+  let [prevX, prevY] = at(points[0]);
+  for (let i = 1; i < points.length; i++) {
+    const [cx, cy] = at(points[i - 1]);
+    const [nx, ny] = at(points[i]);
+    const mx = (cx + nx) / 2;
+    const my = (cy + ny) / 2;
+    ctx.beginPath();
+    ctx.lineWidth = (pressureWidth(points[i - 1]) + pressureWidth(points[i])) / 2;
+    ctx.moveTo(prevX, prevY);
+    ctx.quadraticCurveTo(cx, cy, mx, my);
+    ctx.stroke();
+    prevX = mx;
+    prevY = my;
+  }
+  const [lx, ly] = at(points[points.length - 1]);
+  ctx.beginPath();
+  ctx.moveTo(prevX, prevY);
+  ctx.lineTo(lx, ly);
+  ctx.stroke();
+  ctx.restore();
+}
+function paintInkHost(host, ink, live = null) {
+  const { canvas, width, height } = inkCanvasSize(host);
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  for (const stroke of ink?.strokes || []) drawInkStroke(ctx, stroke, width);
+  if (live) drawInkStroke(ctx, live, width);
+  host.classList.toggle("is-empty", !(ink?.strokes?.length || live));
+}
+function inkTargetOf(host) {
+  const [kind, id] = String(host.dataset.inkHost || "").split(":");
+  return { kind, id };
+}
+function readTargetInk(target) {
+  if (target.kind === "doc") return getJSON(key(currentBook.id, "doc-note-ink"), null) || { h: NOTE_INK_DEFAULT_RATIO, strokes: [] };
+  const mark = annotations().find((item) => item.id === target.id);
+  return mark?.ink ? structuredClone(mark.ink) : { h: NOTE_INK_DEFAULT_RATIO, strokes: [] };
+}
+function writeTargetInk(target, ink, record = true) {
+  const previous = readTargetInk(target);
+  if (record) {
+    noteInkUndo.push({ target, ink: previous });
+    if (noteInkUndo.length > 80) noteInkUndo.shift();
+  }
+  if (target.kind === "doc") setJSON(key(currentBook.id, "doc-note-ink"), ink);
+  else {
+    suppressNotebookRender = true;
+    try {
+      updateAnnotation(target.id, { ink }, false);
+    } finally {
+      suppressNotebookRender = false;
+    }
+  }
+  $("notebookStatus").textContent = "Guardado";
+  updateThumbNoteBadges();
+}
+function undoNoteInk() {
+  const entry = noteInkUndo.pop();
+  if (!entry) return toast("Nada que deshacer en la escritura a mano");
+  writeTargetInk(entry.target, entry.ink, false);
+  const host = document.querySelector(`[data-ink-host="${entry.target.kind}:${CSS.escape(entry.target.id)}"]`);
+  if (host) {
+    host.dataset.ratio = String(entry.ink.h || NOTE_INK_DEFAULT_RATIO);
+    paintInkHost(host, entry.ink);
+  }
+}
+function bindInkHost(host) {
+  if (host.dataset.bound) return;
+  host.dataset.bound = "1";
+  const canvas = host.querySelector("canvas");
+  let stroke = null;
+  let ink = null;
+  let erased = false;
+  let frame = 0;
+  const target = () => inkTargetOf(host);
+  const pointFrom = (event, width) => {
+    const box = canvas.getBoundingClientRect();
+    const pressure = event.pointerType === "pen" && event.pressure > 0 ? Math.round(event.pressure * 100) / 100 : 0;
+    return [Math.round(((event.clientX - box.left) / width) * 10000) / 10000, Math.round(((event.clientY - box.top) / width) * 10000) / 10000, pressure];
+  };
+  const repaint = () => {
+    frame = 0;
+    paintInkHost(host, ink, stroke);
+  };
+  const eraseAt = (point) => {
+    const radius = 12 / NOTE_INK_REF_WIDTH;
+    const before = ink.strokes.length;
+    ink.strokes = ink.strokes.filter((item) => !item.p.some((p) => Math.hypot(p[0] - point[0], p[1] - point[1]) < radius + (item.w / NOTE_INK_REF_WIDTH) / 2));
+    if (ink.strokes.length !== before) erased = true;
+  };
+  canvas.addEventListener("pointerdown", (event) => {
+    if (noteTool.mode === "text" || event.button > 0) return;
+    if (event.pointerType === "pen") lastPenInput = Date.now();
+    // Mientras se usa lápiz, la palma de la mano no dibuja.
+    else if (event.pointerType === "touch" && Date.now() - lastPenInput < 2000) return;
+    event.preventDefault();
+    canvas.setPointerCapture(event.pointerId);
+    const { width } = inkCanvasSize(host);
+    ink = readTargetInk(target());
+    ink.h = Number(host.dataset.ratio) || ink.h || NOTE_INK_DEFAULT_RATIO;
+    ink.strokes ||= [];
+    const point = pointFrom(event, width);
+    if (noteTool.mode === "eraser") {
+      erased = false;
+      host.dataset.snapshot = JSON.stringify(ink);
+      eraseAt(point);
+      stroke = null;
+      repaint();
+      return;
+    }
+    stroke = noteTool.mode === "highlight"
+      ? { t: "highlight", c: NOTE_HIGHLIGHT_COLORS[noteTool.highlight] || NOTE_HIGHLIGHT_COLORS.yellow, w: NOTE_INK_WIDTHS[noteTool.width] * 5.5, p: [point] }
+      : { t: "pen", c: NOTE_INK_COLORS[noteTool.ink] || NOTE_INK_COLORS.black, w: NOTE_INK_WIDTHS[noteTool.width], p: [point] };
+    repaint();
   });
-  window.addEventListener("resize", positionStickyEditor);
-  $("viewer").addEventListener("scroll", positionStickyEditor, { passive: true });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!ink || !canvas.hasPointerCapture(event.pointerId)) return;
+    const { width, height } = inkCanvasSize(host);
+    const events = event.getCoalescedEvents?.() || [event];
+    for (const item of events) {
+      const point = pointFrom(item, width);
+      if (noteTool.mode === "eraser") eraseAt(point);
+      else if (stroke) {
+        const last = stroke.p[stroke.p.length - 1];
+        if (Math.hypot(point[0] - last[0], point[1] - last[1]) > 0.002) stroke.p.push(point);
+      }
+    }
+    // Al acercarse al borde inferior, el área de escritura crece sola.
+    if (stroke && (event.clientY - canvas.getBoundingClientRect().top) > height - 28) {
+      host.dataset.ratio = String(Math.min(6, (Number(host.dataset.ratio) || NOTE_INK_DEFAULT_RATIO) + 0.25));
+      ink.h = Number(host.dataset.ratio);
+    }
+    if (!frame) frame = requestAnimationFrame(repaint);
+  });
+  const finish = (event) => {
+    if (!ink || !canvas.hasPointerCapture(event.pointerId)) return;
+    canvas.releasePointerCapture(event.pointerId);
+    if (noteTool.mode === "eraser") {
+      if (erased) {
+        const after = ink;
+        writeTargetInk(target(), JSON.parse(host.dataset.snapshot), false);
+        writeTargetInk(target(), after);
+      }
+    } else if (stroke) {
+      ink.strokes.push(stroke);
+      writeTargetInk(target(), ink);
+    }
+    stroke = null;
+    const final = ink;
+    ink = null;
+    paintInkHost(host, final);
+  };
+  canvas.addEventListener("pointerup", finish);
+  canvas.addEventListener("pointercancel", finish);
+  host.querySelector("[data-ink-more]")?.addEventListener("click", () => {
+    const next = readTargetInk(target());
+    next.h = Math.min(6, (Number(host.dataset.ratio) || next.h || NOTE_INK_DEFAULT_RATIO) + 0.5);
+    host.dataset.ratio = String(next.h);
+    writeTargetInk(target(), next, false);
+    paintInkHost(host, next);
+  });
 }
 
 // ---- Regla de lectura ----
@@ -1994,6 +2190,20 @@ const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   fitWidth: '<path d="M3 5v14M21 5v14"/><path d="m7 12 3-3M7 12l3 3M7 12h10m0 0-3-3m3 3-3 3"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  pin: '<path d="M12 17v5"/><path d="M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>',
+  pinOff: '<path d="M12 17v5"/><path d="M15 9.3V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.9"/><path d="m2 2 20 20"/><path d="M9 9v1.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h11"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  type: '<path d="M4 7V5h16v2"/><path d="M9 19h6"/><path d="M12 5v14"/>',
+  pen: '<path d="M12 20h9"/><path d="M16.4 3.6a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/>',
+  eraser: '<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L11 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/>',
+  grip: '<circle cx="9" cy="6" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/>',
+  cursor: '<path d="M4.5 3.5 11 20l2.4-6.6L20 11z"/>',
+  underline: '<path d="M6 4v6a6 6 0 0 0 12 0V4"/><path d="M4 20h16"/>',
+  wavy: '<path d="M7 4v5a5 5 0 0 0 10 0V4"/><path d="M3 19c1.5-1.5 3-1.5 4.5 0s3 1.5 4.5 0 3-1.5 4.5 0 3 1.5 4.5 0"/>',
+  strike: '<path d="M16 4H9a3 3 0 0 0-2.8 4"/><path d="M14 12a4 4 0 0 1 0 8H6"/><path d="M4 12h16"/>',
+  square: '<rect x="4" y="4" width="16" height="16" rx="2"/>',
+  arrow: '<path d="M7 17 17 7"/><path d="M8 7h9v9"/>',
+  palette: '<circle cx="13.5" cy="6.5" r="1.3"/><circle cx="17.5" cy="10.5" r="1.3"/><circle cx="8.5" cy="7.5" r="1.3"/><circle cx="6.5" cy="12.5" r="1.3"/><path d="M12 2a10 10 0 0 0 0 20c.9 0 1.6-.7 1.6-1.6 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.6 1.6-1.6H16a6 6 0 0 0 6-6c0-4.9-4.5-8.6-10-8.6"/>',
 };
 function iconSvg(name) {
   return `<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
@@ -2085,19 +2295,14 @@ function bindInterfaceV4() {
   });
   window.addEventListener("resize", closeZoomMenu, { passive: true });
 }
-// ---- Cuaderno: notas libres por página y del documento ----
+// ---- Ventana de notas ----
 let notebookTab = "page";
 let notebookShownPage = 0;
-let notebookSaveTimer = 0;
+let suppressNotebookRender = false;
+const noteTextTimers = new Map();
+// Almacén antiguo de apuntes por página: sólo se lee para migrarlo.
 function pageNotesStore() {
   return currentBook ? getJSON(key(currentBook.id, "page-notes"), {}) : {};
-}
-function writePageNote(page, text) {
-  if (!currentBook) return;
-  const store = pageNotesStore();
-  if (text.trim()) store[page] = { text: text.slice(0, 20000), updatedAt: Date.now() };
-  else delete store[page];
-  setJSON(key(currentBook.id, "page-notes"), store);
 }
 function documentNote() {
   return currentBook ? localStorage.getItem(key(currentBook.id, "doc-note")) || "" : "";
@@ -2107,88 +2312,209 @@ function writeDocumentNote(text) {
   if (text.trim()) localStorage.setItem(key(currentBook.id, "doc-note"), text.slice(0, 40000));
   else localStorage.removeItem(key(currentBook.id, "doc-note"));
 }
+function documentNoteInk() {
+  return currentBook ? getJSON(key(currentBook.id, "doc-note-ink"), null) : null;
+}
 function wordCount(text) {
   return (String(text).trim().match(/\S+/g) || []).length;
 }
+// Convierte los apuntes por página de versiones anteriores en notas.
+function migrateLegacyPageNotes() {
+  if (!currentBook) return 0;
+  const store = pageNotesStore();
+  const entries = Object.entries(store).filter(([, entry]) => String(entry?.text || "").trim());
+  if (!entries.length) {
+    if (Object.keys(store).length) localStorage.removeItem(key(currentBook.id, "page-notes"));
+    return 0;
+  }
+  const migrated = entries.map(([page, entry]) =>
+    newNoteMark(Number(page), { note: String(entry.text).slice(0, 20000), createdAt: Number(entry.updatedAt) || Date.now() }),
+  );
+  commitAnnotations([...annotations(), ...migrated], false);
+  localStorage.removeItem(key(currentBook.id, "page-notes"));
+  return migrated.length;
+}
 function flushNotebook() {
-  if (!notebookSaveTimer) return;
-  clearTimeout(notebookSaveTimer);
-  notebookSaveTimer = 0;
-  if (notebookShownPage) writePageNote(notebookShownPage, $("notebookPageText").value);
-  writeDocumentNote($("notebookDocText").value);
+  for (const [id, timer] of noteTextTimers) {
+    clearTimeout(timer);
+    saveNoteText(id);
+  }
+  noteTextTimers.clear();
+}
+function saveNoteText(id) {
+  noteTextTimers.delete(id);
+  const field = document.querySelector(`[data-note-text="${CSS.escape(id)}"]`);
+  if (!field || !currentBook) return;
+  if (id === "doc") writeDocumentNote(field.value);
+  else {
+    suppressNotebookRender = true;
+    try {
+      updateAnnotation(id, { note: field.value.slice(0, 20000) }, false);
+    } finally {
+      suppressNotebookRender = false;
+    }
+    renderStickyNotes();
+  }
   $("notebookStatus").textContent = "Guardado";
   updateThumbNoteBadges();
 }
-function scheduleNotebookSave() {
+function scheduleNoteText(id) {
   $("notebookStatus").textContent = "Guardando…";
-  clearTimeout(notebookSaveTimer);
-  notebookSaveTimer = setTimeout(flushNotebook, 450);
-  updateNotebookCount();
+  clearTimeout(noteTextTimers.get(id));
+  noteTextTimers.set(id, setTimeout(() => saveNoteText(id), 400));
 }
-function updateNotebookCount() {
-  const text = notebookTab === "doc" ? $("notebookDocText").value : $("notebookPageText").value;
-  $("notebookCount").textContent = notebookTab === "all" ? "" : `${wordCount(text)} palabras`;
+function noteCardHtml(mark, kind = "note") {
+  const id = kind === "doc" ? "doc" : mark.id;
+  const text = kind === "doc" ? documentNote() : mark.note || "";
+  const ink = kind === "doc" ? documentNoteInk() : mark.ink;
+  const pinned = kind !== "doc" && isPinned(mark);
+  const date = kind !== "doc" && mark.createdAt ? new Date(mark.updatedAt || mark.createdAt).toLocaleDateString("es-ES", { day: "numeric", month: "short" }) : "";
+  const chip = kind === "doc" ? "Nota del documento" : pinned ? `<b>${pinNumber(mark)}</b> En la página` : "Apunte";
+  const actions = kind === "doc"
+    ? ""
+    : `<button class="note-act" data-note-color="${id}" title="Cambiar color" aria-label="Cambiar color"><i style="--swatch:${stickyColorValue(mark.color)}"></i></button><button class="note-act" data-note-pin="${id}" title="${pinned ? "Quitar de la página" : "Anclar en un punto de la página"}" aria-label="${pinned ? "Quitar de la página" : "Anclar en la página"}">${iconSvg(pinned ? "pinOff" : "pin")}</button><button class="note-act danger" data-note-delete="${id}" title="Eliminar nota" aria-label="Eliminar nota">${iconSvg("trash")}</button>`;
+  return `<article class="nw-card${activeStickyId === id ? " is-active" : ""}" data-note="${escapeHtml(id)}" style="--note:${kind === "doc" ? "var(--accent)" : stickyColorValue(mark.color)}"><header><span class="note-chip">${chip}</span><span class="note-date">${date}</span><span class="note-actions">${actions}</span></header><textarea class="note-text" data-note-text="${escapeHtml(id)}" rows="${Math.min(14, Math.max(2, text.split("\n").length + 1))}" placeholder="${kind === "doc" ? "Resumen, tesis, preguntas abiertas del documento…" : "Escribe tu nota…"}" aria-label="Texto de la nota">${escapeHtml(text)}</textarea><div class="note-ink${ink?.strokes?.length ? "" : " is-empty"}" data-ink-host="${kind === "doc" ? "doc" : "note"}:${escapeHtml(id)}" data-ratio="${ink?.h || NOTE_INK_DEFAULT_RATIO}"><canvas aria-label="Escritura a mano"></canvas><span class="note-ink-hint">Escribe o dibuja aquí</span><button class="note-ink-more" data-ink-more title="Más espacio para escribir">＋</button></div></article>`;
 }
-function renderNotebook() {
+function renderNotesTools() {
+  const tools = $("notesTools");
+  const mode = noteTool.mode;
+  const palette = mode === "highlight" ? NOTE_HIGHLIGHT_COLORS : NOTE_INK_COLORS;
+  const current = mode === "highlight" ? noteTool.highlight : noteTool.ink;
+  const modes = [["text", "type", "Escribir texto"], ["pen", "pen", "Pluma"], ["highlight", "highlighter", "Marcador"], ["eraser", "eraser", "Goma"]];
+  tools.innerHTML = `<div class="nw-seg" role="radiogroup" aria-label="Herramienta">${modes.map(([value, icon, label]) => `<button role="radio" aria-checked="${mode === value}" data-note-mode="${value}" title="${label}" aria-label="${label}">${iconSvg(icon)}</button>`).join("")}</div>${mode === "pen" || mode === "highlight"
+    ? `<div class="nw-swatches" role="radiogroup" aria-label="Color">${Object.entries(palette).map(([name, value]) => `<button role="radio" aria-checked="${current === name}" data-note-ink="${name}" style="--swatch:${value}" aria-label="Color ${name}"></button>`).join("")}</div><div class="nw-widths" role="radiogroup" aria-label="Grosor">${Object.keys(NOTE_INK_WIDTHS).map((name, i) => `<button role="radio" aria-checked="${noteTool.width === name}" data-note-width="${name}" aria-label="Grosor ${name}"><i style="--dot:${4 + i * 3}px"></i></button>`).join("")}</div>`
+    : `<span class="nw-hint">${mode === "eraser" ? "Toca un trazo para borrarlo" : "Escribe con el teclado o elige la pluma para escribir a mano"}</span>`}<button class="nw-undo" data-note-undo title="Deshacer trazo" aria-label="Deshacer trazo">${iconSvg("back")}</button>`;
+  $("notebookPanel").dataset.mode = mode;
+}
+function renderNotebook(options = {}) {
   if (!currentBook) return;
+  const body = $("notesBody");
+  const scroll = body.scrollTop;
   flushNotebook();
-  const store = pageNotesStore();
-  const stickies = annotations().filter((mark) => mark.type === "sticky");
+  if (notebookShownPage && notebookShownPage !== currentPage) purgeEmptyFreshNotes();
   notebookShownPage = currentPage;
-  $("notebookTitle").textContent = notebookTab === "doc" ? "Nota del documento" : notebookTab === "all" ? "Todas las notas" : `Página ${currentPage}`;
+  const pageLabel = pdfDoc ? `Página ${currentPage}` : "Documento";
+  $("notebookTitle").textContent = notebookTab === "doc" ? "Nota del documento" : notebookTab === "all" ? "Todas las notas" : pageLabel;
   document.querySelectorAll("[data-notebook-tab]").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.notebookTab === notebookTab)));
-  document.querySelectorAll("[data-notebook-section]").forEach((section) => (section.hidden = section.dataset.notebookSection !== notebookTab));
-  if (document.activeElement !== $("notebookPageText")) $("notebookPageText").value = store[currentPage]?.text || "";
-  if (document.activeElement !== $("notebookDocText")) $("notebookDocText").value = documentNote();
-  const pageStickies = stickies.filter((mark) => mark.page === currentPage).sort((a, b) => a.createdAt - b.createdAt);
-  $("notebookStickies").innerHTML = pageStickies.length
-    ? `<div class="label">Notas adhesivas en la página</div>${pageStickies
-        .map((mark, i) => `<button class="notebook-sticky" data-notebook-sticky="${mark.id}" style="--sticky:${stickyColorValue(mark.color)}"><b>${i + 1}</b><span>${escapeHtml(mark.note || "Nota vacía")}</span></button>`)
-        .join("")}`
-    : "";
-  const pages = new Map();
-  Object.entries(store).forEach(([page, entry]) => pages.set(Number(page), { text: entry.text, stickies: 0 }));
-  stickies.forEach((mark) => {
-    const entry = pages.get(mark.page) || { text: "", stickies: 0 };
-    entry.stickies++;
-    if (!entry.text && mark.note) entry.preview = mark.note;
-    pages.set(mark.page, entry);
+  renderNotesTools();
+  const all = annotations().filter((mark) => mark.type === "sticky");
+  if (notebookTab === "page") {
+    const marks = pageNoteMarks();
+    body.innerHTML = marks.length
+      ? marks.map((mark) => noteCardHtml(mark)).join("")
+      : `<div class="nw-empty"><strong>Sin notas en esta página</strong><p>Escribe un apunte o pega una nota en un punto concreto de la página. Puedes escribir con el teclado o a mano.</p><div><button class="btn" data-empty-new>${iconSvg("plus")} Nuevo apunte</button><button class="btn" data-empty-pin>${iconSvg("pin")} Nota en la página</button></div></div>`;
+  } else if (notebookTab === "doc") {
+    body.innerHTML = noteCardHtml(null, "doc");
+  } else {
+    const pages = new Map();
+    for (const mark of all) {
+      const entry = pages.get(mark.page) || { count: 0, preview: "", ink: false };
+      entry.count++;
+      if (!entry.preview && mark.note?.trim()) entry.preview = mark.note.trim();
+      if (mark.ink?.strokes?.length) entry.ink = true;
+      pages.set(mark.page, entry);
+    }
+    const docText = documentNote().trim();
+    const docInk = Boolean(documentNoteInk()?.strokes?.length);
+    const rows = [...pages.entries()].sort((a, b) => a[0] - b[0]);
+    body.innerHTML =
+      (docText || docInk ? `<button class="nw-entry" data-notebook-doc><strong>Nota del documento<span>${docInk ? "✎ " : ""}${wordCount(docText)} palabras</span></strong><small>${escapeHtml(docText || "Escrita a mano")}</small></button>` : "") +
+      (rows.length
+        ? rows.map(([page, entry]) => `<button class="nw-entry" data-notebook-page="${page}"><strong>Página ${page}<span>${entry.ink ? "✎ " : ""}${entry.count} nota${entry.count > 1 ? "s" : ""}</span></strong><small>${escapeHtml(entry.preview || "Escrita a mano")}</small></button>`).join("")
+        : docText || docInk ? "" : '<div class="nw-empty"><strong>Aún no hay notas</strong><p>Pulsa <b>N</b> para pegar una nota en la página o escribe un apunte en «Esta página».</p></div>');
+  }
+  body.querySelectorAll("[data-ink-host]").forEach((host) => {
+    bindInkHost(host);
+    const ink = inkTargetOf(host).kind === "doc" ? documentNoteInk() : annotations().find((mark) => mark.id === inkTargetOf(host).id)?.ink;
+    paintInkHost(host, ink);
   });
-  const docText = documentNote();
-  const entries = [...pages.entries()].sort((a, b) => a[0] - b[0]);
-  $("notebookAll").innerHTML =
-    (docText ? `<button class="notebook-entry" data-notebook-doc><strong>Nota del documento<span>${wordCount(docText)} palabras</span></strong><small>${escapeHtml(docText)}</small></button>` : "") +
-    (entries.length
-      ? entries
-          .map(([page, entry]) => `<button class="notebook-entry" data-notebook-page="${page}"><strong>Página ${page}<span>${entry.stickies ? `${entry.stickies} nota${entry.stickies > 1 ? "s" : ""} adhesiva${entry.stickies > 1 ? "s" : ""}` : ""}</span></strong><small>${escapeHtml(entry.text || entry.preview || "Sin texto")}</small></button>`)
-          .join("")
-      : docText
-        ? ""
-        : '<div class="notebook-empty">Aún no hay notas.<br>Escribe en «Esta página» o pulsa <b>N</b> para pegar una nota adhesiva en el PDF.</div>');
-  $("notebookStatus").textContent = store[currentPage]?.updatedAt && notebookTab === "page" ? `Editado ${new Date(store[currentPage].updatedAt).toLocaleString("es-ES", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "Se guarda automáticamente";
-  updateNotebookCount();
+  body.scrollTop = options.keepScroll === false ? 0 : scroll;
+  const status = $("notebookStatus");
+  if (!noteTextTimers.size) status.textContent = notebookTab === "all" ? `${all.length} nota${all.length === 1 ? "" : "s"}` : "Se guarda automáticamente";
+  if (options.focusId) {
+    const card = body.querySelector(`[data-note="${CSS.escape(options.focusId)}"]`);
+    if (card) {
+      body.querySelectorAll(".nw-card.is-active").forEach((item) => item.classList.remove("is-active"));
+      card.classList.add("is-active");
+      card.scrollIntoView({ block: "nearest" });
+      if (noteTool.mode === "text") {
+        const field = card.querySelector("textarea");
+        field.focus();
+        field.setSelectionRange(field.value.length, field.value.length);
+      }
+    }
+  }
 }
 function syncNotebookPage() {
   if ($("notebookPanel").hidden || notebookShownPage === currentPage) return;
-  renderNotebook();
+  if (notebookTab === "page") renderNotebook({ keepScroll: false });
+  else notebookShownPage = currentPage;
 }
-function openNotebook(tab) {
+function setNoteTool(patch) {
+  Object.assign(noteTool, patch);
+  localStorage.setItem("paper.note-tool", noteTool.mode);
+  localStorage.setItem("paper.note-ink", noteTool.ink);
+  localStorage.setItem("paper.note-highlight", noteTool.highlight);
+  localStorage.setItem("paper.note-width", noteTool.width);
+  renderNotesTools();
+}
+// Posición y tamaño de la ventana, como la del asistente.
+function applyNotesWindowGeometry() {
+  const panel = $("notebookPanel");
+  if (window.innerWidth <= 700) {
+    panel.style.cssText = "";
+    return;
+  }
+  const saved = getJSON("paper.notes-window", null);
+  const topbar = 56;
+  const width = Math.min(window.innerWidth - 24, Math.max(300, saved?.width || 380));
+  const height = Math.min(window.innerHeight - topbar - 24, Math.max(260, saved?.height || Math.min(660, window.innerHeight - topbar - 110)));
+  const left = Number.isFinite(saved?.left) ? saved.left : window.innerWidth - width - 16;
+  const top = Number.isFinite(saved?.top) ? saved.top : topbar + 12;
+  panel.style.width = `${width}px`;
+  panel.style.height = panel.classList.contains("is-minimized") ? "" : `${height}px`;
+  panel.style.left = `${Math.max(8, Math.min(window.innerWidth - Math.min(width, 200) - 8, left))}px`;
+  panel.style.top = `${Math.max(8, Math.min(window.innerHeight - 52, top))}px`;
+}
+function saveNotesWindowGeometry() {
+  const panel = $("notebookPanel");
+  if (window.innerWidth <= 700 || panel.hidden) return;
+  const box = panel.getBoundingClientRect();
+  const saved = getJSON("paper.notes-window", {});
+  setJSON("paper.notes-window", {
+    left: Math.round(box.left),
+    top: Math.round(box.top),
+    width: Math.round(box.width),
+    height: panel.classList.contains("is-minimized") ? saved.height : Math.round(box.height),
+  });
+}
+function setNotesMinimized(minimized) {
+  const panel = $("notebookPanel");
+  panel.classList.toggle("is-minimized", minimized);
+  setIcon("notesMinimize", minimized ? "chevronUp" : "minus");
+  $("notesMinimize").title = minimized ? "Restaurar" : "Minimizar";
+  localStorage.setItem("paper.notes-minimized", minimized ? "1" : "0");
+  applyNotesWindowGeometry();
+}
+function openNotebook(tab, options = {}) {
   if (!currentBook) return toast("Abre un documento primero");
-  if (tab) notebookTab = tab;
-  $("notebookPanel").hidden = false;
+  if (typeof tab === "string") notebookTab = tab;
+  const panel = $("notebookPanel");
+  const wasHidden = panel.hidden;
+  panel.hidden = false;
   document.body.classList.add("notebook-open");
   $("notebookBtn")?.setAttribute("aria-pressed", "true");
-  renderNotebook();
-  const field = notebookTab === "doc" ? $("notebookDocText") : notebookTab === "page" ? $("notebookPageText") : null;
-  field?.focus();
-  if (window.innerWidth >= 1100 && pdfDoc && !reflowMode) requestAnimationFrame(refitZoom);
+  if (panel.classList.contains("is-minimized") && options.focusId) setNotesMinimized(false);
+  if (wasHidden) applyNotesWindowGeometry();
+  renderNotebook({ focusId: options.focusId, keepScroll: !wasHidden });
 }
 function closeNotebook() {
   flushNotebook();
+  purgeEmptyFreshNotes();
   $("notebookPanel").hidden = true;
   document.body.classList.remove("notebook-open");
   $("notebookBtn")?.setAttribute("aria-pressed", "false");
-  if (window.innerWidth >= 1100 && pdfDoc && !reflowMode) requestAnimationFrame(refitZoom);
+  closeStickyEditor();
 }
 function toggleNotebook() {
   $("notebookPanel").hidden ? openNotebook() : closeNotebook();
@@ -2201,6 +2527,7 @@ function updateThumbNoteBadges() {
   });
   document.querySelectorAll(".thumb[data-page]").forEach((card) => card.classList.toggle("has-notes", pages.has(Number(card.dataset.page))));
 }
+
 // ---- Estudio: tarjetas con repaso espaciado (SM-2) ----
 // Las tarjetas se guardan por documento. Pueden venir de resaltados (ejercicio
 // de huecos), de notas «pregunta :: respuesta» (también líneas del cuaderno),
@@ -2272,6 +2599,13 @@ function syncCardsFromNotes() {
     added.push(card);
   };
   for (const mark of annotations()) {
+    if (mark.type === "sticky") {
+      for (const line of String(mark.note || "").split(/\n+/)) {
+        const lineQa = parseQuestionAnswer(line);
+        if (lineQa) add(newCard(lineQa.question, lineQa.answer, { page: mark.page, sourceKey: `ann:${mark.id}:${hashText(line)}`, origin: "nota" }));
+      }
+      continue;
+    }
     const qa = parseQuestionAnswer(mark.note);
     if (qa) {
       add(newCard(qa.question, qa.answer, { page: mark.page, sourceKey: `ann:${mark.id}:qa`, origin: "nota" }));
@@ -2543,39 +2877,163 @@ function bindStudy() {
   });
 }
 function bindNotebook() {
+  const panel = $("notebookPanel");
+  setIcon("closeNotebook", "close");
+  setIcon("notesNewBtn", "plus", "Apunte");
+  setIcon("notesPinBtn", "pin", "En la página");
+  $("notesNewBtn").title = "Nuevo apunte para esta página";
+  $("notesPinBtn").title = "Pegar una nota en un punto de la página (N)";
+  setNotesMinimized(localStorage.getItem("paper.notes-minimized") === "1");
   $("notebookBtn").onclick = toggleNotebook;
   $("closeNotebook").onclick = closeNotebook;
+  $("notesMinimize").onclick = () => setNotesMinimized(!panel.classList.contains("is-minimized"));
   $("stickyNoteBtn").onclick = () => setStickyPlacement(!stickyPlacement);
-  $("notebookPageText").addEventListener("input", scheduleNotebookSave);
-  $("notebookDocText").addEventListener("input", scheduleNotebookSave);
-  $("notebookPageText").addEventListener("blur", flushNotebook);
-  $("notebookDocText").addEventListener("blur", flushNotebook);
+  $("notesNewBtn").onclick = () => {
+    notebookTab = "page";
+    createPageNote();
+  };
+  $("notesPinBtn").onclick = () => setStickyPlacement(true);
   document.querySelectorAll("[data-notebook-tab]").forEach((button) => {
     button.onclick = () => {
       notebookTab = button.dataset.notebookTab;
-      renderNotebook();
+      renderNotebook({ keepScroll: false });
     };
   });
-  $("notebookPanel").addEventListener("click", (event) => {
-    const sticky = event.target.closest("[data-notebook-sticky]");
-    if (sticky) return openStickyEditor(sticky.dataset.notebookSticky);
-    const page = event.target.closest("[data-notebook-page]");
-    if (page) {
-      notebookTab = "page";
-      jumpToPage(Number(page.dataset.notebookPage)).then(renderNotebook);
-      return;
-    }
-    if (event.target.closest("[data-notebook-doc]")) {
-      notebookTab = "doc";
-      renderNotebook();
+  panel.addEventListener("input", (event) => {
+    const field = event.target.closest("[data-note-text]");
+    if (!field) return;
+    field.rows = Math.min(14, Math.max(2, field.value.split("\n").length + 1));
+    scheduleNoteText(field.dataset.noteText);
+  });
+  panel.addEventListener("focusout", (event) => {
+    const field = event.target.closest?.("[data-note-text]");
+    if (field && noteTextTimers.has(field.dataset.noteText)) {
+      clearTimeout(noteTextTimers.get(field.dataset.noteText));
+      saveNoteText(field.dataset.noteText);
     }
   });
-  $("notebookPanel").addEventListener("keydown", (event) => {
+  panel.addEventListener("focusin", (event) => {
+    const card = event.target.closest?.(".nw-card");
+    if (!card) return;
+    panel.querySelectorAll(".nw-card.is-active").forEach((item) => item !== card && item.classList.remove("is-active"));
+    card.classList.add("is-active");
+    const id = card.dataset.note;
+    if (id !== "doc" && activeStickyId !== id) {
+      activeStickyId = id;
+      renderStickyNotes();
+    }
+  });
+  panel.addEventListener("click", (event) => {
+    const target = event.target;
+    const mode = target.closest("[data-note-mode]")?.dataset.noteMode;
+    if (mode) return setNoteTool({ mode });
+    const inkColor = target.closest("[data-note-ink]")?.dataset.noteInk;
+    if (inkColor) return setNoteTool(noteTool.mode === "highlight" ? { highlight: inkColor } : { ink: inkColor });
+    const width = target.closest("[data-note-width]")?.dataset.noteWidth;
+    if (width) return setNoteTool({ width });
+    if (target.closest("[data-note-undo]")) return undoNoteInk();
+    if (target.closest("[data-empty-new]")) return createPageNote();
+    if (target.closest("[data-empty-pin]")) return setStickyPlacement(true);
+    const colorId = target.closest("[data-note-color]")?.dataset.noteColor;
+    if (colorId) {
+      const mark = annotations().find((item) => item.id === colorId);
+      const next = STICKY_COLORS[(STICKY_COLORS.indexOf(mark?.color || "yellow") + 1) % STICKY_COLORS.length];
+      localStorage.setItem("paper.sticky-color", next);
+      suppressNotebookRender = true;
+      try {
+        updateAnnotation(colorId, { color: next });
+      } finally {
+        suppressNotebookRender = false;
+      }
+      renderNotebook({ focusId: colorId });
+      return;
+    }
+    const pinId = target.closest("[data-note-pin]")?.dataset.notePin;
+    if (pinId) {
+      const mark = annotations().find((item) => item.id === pinId);
+      if (isPinned(mark)) {
+        suppressNotebookRender = true;
+        try {
+          updateAnnotation(pinId, { x: null, y: null });
+        } finally {
+          suppressNotebookRender = false;
+        }
+        renderNotebook({ focusId: pinId });
+        toast("La nota ya no está anclada a la página");
+      } else setStickyPlacement(true, pinId);
+      return;
+    }
+    const deleteId = target.closest("[data-note-delete]")?.dataset.noteDelete;
+    if (deleteId) {
+      noteTextTimers.delete(deleteId);
+      suppressNotebookRender = true;
+      try {
+        deleteAnnotation(deleteId);
+      } finally {
+        suppressNotebookRender = false;
+      }
+      if (activeStickyId === deleteId) activeStickyId = null;
+      renderStickyNotes();
+      renderNotebook();
+      return;
+    }
+    const page = target.closest("[data-notebook-page]");
+    if (page) {
+      notebookTab = "page";
+      jumpToPage(Number(page.dataset.notebookPage)).then(() => renderNotebook({ keepScroll: false }));
+      return;
+    }
+    if (target.closest("[data-notebook-doc]")) {
+      notebookTab = "doc";
+      renderNotebook({ keepScroll: false });
+    }
+  });
+  panel.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.stopPropagation();
       closeNotebook();
     }
   });
+  // Arrastrar desde la cabecera; el tamaño se ajusta desde la esquina.
+  let drag = null;
+  $("notesDragHandle").addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button") || window.innerWidth <= 700) return;
+    const box = panel.getBoundingClientRect();
+    drag = { id: event.pointerId, dx: event.clientX - box.left, dy: event.clientY - box.top };
+    $("notesDragHandle").setPointerCapture(event.pointerId);
+    panel.classList.add("is-dragging");
+  });
+  $("notesDragHandle").addEventListener("pointermove", (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    panel.style.left = `${Math.max(8, Math.min(window.innerWidth - 120, event.clientX - drag.dx))}px`;
+    panel.style.top = `${Math.max(8, Math.min(window.innerHeight - 52, event.clientY - drag.dy))}px`;
+  });
+  const endDrag = (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    drag = null;
+    panel.classList.remove("is-dragging");
+    saveNotesWindowGeometry();
+  };
+  $("notesDragHandle").addEventListener("pointerup", endDrag);
+  $("notesDragHandle").addEventListener("pointercancel", endDrag);
+  $("notesDragHandle").addEventListener("dblclick", (event) => {
+    if (!event.target.closest("button")) setNotesMinimized(!panel.classList.contains("is-minimized"));
+  });
+  let resizeFrame = 0;
+  new ResizeObserver(() => {
+    if (panel.hidden || panel.classList.contains("is-minimized")) return;
+    cancelAnimationFrame(resizeFrame);
+    resizeFrame = requestAnimationFrame(() => {
+      panel.querySelectorAll("[data-ink-host]").forEach((host) => {
+        const target = inkTargetOf(host);
+        paintInkHost(host, target.kind === "doc" ? documentNoteInk() : annotations().find((mark) => mark.id === target.id)?.ink);
+      });
+      saveNotesWindowGeometry();
+    });
+  }).observe(panel);
+  window.addEventListener("resize", () => {
+    if (!panel.hidden) applyNotesWindowGeometry();
+  }, { passive: true });
   window.addEventListener("pagehide", flushNotebook);
 }
 
@@ -3272,6 +3730,7 @@ function exportAnnotations() {
     annotations: annotations(),
     pageNotes: pageNotesStore(),
     documentNote: documentNote(),
+    documentNoteInk: documentNoteInk(),
   };
   downloadText(
     `${currentBook.name.replace(/\.pdf$/i, "")}-anotaciones.json`,
@@ -3297,9 +3756,10 @@ function exportMarkdown() {
     lines.push(`## Página ${page}`, "");
     if (pageNotes[page]?.text) lines.push("### Apuntes", "", pageNotes[page].text.trim(), "");
     for (const mark of marks.filter((item) => item.page === page).sort((a, b) => a.createdAt - b.createdAt)) {
-      lines.push(`### ${annotationLabel(mark.type)}`);
+      lines.push(`### ${mark.type === "sticky" ? (isPinned(mark) ? "Nota en la página" : "Apunte") : annotationLabel(mark.type)}`);
       if (mark.type !== "sticky") lines.push(mark.text ? `> ${mark.text}` : "> Fragmento sin texto disponible");
       if (mark.note) lines.push("", mark.note);
+      if (mark.ink?.strokes?.length) lines.push("", "_(incluye escritura a mano)_");
       lines.push("");
     }
   }
@@ -3327,22 +3787,38 @@ function normalizeAnnotationPoint(point) {
   if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
   return { x: clampUnit(point.x), y: clampUnit(point.y) };
 }
+// Valida trazos de escritura a mano importados (colores y puntos acotados).
+function sanitizeInk(ink) {
+  const strokes = Array.isArray(ink?.strokes) ? ink.strokes : [];
+  return {
+    h: Math.max(0.2, Math.min(6, Number(ink?.h) || NOTE_INK_DEFAULT_RATIO)),
+    strokes: strokes.slice(0, 2000).map((stroke) => ({
+      t: stroke?.t === "highlight" ? "highlight" : "pen",
+      c: /^#[0-9a-f]{6}$/i.test(stroke?.c) ? stroke.c : NOTE_INK_COLORS.black,
+      w: Math.max(0.5, Math.min(40, Number(stroke?.w) || 2.6)),
+      p: (Array.isArray(stroke?.p) ? stroke.p : []).slice(0, 5000).map((point) => [Number(point?.[0]) || 0, Number(point?.[1]) || 0, Math.max(0, Math.min(1, Number(point?.[2]) || 0))]),
+    })).filter((stroke) => stroke.p.length),
+  };
+}
 function normalizeImportedAnnotation(mark) {
   if (!mark || !SUPPORTED_ANNOTATION_TYPES.has(mark.type)) return null;
   const page = Math.trunc(Number(mark.page));
   if (!pdfDoc || page < 1 || page > pdfDoc.numPages) return null;
   if (mark.type === "sticky") {
+    const pinned = mark.x !== null && mark.x !== undefined && mark.y !== null && mark.y !== undefined;
     const x = Number(mark.x),
       y = Number(mark.y);
-    if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return null;
+    if (pinned && !(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return null;
+    const ink = sanitizeInk(mark.ink);
     return {
       id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
       page,
       type: "sticky",
       color: ANNOTATION_COLORS.includes(mark.color) ? mark.color : "yellow",
-      x,
-      y,
-      note: String(mark.note || "").slice(0, 4000),
+      x: pinned ? x : null,
+      y: pinned ? y : null,
+      note: String(mark.note || "").slice(0, 20000),
+      ...(ink.strokes.length ? { ink } : {}),
       text: "",
       rects: [],
       createdAt: Number(mark.createdAt) || Date.now(),
@@ -3389,6 +3865,13 @@ function importNotebookBackup(data) {
     writeDocumentNote(existing ? `${existing}\n\n${docText}` : docText);
     count++;
   }
+  const docInk = data?.documentNoteInk;
+  if (docInk && Array.isArray(docInk.strokes) && docInk.strokes.length) {
+    const current = documentNoteInk() || { h: NOTE_INK_DEFAULT_RATIO, strokes: [] };
+    setJSON(key(currentBook.id, "doc-note-ink"), { h: Math.max(current.h || 0, Number(docInk.h) || NOTE_INK_DEFAULT_RATIO), strokes: [...current.strokes, ...sanitizeInk(docInk).strokes] });
+    count++;
+  }
+  migrateLegacyPageNotes();
   if (count && !$("notebookPanel").hidden) renderNotebook();
   return count;
 }
@@ -3555,7 +4038,7 @@ function annotationStyle(color, opacity) {
   return `rgba(${rgb},${alpha})`;
 }
 function annotationLabel(type) {
-  if (type === "sticky") return "Nota adhesiva";
+  if (type === "sticky") return "Nota";
   return type === "note"
     ? "Nota"
     : type === "pen"
@@ -3766,7 +4249,7 @@ function renderAnnotationList() {
       }),
   );
   updateThumbNoteBadges();
-  if (!$("notebookPanel").hidden && !$("notebookPanel").contains(document.activeElement)) renderNotebook();
+  if (!suppressNotebookRender && !$("notebookPanel").hidden && !$("notebookPanel").contains(document.activeElement)) renderNotebook();
 }
 function selectedRects() {
   const sel = window.getSelection(),
@@ -4172,7 +4655,7 @@ function buildInkPalette() {
     }));
     strip.querySelector("[data-strip-select]").onclick = () => setAnnotationSelectMode();
     strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
-    strip.querySelector("[data-strip-note]").onclick = () => { if (markerMode) toggleMarkerMode(); toast("Selecciona texto y pulsa Nota en el menú contextual."); };
+    strip.querySelector("[data-strip-note]").onclick = () => setStickyPlacement(true);
     strip.querySelector("[data-strip-color]").onclick = () => {
       openToolStyle(strip.querySelector(`[data-strip-tool="${inkTool}"]`), true);
     };
@@ -6445,10 +6928,6 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.key === "Escape" && stickyPlacement) {
     setStickyPlacement(false);
-    return;
-  }
-  if (e.key === "Escape" && !$("stickyEditor").hidden) {
-    closeStickyEditor();
     return;
   }
   if (e.key === "Escape") {
