@@ -493,6 +493,8 @@ async function openMarkdownStored(rec) {
   $("docTitle").textContent = rec.name;
   $("docMeta").textContent = "Markdown · guardado localmente";
   $("pageStatus").textContent = "Modo lectura Markdown";
+  $("pageStatus").hidden = false;
+  $("pageTotal").textContent = "";
   $("pageJump").hidden = true;
   $("toolbarPage").disabled = true;
   $("toolbarPrev").disabled = true;
@@ -573,10 +575,11 @@ async function openStored(id) {
     $("emptyState").hidden = true;
     $("canvasWrap").hidden = false;
     document.body.classList.add("has-doc");
-    // Primera apertura: encajar al ancho (con tope cómodo en escritorio). En
-    // pantallas estrechas siempre se ajusta para no cortar la página.
-    if (window.innerWidth <= 700) scale = await computeFitScale();
-    else if (!(storedScale > 0)) scale = Math.min(1.6, await computeFitScale());
+    // El zoom se decide por modo: los documentos sin modo guardado (o con un
+    // zoom manual sin escala) abren en «Automático», que siempre cabe bien.
+    zoomMode = localStorage.getItem(key(id, "zoom-mode")) || "auto";
+    if (zoomMode === "custom" && !(storedScale > 0)) zoomMode = "auto";
+    if (zoomMode !== "custom") scale = await computeZoomForMode(zoomMode);
     $("docTitle").textContent = rec.name;
     $("docMeta").textContent =
       `${pdfDoc.numPages} páginas · guardado localmente`;
@@ -683,6 +686,9 @@ function renderPage(num, options = {}) {
 function updatePageChrome() {
   if (!pdfDoc) return;
   $("pageStatus").textContent = `Página ${currentPage} de ${pdfDoc.numPages}`;
+  $("pageStatus").hidden = true;
+  $("pageTotal").textContent = `de ${pdfDoc.numPages}`;
+  updateBookmarkButton();
   $("pageJump").value = currentPage;
   $("pageJump").max = pdfDoc.numPages;
   $("pageJump").hidden = false;
@@ -989,6 +995,7 @@ function updatePresentationCount() {
 async function enterPresentation() {
   if (!pdfDoc) return;
   presentationMode = true;
+  zoomModeBeforePresentation = { mode: zoomMode, scale };
   document.body.classList.add("presentation-mode");
   if (viewMode !== "single") await setViewMode("single", { silent: true });
   updatePresentationCount();
@@ -996,7 +1003,7 @@ async function enterPresentation() {
   try {
     if (request) await request.call(document.documentElement, { navigationUI: "hide" });
   } catch {}
-  requestAnimationFrame(fitWidth);
+  requestAnimationFrame(() => applyZoomMode("page", { persist: false }));
   toast("Presentación · flechas o clic para avanzar · Esc para salir");
 }
 async function exitPresentation() {
@@ -1006,7 +1013,16 @@ async function exitPresentation() {
   try {
     if (fullscreenElement() && exit) await exit.call(document);
   } catch {}
-  requestAnimationFrame(fitWidth);
+  const previous = zoomModeBeforePresentation;
+  zoomModeBeforePresentation = null;
+  requestAnimationFrame(() => {
+    if (previous?.mode === "custom") {
+      zoomMode = "custom";
+      scale = previous.scale;
+      refreshCurrentView();
+      updateZoomLabel();
+    } else applyZoomMode(previous?.mode || "auto", { persist: false });
+  });
 }
 function togglePresentation() {
   presentationMode ? exitPresentation() : enterPresentation();
@@ -1208,7 +1224,9 @@ function paletteActions() {
     { icon: "▶", title: "Presentación a pantalla completa", keys: "diapositivas slides", shortcut: ["P"], when: hasPdf, run: enterPresentation },
     { icon: "🔊", title: ttsActive ? "Detener lectura en voz alta" : "Leer en voz alta", keys: "tts voz audio escuchar", when: hasPdf && speechSupported, run: toggleReadAloud },
     { icon: "⛶", title: "Modo enfoque / pantalla completa", keys: "inmersivo", shortcut: ["F"], when: hasDoc, run: toggleFocusMode },
+    { icon: "▣", title: "Zoom automático (ancho cómodo)", keys: "zoom auto lectura", when: hasPdf, run: () => applyZoomMode("auto") },
     { icon: "▣", title: "Ajustar al ancho", keys: "zoom encajar", when: hasPdf, run: fitWidth },
+    { icon: "▣", title: "Página completa", keys: "zoom encajar pagina entera fit", when: hasPdf, run: fitPage },
     { icon: "＋", title: "Acercar", keys: "zoom aumentar", shortcut: ["+"], when: hasDoc, run: () => changeReaderZoom(ZOOM_STEP) },
     { icon: "−", title: "Alejar", keys: "zoom reducir", shortcut: ["−"], when: hasDoc, run: () => changeReaderZoom(-ZOOM_STEP) },
     { icon: "↻", title: "Girar página", keys: "rotar", shortcut: ["R"], when: hasPdf, run: () => $("rotateBtn").click() },
@@ -1947,6 +1965,126 @@ function bindReadingTools() {
   $("copyPageTextBtn").onclick = copyPageText;
 }
 
+// ---- Interfaz v4: iconos, menú de zoom y estado de los controles ----
+// Iconos de trazo (estilo Lucide) para que toda la interfaz hable el mismo
+// lenguaje visual en lugar de mezclar caracteres Unicode sueltos.
+const ICONS = {
+  panelLeft: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/>',
+  library: '<path d="M4 4.5v15"/><path d="M8 6.5v13"/><path d="M12 6.5v13"/><path d="m15.5 6.8 4.3 12.6"/>',
+  close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  back: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+  forward: '<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>',
+  chevronLeft: '<path d="m15 18-6-6 6-6"/>',
+  chevronRight: '<path d="m9 18 6-6-6-6"/>',
+  chevronDown: '<path d="m6 9 6 6 6-6"/>',
+  chevronUp: '<path d="m18 15-6-6-6 6"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/>',
+  sparkles: '<path d="M11 3.5 12.7 8a2 2 0 0 0 1.3 1.3l4.5 1.7-4.5 1.7a2 2 0 0 0-1.3 1.3L11 18.5 9.3 14a2 2 0 0 0-1.3-1.3L3.5 11 8 9.3A2 2 0 0 0 9.3 8z"/><path d="M19 3v4M17 5h4"/>',
+  highlighter: '<path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>',
+  sticky: '<path d="M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5z"/><path d="M15 3v6h6"/>',
+  notebook: '<rect x="4" y="2.5" width="16" height="19" rx="2"/><path d="M2 7h4M2 12h4M2 17h4M9.5 7.5h6M9.5 11.5h6"/>',
+  sliders: '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+  volume: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9.5 9.5 0 0 1 0 13"/>',
+  maximize: '<path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>',
+  minimize: '<path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>',
+  bookmark: '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>',
+  grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
+  rotate: '<path d="M20.5 12a8.5 8.5 0 1 1-2.5-6l2.5 2.5"/><path d="M20.5 3.5v5h-5"/>',
+  minus: '<path d="M5 12h14"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  fitWidth: '<path d="M3 5v14M21 5v14"/><path d="m7 12 3-3M7 12l3 3M7 12h10m0 0-3-3m3 3-3 3"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+};
+function iconSvg(name) {
+  return `<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+}
+function setIcon(target, name, label = "") {
+  const element = typeof target === "string" ? $(target) : target;
+  if (!element) return;
+  element.innerHTML = iconSvg(name) + (label ? `<span class="btn-label">${escapeHtml(label)}</span>` : "");
+  element.classList.add("has-icon");
+}
+function applyInterfaceIcons() {
+  const icons = {
+    openSidebar: "panelLeft", homeBtn: "library", closeSidebar: "panelLeft",
+    navBack: "back", navForward: "forward", toolbarPrev: "chevronLeft", toolbarNext: "chevronRight",
+    prevBtn: "chevronLeft", nextBtn: "chevronRight", stickyNoteBtn: "sticky", notebookBtn: "notebook",
+    readAloudBtn: "volume", bookmarkBtn: "bookmark", thumbBtn: "grid", rotateBtn: "rotate",
+    zoomOut: "minus", zoomIn: "plus", toolbarFitBtn: "fitWidth",
+  };
+  for (const [id, name] of Object.entries(icons)) setIcon(id, name);
+  setAssistantButton($("captureBtn").classList.contains("assistant-on"));
+  setIcon("markerModeBtn", "highlighter", "Ink");
+  setIcon("appearanceBtn", "sliders", "Vista");
+  const trigger = document.querySelector(".palette-trigger-icon");
+  if (trigger) trigger.innerHTML = iconSvg("search");
+  $("homeBtn").title = "Biblioteca";
+  $("closeSidebar").title = "Ocultar panel lateral";
+}
+function updateBookmarkButton() {
+  const button = $("bookmarkBtn");
+  if (!button) return;
+  const marked = Boolean(currentBook && getJSON(key(currentBook.id, "bookmarks"), []).includes(currentPage));
+  button.setAttribute("aria-pressed", String(marked));
+  button.title = marked ? `Quitar marcador de la página ${currentPage} (B)` : `Marcar la página ${currentPage} (B)`;
+  button.setAttribute("aria-label", button.title);
+}
+const ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300];
+function renderZoomMenu() {
+  const menu = $("zoomMenu");
+  const percent = Math.round(scale * 100);
+  const modes = [
+    ["auto", "Automático", "Ancho cómodo para leer"],
+    ["width", "Ajustar al ancho", "Llena el ancho disponible"],
+    ["page", "Página completa", "La página entera a la vista"],
+  ];
+  menu.innerHTML =
+    modes.map(([mode, label, hint]) => `<button role="menuitemradio" aria-checked="${zoomMode === mode}" data-zoom-mode="${mode}"><span class="zoom-check">${zoomMode === mode ? iconSvg("check") : ""}</span><span><strong>${label}</strong><small>${hint}</small></span></button>`).join("") +
+    '<hr>' +
+    `<div class="zoom-presets">${ZOOM_PRESETS.map((value) => `<button role="menuitemradio" aria-checked="${zoomMode === "custom" && value === percent}" data-zoom-percent="${value}">${value}%</button>`).join("")}</div>`;
+}
+function closeZoomMenu() {
+  const menu = $("zoomMenu");
+  if (menu) menu.hidden = true;
+  $("zoomLabel")?.setAttribute("aria-expanded", "false");
+}
+function toggleZoomMenu(event) {
+  event?.stopPropagation();
+  const menu = $("zoomMenu");
+  if (!pdfDoc) return;
+  if (reflowMode) return toast("En modo lectura, usa A− / A+ para el tamaño del texto");
+  if (!menu.hidden) return closeZoomMenu();
+  renderZoomMenu();
+  menu.hidden = false;
+  $("zoomLabel").setAttribute("aria-expanded", "true");
+  const anchor = $("zoomLabel").getBoundingClientRect();
+  const width = menu.offsetWidth;
+  menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, anchor.left + anchor.width / 2 - width / 2))}px`;
+  menu.style.bottom = `${Math.max(8, window.innerHeight - anchor.top + 10)}px`;
+}
+function bindInterfaceV4() {
+  const menu = document.createElement("div");
+  menu.id = "zoomMenu";
+  menu.className = "zoom-menu";
+  menu.hidden = true;
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "Zoom");
+  document.body.append(menu);
+  $("zoomLabel").setAttribute("aria-haspopup", "menu");
+  $("zoomLabel").setAttribute("aria-expanded", "false");
+  menu.addEventListener("click", (event) => {
+    const mode = event.target.closest("[data-zoom-mode]")?.dataset.zoomMode;
+    const percent = event.target.closest("[data-zoom-percent]")?.dataset.zoomPercent;
+    if (mode) applyZoomMode(mode);
+    else if (percent) setZoom(Number(percent) / 100);
+    else return;
+    closeZoomMenu();
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!menu.hidden && !event.target.closest("#zoomMenu, #zoomLabel")) closeZoomMenu();
+  });
+  window.addEventListener("resize", closeZoomMenu, { passive: true });
+}
 // ---- Cuaderno: notas libres por página y del documento ----
 let notebookTab = "page";
 let notebookShownPage = 0;
@@ -2043,14 +2181,14 @@ function openNotebook(tab) {
   renderNotebook();
   const field = notebookTab === "doc" ? $("notebookDocText") : notebookTab === "page" ? $("notebookPageText") : null;
   field?.focus();
-  if (window.innerWidth >= 1100 && pdfDoc && !reflowMode) requestAnimationFrame(() => fitWidth());
+  if (window.innerWidth >= 1100 && pdfDoc && !reflowMode) requestAnimationFrame(refitZoom);
 }
 function closeNotebook() {
   flushNotebook();
   $("notebookPanel").hidden = true;
   document.body.classList.remove("notebook-open");
   $("notebookBtn")?.setAttribute("aria-pressed", "false");
-  if (window.innerWidth >= 1100 && pdfDoc && !reflowMode) requestAnimationFrame(() => fitWidth());
+  if (window.innerWidth >= 1100 && pdfDoc && !reflowMode) requestAnimationFrame(refitZoom);
 }
 function toggleNotebook() {
   $("notebookPanel").hidden ? openNotebook() : closeNotebook();
@@ -2755,22 +2893,62 @@ function paintSearchHits() {
     .forEach((span) => span.classList.toggle("search-hit", matcher.test(span.textContent)));
 }
 
-// Escala que hace caber la página (o las dos páginas del modo libro) en el
-// ancho útil del visor, descontando su padding real.
-async function computeFitScale(pageNumber = currentPage) {
+// ---- Modos de zoom ----
+// "auto": ancho cómodo de lectura (la página nunca pasa de ~1080px de ancho,
+//         y las apaisadas se ven enteras); "width": llena el ancho del visor;
+// "page": la página completa cabe en pantalla; "custom": zoom manual.
+// Salvo en "custom", el zoom se recalcula al cambiar el tamaño de la ventana.
+const AUTO_ZOOM_MAX_WIDTH = 1080;
+let zoomMode = "auto";
+let zoomModeBeforePresentation = null;
+async function computeZoomForMode(mode, pageNumber = currentPage) {
   const page = await getCachedPage(pageNumber);
   const base = page.getViewport({ scale: 1, rotation });
   const viewer = $("viewer");
   const style = getComputedStyle(viewer);
-  const available = viewer.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0) - 4;
-  const perPage = viewMode === "double" && window.innerWidth > 760 ? (available - 14) / 2 : available;
-  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, perPage / base.width));
+  const availableWidth = viewer.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0) - 4;
+  const availableHeight = viewer.clientHeight - parseFloat(style.paddingTop || 0) - parseFloat(style.paddingBottom || 0) - 6;
+  const pages = viewMode === "double" && window.innerWidth > 760 ? 2 : 1;
+  const widthScale = (availableWidth - (pages - 1) * 14) / pages / base.width;
+  const pageScale = Math.min(widthScale, availableHeight / base.height);
+  let next = widthScale;
+  if (mode === "page") next = pageScale;
+  else if (mode === "auto") {
+    next = base.width > base.height
+      ? pageScale
+      : Math.min(widthScale, Math.max(1, AUTO_ZOOM_MAX_WIDTH / pages / base.width));
+  }
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.round(next * 100) / 100));
 }
-async function fitWidth() {
+// Compatibilidad: escala para llenar el ancho.
+function computeFitScale(pageNumber = currentPage) {
+  return computeZoomForMode("width", pageNumber);
+}
+function persistZoomMode() {
+  if (currentBook) localStorage.setItem(key(currentBook.id, "zoom-mode"), zoomMode);
+}
+async function applyZoomMode(mode = zoomMode, { persist = true } = {}) {
   if (!pdfDoc) return;
-  scale = await computeFitScale();
+  zoomMode = mode;
+  if (persist) persistZoomMode();
+  if (mode === "custom" || reflowMode) {
+    updateZoomLabel();
+    return;
+  }
+  scale = await computeZoomForMode(mode);
   refreshCurrentView();
   updateZoomLabel();
+}
+// Reajuste tras un cambio de espacio disponible (ventana, paneles, pantalla
+// completa): respeta el modo elegido y no toca un zoom manual.
+function refitZoom() {
+  if (pdfDoc && zoomMode !== "custom" && !reflowMode) applyZoomMode(zoomMode, { persist: false });
+}
+async function fitWidth() {
+  return applyZoomMode("width");
+}
+async function fitPage() {
+  return applyZoomMode("page");
 }
 function zoomAnchor(clientX, clientY) {
   const wrap = $("canvasWrap");
@@ -2798,8 +2976,9 @@ function updateZoomLabel() {
   const label = $("zoomLabel");
   if (!label) return;
   const percent = Math.round(scale * 100);
+  const modeName = { auto: "Automático", width: "Ajustado al ancho", page: "Página completa" }[zoomMode];
   label.textContent = `${percent}%`;
-  label.title = `Zoom ${percent}% · pulsar para ajustar a la ventana`;
+  label.title = `Zoom ${percent}%${modeName ? ` · ${modeName}` : ""} · pulsa para elegir`;
   label.setAttribute("aria-label", label.title);
 }
 async function setZoom(nextScale, anchor = null) {
@@ -2807,6 +2986,8 @@ async function setZoom(nextScale, anchor = null) {
   const next = Math.round(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextScale)) * 100) / 100;
   if (next === scale) return;
   scale = next;
+  zoomMode = "custom";
+  persistZoomMode();
   updateZoomLabel();
   if (viewMode === "continuous") refreshCurrentView();
   else await renderPage(currentPage, { anchor, resetScroll: false });
@@ -2854,6 +3035,7 @@ function toggleBookmark() {
   }
   setJSON(key(currentBook.id, "bookmarks"), list);
   renderBookmarks();
+  updateBookmarkButton();
 }
 async function renderOutline() {
   const root = $("outlineList");
@@ -4195,9 +4377,7 @@ function aiStatus(message) {
 function setAssistantButton(active) {
   const button = $("captureBtn");
   button.classList.toggle("assistant-on", active);
-  button.innerHTML = active
-    ? '✦ <span>Activo</span>'
-    : '✦ <span>Asistente</span>';
+  setIcon(button, "sparkles", active ? "Activo" : "Asistente");
 }
 function formatAiAnswer(text) {
   const escaped = escapeHtml(text).replace(
@@ -5099,6 +5279,8 @@ function showEmpty() {
   $("docTitle").textContent = "Paper Reader";
   $("docMeta").textContent = "Tus documentos se quedan en este dispositivo";
   $("pageStatus").textContent = "Sin documento";
+  $("pageStatus").hidden = false;
+  $("pageTotal").textContent = "";
   $("pageJump").hidden = true;
   $("toolbarPage").value = 1;
   $("toolbarPage").max = 1;
@@ -5252,10 +5434,8 @@ function toggleSidebar() {
 }
 function scheduleLayoutRefit() {
   clearTimeout(layoutRefitTimer);
-  if (pdfDoc) requestAnimationFrame(fitWidth);
-  layoutRefitTimer = setTimeout(() => {
-    if (pdfDoc) fitWidth();
-  }, 240);
+  if (pdfDoc) requestAnimationFrame(refitZoom);
+  layoutRefitTimer = setTimeout(refitZoom, 240);
 }
 function setSidebarPanel(panel) {
   const notes = panel === "notes";
@@ -5290,7 +5470,7 @@ $("toolbarPage").onchange = (e) => {
 };
 $("zoomIn").onclick = () => changeReaderZoom(ZOOM_STEP);
 $("zoomOut").onclick = () => changeReaderZoom(-ZOOM_STEP);
-$("zoomLabel").onclick = fitWidth;
+$("zoomLabel").onclick = (event) => toggleZoomMenu(event);
 $("fitBtn").onclick = fitWidth;
 $("toolbarFitBtn").onclick = fitWidth;
 $("bookmarkBtn").onclick = toggleBookmark;
@@ -5478,7 +5658,7 @@ function fullscreenElement() {
 }
 function updateFocusButton(active = Boolean(fullscreenElement())) {
   const button = $("focusBtn");
-  button.textContent = active ? "×" : "⛶";
+  setIcon(button, active ? "minimize" : "maximize");
   button.title = active ? "Salir de pantalla completa" : "Pantalla completa";
   button.setAttribute("aria-label", button.title);
   button.setAttribute("aria-pressed", String(active));
@@ -5492,7 +5672,7 @@ function setReaderChromeHidden(hidden, refit = true) {
     $("inkColorCard")?.setAttribute("hidden", "");
     hideAnnotationActions();
   }
-  if (refit && pdfDoc) requestAnimationFrame(fitWidth);
+  if (refit && pdfDoc) requestAnimationFrame(refitZoom);
 }
 async function toggleFocusMode() {
   const nativeFullscreen = Boolean(fullscreenElement());
@@ -5517,7 +5697,7 @@ async function toggleFocusMode() {
   } catch {
     toast("Modo inmersivo activado");
   }
-  if (pdfDoc) requestAnimationFrame(fitWidth);
+  if (pdfDoc) requestAnimationFrame(refitZoom);
 }
 function syncFullscreenState() {
   const active = Boolean(fullscreenElement());
@@ -5530,7 +5710,7 @@ function syncFullscreenState() {
   document.body.classList.toggle("focus-mode", active);
   if (!active) setReaderChromeHidden(false, false);
   updateFocusButton(active);
-  if (pdfDoc) requestAnimationFrame(fitWidth);
+  if (pdfDoc) requestAnimationFrame(refitZoom);
 }
 $("focusBtn").onclick = toggleFocusMode;
 document.addEventListener("fullscreenchange", syncFullscreenState);
@@ -5965,12 +6145,12 @@ function configureFooterIsland() {
   collapse.className = "btn footer-collapse";
   collapse.title = "Contraer navegador de páginas";
   collapse.setAttribute("aria-label", collapse.title);
-  collapse.textContent = "⌄";
+  setIcon(collapse, "chevronDown");
   (footer.querySelector(".right") || footer).append(collapse);
   const setMinimized = (minimized) => {
     footer.classList.toggle("footer-minimized", minimized);
     localStorage.setItem("paper.footer-minimized", String(minimized));
-    collapse.textContent = minimized ? "⌃" : "⌄";
+    setIcon(collapse, minimized ? "chevronUp" : "chevronDown");
     collapse.title = minimized ? "Expandir navegador de páginas" : "Contraer navegador de páginas";
     collapse.setAttribute("aria-label", collapse.title);
   };
@@ -6259,6 +6439,10 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     toggleNotebook();
   }
+  if (e.key === "Escape" && !$("zoomMenu").hidden) {
+    closeZoomMenu();
+    return;
+  }
   if (e.key === "Escape" && stickyPlacement) {
     setStickyPlacement(false);
     return;
@@ -6374,12 +6558,7 @@ let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    if (
-      pdfDoc &&
-      (window.innerWidth < 900 ||
-        document.body.classList.contains("focus-mode"))
-    )
-      fitWidth();
+    refitZoom();
   }, 140);
 });
 for (const eventName of ["pointerdown", "wheel", "keydown"]) {
@@ -6399,10 +6578,9 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
     localStorage.setItem("paper.design-version", "4");
     localStorage.setItem("paper.theme", "light");
   }
-  $("toolbarPrev").textContent = "‹";
-  $("toolbarNext").textContent = "›";
-  $("prevBtn").textContent = "‹";
-  $("nextBtn").textContent = "›";
+  document.documentElement.classList.add("ui4");
+  applyInterfaceIcons();
+  bindInterfaceV4();
   buildReflowControls();
   buildPageColorControls();
   buildThemeChoices();

@@ -279,3 +279,227 @@ body.tts-active .autoscroll-bar { bottom: max(214px, calc(env(safe-area-inset-bo
   .flashcard-front { font-size: 18px; }
 }
 .study-card:focus { outline: none; }
+
+/* =========================================================================
+   Interfaz v4 — sistema visual del cromo (cabecera, lateral, pie, menús).
+   Todo va prefijado con html.ui4 para imponerse a las capas heredadas de
+   reader-ui.css sin depender del orden de carga.
+   ========================================================================= */
+html.ui4 {
+  --accent: #3563e9;
+  --accent-soft: color-mix(in srgb, var(--accent) 11%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 30%, transparent);
+  --ctl: 36px;
+  --paper-topbar: 56px;
+}
+html.ui4[data-theme="dark"] { --accent: #86a8ff; }
+html.ui4[data-theme="sepia"] { --accent: #8a5a2b; }
+@media (min-width: 1180px) { html.ui4 { --paper-sidebar: 272px; } }
+html.ui4 .ui-icon { width: 18px; height: 18px; flex: 0 0 auto; display: block; }
+
+/* ---- Controles comunes -------------------------------------------------- */
+html.ui4 .toolbar .btn,
+html.ui4 .footer .btn,
+html.ui4 .brand .btn {
+  display: inline-flex !important; align-items: center; justify-content: center; gap: 7px;
+  min-width: var(--ctl); height: var(--ctl); min-height: var(--ctl) !important; padding: 0 10px !important;
+  border: 0 !important; border-radius: 9px !important; background: transparent !important; box-shadow: none !important;
+  color: var(--text) !important; font-size: 13px !important; font-weight: 550; line-height: 1; white-space: nowrap;
+  transition: background .12s ease, color .12s ease;
+}
+html.ui4 .toolbar .btn.has-icon:not(:has(.btn-label)),
+html.ui4 .footer .btn.has-icon,
+html.ui4 .brand .btn { width: var(--ctl) !important; padding: 0 !important; }
+html.ui4 .toolbar .btn:hover:not(:disabled),
+html.ui4 .footer .btn:hover:not(:disabled),
+html.ui4 .brand .btn:hover { background: var(--soft) !important; }
+html.ui4 .toolbar .btn:disabled, html.ui4 .footer .btn:disabled { opacity: .32; }
+html.ui4 .toolbar .btn[aria-pressed="true"],
+html.ui4 .toolbar .btn.active,
+html.ui4 .toolbar .assistant-on,
+html.ui4 .footer .btn.active {
+  background: var(--accent-soft) !important; color: var(--accent) !important;
+}
+html.ui4 #bookmarkBtn[aria-pressed="true"] .ui-icon path { fill: currentColor; }
+html.ui4 .btn-label { font-size: 13px; font-weight: 550; }
+
+/* ---- Cabecera ----------------------------------------------------------- */
+html.ui4 .toolbar {
+  min-height: var(--paper-topbar) !important; height: var(--paper-topbar);
+  padding: 0 12px !important; gap: 12px !important;
+  grid-template-columns: minmax(0, 1fr) auto auto !important;
+  background: var(--surface-solid) !important; border-bottom: 1px solid var(--line) !important;
+}
+html.ui4 .toolbar-start { gap: 4px !important; min-width: 0; }
+html.ui4 .toolbar-home { background: transparent !important; color: var(--text) !important; font-size: 0 !important; }
+html.ui4 .toolbar .grow { margin-left: 6px; min-width: 0; }
+html.ui4 .toolbar .title { font-size: 14px !important; font-weight: 620 !important; letter-spacing: -.01em; }
+html.ui4 .toolbar .subtitle { margin-top: 2px !important; font-size: 12px !important; color: var(--muted) !important; }
+
+/* Navegador de páginas: la única «pastilla» de la cabecera. */
+html.ui4 .toolbar-nav {
+  height: 40px; min-height: 40px !important; padding: 2px !important; gap: 0 !important;
+  border: 0 !important; border-radius: 11px !important; background: var(--soft) !important;
+}
+html.ui4 .toolbar-nav .btn { width: 34px !important; min-width: 34px; height: 34px; min-height: 34px !important; }
+html.ui4 .toolbar-nav .btn:hover:not(:disabled) { background: var(--surface-solid) !important; }
+html.ui4 .nav-history .btn { color: var(--muted) !important; }
+html.ui4 .nav-divider { height: 20px; margin: 0 4px; }
+html.ui4 #toolbarPage {
+  width: 46px !important; height: 30px; margin: 0 2px; padding: 0 !important;
+  border: 1px solid transparent !important; border-radius: 7px; background: var(--surface-solid) !important;
+  font-size: 14px !important; font-weight: 650 !important; text-align: center; font-variant-numeric: tabular-nums;
+}
+html.ui4 #toolbarPage:focus { border-color: var(--accent-line) !important; }
+html.ui4 #toolbarPageCount { min-width: 42px !important; padding: 0 6px 0 2px; color: var(--muted); font-size: 13px !important; text-align: left !important; }
+
+html.ui4 .toolbar-end { gap: 8px !important; }
+html.ui4 .palette-trigger {
+  height: var(--ctl); min-height: var(--ctl); width: clamp(200px, 17vw, 300px); padding: 0 6px 0 11px;
+  border: 1px solid transparent; border-radius: 9px; background: var(--soft); color: var(--muted); font-size: 13px;
+}
+html.ui4 .palette-trigger:hover { border-color: var(--line); background: var(--surface-solid); }
+html.ui4 .palette-trigger-icon .ui-icon { width: 17px; height: 17px; }
+html.ui4 .palette-trigger-label { display: block !important; }
+html.ui4 .palette-kbd { margin-left: auto; }
+html.ui4 .toolbar-actions { gap: 0 !important; }
+html.ui4 .toolbar-actions .toolbar-group {
+  height: auto; min-height: 0 !important; gap: 2px !important; padding: 0 0 0 8px !important; margin-left: 8px;
+  border: 0 !important; border-left: 1px solid var(--line) !important; border-radius: 0 !important; background: transparent !important;
+}
+html.ui4 .toolbar-actions .toolbar-group:first-child { padding-left: 0 !important; margin-left: 0; border-left: 0 !important; }
+html.ui4 #toolbarFitBtn { display: none !important; }
+html.ui4 .mode-button { width: auto !important; }
+html.ui4 .assistant-group .mode-button .btn-label,
+html.ui4 .ink-group .mode-button .btn-label,
+html.ui4 #appearanceBtn .btn-label { display: inline !important; }
+@media (max-width: 1500px) {
+  html.ui4 .assistant-group .mode-button .btn-label,
+  html.ui4 .ink-group .mode-button .btn-label,
+  html.ui4 #appearanceBtn .btn-label { display: none !important; }
+  html.ui4 .mode-button, html.ui4 #appearanceBtn { width: var(--ctl) !important; padding: 0 !important; }
+  html.ui4 .palette-trigger { width: clamp(170px, 15vw, 230px); }
+}
+@media (max-width: 1180px) {
+  html.ui4 .palette-trigger { width: var(--ctl); padding: 0; justify-content: center; }
+  html.ui4 .palette-trigger-label, html.ui4 .palette-kbd { display: none !important; }
+  html.ui4 .toolbar .subtitle { display: none; }
+}
+html.ui4 .tool-popover { font-size: 13px; border-radius: 14px !important; }
+html.ui4 .tool-popover .btn { min-height: 34px !important; font-size: 13px !important; }
+html.ui4 .tool-popover .label { font-size: 11px !important; }
+html.ui4 .appearance-popover { width: 300px !important; }
+
+/* ---- Barra lateral ------------------------------------------------------ */
+html.ui4 .sidebar { padding: 0 12px 20px !important; font-size: 14px; }
+html.ui4 .brand { min-height: var(--paper-topbar) !important; height: var(--paper-topbar); padding: 0 2px !important; gap: 10px; }
+html.ui4 .paper-mark { width: 32px !important; height: 32px; flex-basis: 32px; border-radius: 9px !important; font-size: 14px; }
+html.ui4 .brand h1 { font-size: 15px !important; font-weight: 700; }
+html.ui4 .brand small { font-size: 10px !important; letter-spacing: .12em !important; }
+html.ui4 .brand #closeSidebar { color: var(--muted) !important; }
+html.ui4 .sidebar-tabs { margin: 12px 0 6px !important; padding: 3px !important; border-radius: 10px !important; }
+html.ui4 .sidebar-tabs button { min-height: 32px !important; font-size: 13px !important; border-radius: 7px !important; }
+html.ui4 .sidebar .label { margin: 20px 6px 8px !important; font-size: 11px !important; letter-spacing: .09em !important; }
+html.ui4 .outline-list:before { display: none; }
+html.ui4 .outline-item {
+  min-height: 36px !important; padding: 8px 10px !important; gap: 10px !important; border-radius: 8px !important;
+  background: transparent !important; color: var(--text) !important;
+}
+html.ui4 .outline-item .outline-name { font-size: 13.5px !important; line-height: 1.4 !important; }
+html.ui4 .outline-item .outline-page { font-size: 12px; color: var(--muted); opacity: 1; }
+html.ui4 .outline-dot { width: 6px !important; height: 6px !important; border: 0 !important; margin-top: 7px; background: var(--line) !important; box-shadow: none !important; }
+html.ui4 .outline-item:hover { background: var(--soft) !important; }
+html.ui4 .outline-item.active { background: var(--accent-soft) !important; color: var(--accent) !important; font-weight: 600; }
+html.ui4 .outline-item.active .outline-dot { background: var(--accent) !important; }
+html.ui4 .outline-item.active .outline-page { color: var(--accent); }
+html.ui4 .sidebar .bookmark { padding: 9px 10px !important; border-radius: 8px; }
+html.ui4 .sidebar .bookmark strong { font-size: 13.5px !important; font-weight: 600; }
+html.ui4 .sidebar .bookmark small { font-size: 12px !important; line-height: 1.45; }
+html.ui4 .sidebar .section > span, html.ui4 .annotation-list > span { display: block; padding: 2px 6px; font-size: 13px !important; color: var(--muted); }
+html.ui4 .annotation-filter { min-height: 28px !important; font-size: 12px !important; border-radius: 7px !important; }
+
+/* ---- Pie: navegador de páginas flotante --------------------------------- */
+html.ui4 .footer {
+  display: flex !important; align-items: center; gap: 4px !important;
+  width: auto !important; min-width: 0 !important; max-width: calc(100vw - 24px) !important;
+  height: 52px; min-height: 52px !important; padding: 6px !important;
+  border: 1px solid var(--line) !important; border-radius: 15px !important;
+  background: var(--surface-solid) !important; box-shadow: 0 12px 36px rgba(0, 0, 0, .14) !important;
+  grid-template-columns: none !important;
+}
+html.ui4 .footer .left, html.ui4 .footer .right { display: flex !important; align-items: center; gap: 2px !important; }
+html.ui4 .footer .center { display: flex !important; align-items: center; gap: 14px !important; min-width: 0 !important; padding: 0 8px !important; }
+html.ui4 .page-readout { display: flex !important; align-items: center; gap: 6px; min-height: 0 !important; white-space: nowrap; font-size: 13px; }
+html.ui4 .page-readout #pageJump { order: 1; }
+html.ui4 .page-readout .page-total { order: 2; }
+html.ui4 .page-readout .page-remaining { order: 3; }
+/* Con el lateral abierto, su propio botón lo cierra: no se repite en la cabecera. */
+@media (min-width: 1180px) { html.ui4 body:not(.sidebar-collapsed) #openSidebar { display: none !important; } }
+html.ui4 #pageStatus { font-size: 13px !important; font-weight: 550 !important; color: var(--muted); }
+html.ui4 #pageStatus[hidden] { display: none !important; }
+html.ui4 #pageJump {
+  width: 50px !important; height: 32px; margin: 0 !important; padding: 0 !important;
+  border: 1px solid transparent !important; border-radius: 8px; background: var(--soft) !important;
+  color: var(--text); font-size: 14px !important; font-weight: 650; text-align: center; font-variant-numeric: tabular-nums;
+}
+html.ui4 #pageJump:focus { border-color: var(--accent-line) !important; background: var(--surface-solid) !important; }
+html.ui4 .page-total { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+html.ui4 .page-remaining { margin-left: 4px; font-size: 12px; }
+html.ui4 .page-scrubber { width: clamp(120px, 16vw, 260px) !important; height: 18px !important; accent-color: var(--accent); }
+html.ui4 .footer .right { padding-left: 6px; border-left: 1px solid var(--line); }
+html.ui4 .footer #zoomLabel {
+  width: auto !important; min-width: 66px; height: 32px; min-height: 32px !important; padding: 0 10px !important;
+  background: var(--soft) !important; color: var(--text) !important; font-size: 13px !important; font-weight: 650; font-variant-numeric: tabular-nums;
+}
+html.ui4 .footer #zoomLabel:hover { background: var(--surface-solid) !important; box-shadow: inset 0 0 0 1px var(--line) !important; }
+html.ui4 .footer #fitBtn { display: none !important; }
+html.ui4 .footer .footer-collapse { width: 32px !important; min-width: 32px; color: var(--muted) !important; }
+html.ui4 .footer.footer-minimized { width: 52px !important; padding: 0 !important; justify-content: center; border-radius: 50% !important; }
+html.ui4 .footer.footer-minimized .left, html.ui4 .footer.footer-minimized .center { display: none !important; }
+html.ui4 .footer.footer-minimized .right { padding: 0; border: 0; }
+html.ui4 .footer.footer-minimized .right > :not(.footer-collapse) { display: none !important; }
+
+/* ---- Menú de zoom -------------------------------------------------------- */
+.zoom-menu { position: fixed; z-index: 130; width: 250px; padding: 6px; background: var(--surface-solid); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 18px 50px rgba(0, 0, 0, .2); }
+.zoom-menu[hidden] { display: none; }
+.zoom-menu > button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.zoom-menu > button:hover { background: var(--soft); }
+.zoom-menu strong { display: block; font-size: 13.5px; font-weight: 600; }
+.zoom-menu small { display: block; margin-top: 1px; color: var(--muted); font-size: 12px; }
+.zoom-check { width: 18px; color: var(--accent); }
+.zoom-menu hr { margin: 6px 4px; border: 0; border-top: 1px solid var(--line); }
+.zoom-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 2px; }
+.zoom-presets button { height: 32px; border: 0; border-radius: 8px; background: var(--soft); color: var(--text); font: 600 12.5px/1 inherit; font-variant-numeric: tabular-nums; cursor: pointer; }
+.zoom-presets button:hover { background: var(--line); }
+.zoom-presets button[aria-checked="true"] { background: var(--accent); color: #fff; }
+
+/* ---- Móvil ---------------------------------------------------------------- */
+@media (max-width: 700px) {
+  html.ui4 { --ctl: 38px; --paper-topbar: 54px; }
+  html.ui4 .toolbar { padding: 0 6px !important; gap: 4px !important; grid-template-columns: minmax(0, 1fr) auto !important; }
+  html.ui4 .toolbar .title { font-size: 14px !important; }
+  html.ui4 .toolbar .toolbar-home { display: none !important; }
+  /* En móvil la navegación de páginas vive sólo en el pie: la pastilla
+     superior duplicaba los mismos controles y robaba espacio de lectura. */
+  html.ui4 .toolbar .toolbar-nav { display: none !important; }
+  html.ui4 .viewer { padding-top: 12px !important; }
+  /* Cabecera móvil: título + buscar, IA, Ink y Vista. El resto vive en la
+     paleta de comandos y en el menú Vista. */
+  html.ui4 .toolbar .notes-group, html.ui4 .toolbar #focusBtn, html.ui4 .toolbar #bookmarkBtn, html.ui4 .toolbar #readAloudBtn { display: none !important; }
+  html.ui4 .toolbar .grow { display: block !important; min-width: 0; margin-left: 2px; }
+  html.ui4 .toolbar .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  html.ui4 .toolbar-actions .toolbar-group { padding-left: 4px !important; margin-left: 4px; }
+  html.ui4 .toolbar-nav { height: 40px; box-shadow: 0 8px 24px rgba(0, 0, 0, .12); background: var(--surface-solid) !important; border: 1px solid var(--line) !important; }
+  html.ui4 .toolbar .toolbar-end #appearanceBtn { color: var(--text) !important; font-size: 13px !important; }
+  html.ui4 .toolbar .toolbar-end #appearanceBtn::before { content: none !important; }
+  html.ui4 .footer { width: calc(100vw - 16px) !important; max-width: none !important; }
+  html.ui4 .footer .center { flex: 1; gap: 8px !important; padding: 0 4px !important; }
+  html.ui4 .page-scrubber { flex: 1; width: auto !important; min-width: 60px; }
+  html.ui4 .footer #rotateBtn, html.ui4 .footer #zoomOut, html.ui4 .footer #zoomIn { display: none !important; }
+  html.ui4 .footer .right { padding-left: 4px; }
+  html.ui4 .footer #zoomLabel { display: inline-flex !important; min-width: 56px; }
+}
+@media (max-width: 430px) {
+  html.ui4 .footer .page-scrubber { display: none !important; }
+  html.ui4 .page-total { display: none; }
+}
