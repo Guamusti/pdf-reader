@@ -472,7 +472,7 @@ async function openMarkdownStored(rec) {
   $("viewer").classList.remove("double-mode");
   pdfDoc = null;
   currentBook = rec;
-  resetAiDocumentState();
+  assistantLoadDocument();
   resetAnnotationHistory();
   migrateLegacyPageNotes();
   currentPage = 1;
@@ -543,7 +543,7 @@ async function openStored(id) {
     rec.openedAt = Date.now();
     await dbPut(rec);
     currentBook = rec;
-    resetAiDocumentState();
+    assistantLoadDocument();
     resetAnnotationHistory();
     migrateLegacyPageNotes();
     teardownReflowDocument();
@@ -711,6 +711,7 @@ function updatePageChrome() {
   $("prevBtn").disabled = currentPage === 1;
   $("nextBtn").disabled = currentPage === pdfDoc.numPages;
   syncNotebookPage();
+  syncAssistantPage();
   updateRemainingTime();
   scheduleRuler();
 }
@@ -1253,9 +1254,11 @@ function paletteActions() {
     { icon: "◆", title: "Estudiar: repasar tarjetas", keys: "flashcards repaso memoria examen tarjetas srs", shortcut: ["E"], when: hasDoc, run: () => openStudy() },
     { icon: "◆", title: "Nueva tarjeta de estudio", keys: "flashcard crear pregunta", when: hasDoc, run: () => renderStudyEditor() },
     { icon: "✦", title: "Generar tarjetas de esta página con IA", keys: "flashcards ia estudiar automatico", when: hasPdf, run: generateCardsWithAi },
-    { icon: "✦", title: "Resumir esta página con IA", keys: "resumen sintesis puntos clave", when: hasDoc, run: () => runAiPreset("page", "Resume esta página en 5 puntos clave, citando [p. N].") },
-    { icon: "✦", title: "Explicar la selección con IA", keys: "explicar simplificar entender", when: hasDoc, run: () => runAiPreset("selection", "Explícame este fragmento de forma sencilla, con un ejemplo.") },
-    { icon: "✦", title: "Preguntar al documento (IA local)", keys: "asistente ia chat pregunta", when: hasDoc, run: openAssistantForDocument },
+    { icon: "✦", title: "Asistente IA: abrir o cerrar", keys: "asistente ia chat pregunta preguntar documento", shortcut: ["I"], when: hasDoc, run: () => toggleAssistant() },
+    { icon: "✦", title: "Resumir esta página con IA", keys: "resumen sintesis puntos clave", when: hasDoc, run: () => runAssistantAction("summary", { kind: "page" }) },
+    { icon: "✦", title: "Resumir todo el documento con IA", keys: "resumen general sintesis documento completo", when: hasDoc, run: () => runAssistantAction("summary", { kind: "document" }) },
+    { icon: "✦", title: "Explicar la selección con IA", keys: "explicar simplificar entender", when: hasDoc, run: () => runAssistantAction("explain", captureReaderSelection() ? { kind: "selection" } : { kind: "page" }) },
+    { icon: "✦", title: "Preguntar al documento (IA local)", keys: "asistente ia chat pregunta", when: hasDoc, run: () => openAssistant({ context: { kind: "document" }, focus: true }) },
     { icon: "☀", title: "Tema claro", keys: "apariencia color", run: () => setTheme("light") },
     { icon: "☾", title: "Tema oscuro", keys: "apariencia noche", run: () => setTheme("dark") },
     { icon: "◐", title: "Tema sepia", keys: "apariencia papel", run: () => setTheme("sepia") },
@@ -1501,6 +1504,7 @@ const SHORTCUT_GROUPS = [
   ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
   ["Lectura", [["Regla de lectura", ["G"]], ["Mover la regla", ["↑", "↓"]], ["Desplazamiento automático", ["A"]], ["Pausar / velocidad (auto-scroll)", ["Espacio", "[", "]"]], ["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
   ["Notas y anotaciones", [["Nota en un punto de la página", ["N"]], ["Ventana de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
+  ["Asistente IA", [["Abrir o cerrar el asistente", ["I"]], ["Enviar pregunta / nueva línea", ["Enter", "⇧ Enter"]], ["Detener la respuesta o cerrar", ["Esc"]]]],
   ["Estudio", [["Abrir tarjetas de estudio", ["E"]], ["Mostrar respuesta", ["Espacio"]], ["Calificar: otra vez · difícil · bien · fácil", ["1", "2", "3", "4"]]]],
   ["General", [["Atajos de teclado", ["?"]], ["Cerrar paneles", ["Esc"]]]],
 ];
@@ -2188,6 +2192,9 @@ const ICONS = {
   grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
   rotate: '<path d="M20.5 12a8.5 8.5 0 1 1-2.5-6l2.5 2.5"/><path d="M20.5 3.5v5h-5"/>',
   minus: '<path d="M5 12h14"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+  crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
+  send: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   fitWidth: '<path d="M3 5v14M21 5v14"/><path d="m7 12 3-3M7 12l3 3M7 12h10m0 0-3-3m3 3-3 3"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
@@ -2224,7 +2231,9 @@ function applyInterfaceIcons() {
     zoomOut: "minus", zoomIn: "plus", toolbarFitBtn: "fitWidth",
   };
   for (const [id, name] of Object.entries(icons)) setIcon(id, name);
-  setAssistantButton($("captureBtn").classList.contains("assistant-on"));
+  setIcon("captureBtn", "sparkles", "Asistente");
+  $("captureBtn").title = "Asistente IA (I)";
+  $("captureBtn").setAttribute("aria-label", "Asistente IA");
   setIcon("markerModeBtn", "highlighter", "Ink");
   setIcon("appearanceBtn", "sliders", "Vista");
   const trigger = document.querySelector(".palette-trigger-icon");
@@ -2751,7 +2760,7 @@ function renderStudyEditor(front = "", back = "", page = currentPage) {
   $("studyFront").focus();
 }
 function createCardFromSelection() {
-  const text = window.getSelection()?.toString().replace(/\s+/g, " ").trim();
+  const text = captureReaderSelection()?.text;
   if (!text) return toast("Selecciona un fragmento primero");
   hideAnnotationActions();
   const cloze = makeCloze(text);
@@ -2771,6 +2780,7 @@ async function completeLocalAi(prompt) {
       if (session !== base) session.destroy?.();
     }
   }
+  if (!localAiEngine && localStorage.getItem("paper.ai-webllm-consent") !== "1") throw new Error("Abre el asistente (I) y autoriza la descarga del modelo local para usar la IA.");
   const engine = await getWebLlmAi();
   const reply = await engine.chat.completions.create({
     messages: [{ role: "user", content: prompt }],
@@ -2803,21 +2813,6 @@ async function generateCardsWithAi() {
     renderStudyOverview();
     toast(friendlyAiError(error));
   }
-}
-// Lanza el asistente con un ámbito y una pregunta ya preparados.
-async function runAiPreset(scope, question) {
-  if (!currentBook) return toast("Abre un documento primero");
-  if (scope === "selection" && !window.getSelection()?.toString().trim()) return toast("Selecciona un fragmento primero");
-  if (scope === "selection") await openAiAssistant();
-  else {
-    $("aiCard")?._expandAi?.();
-    $("aiScope").value = scope;
-    $("aiScope").dispatchEvent(new Event("change"));
-    $("aiPanel").hidden = false;
-    setAssistantButton(true);
-  }
-  $("aiQuestion").value = question;
-  askLocalAi();
 }
 function bindStudy() {
   $("studyLaunchBtn").onclick = () => openStudy();
@@ -4616,17 +4611,20 @@ function saveInkStroke() {
   toast(mark.type === "pen" ? "Trazo guardado" : mark.type === "box" ? "Recuadro guardado" : "Flecha guardada");
 }
 function showAnnotationActions() {
-  const rects = selectedRects();
-  if (!rects || markerMode || eraserMode) {
+  const selection = rememberReaderSelection();
+  if (!selection || markerMode || eraserMode) {
     hideAnnotationActions();
     return;
   }
-  const r = window.getSelection().getRangeAt(0).getBoundingClientRect(),
-    actions = $("annotationActions"),
-    width = 240;
-  actions.style.left = `${Math.min(window.innerWidth - width - 8, Math.max(8, r.left + r.width / 2 - width / 2))}px`;
-  actions.style.top = `${r.top > 62 ? r.top - 45 : r.bottom + 8}px`;
+  const actions = $("annotationActions");
+  actions.classList.toggle("is-main", selection.main);
   actions.classList.add("show");
+  const r = selection.rect;
+  const width = actions.offsetWidth || 360;
+  const height = actions.offsetHeight || 40;
+  actions.style.left = `${Math.min(window.innerWidth - width - 8, Math.max(8, r.left + r.width / 2 - width / 2))}px`;
+  const top = r.top > height + 70 ? r.top - height - 10 : r.bottom + 10;
+  actions.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, top))}px`;
 }
 function saveAnnotation(type, quiet = false) {
   const rects = selectedRects(),
@@ -5024,7 +5022,7 @@ function cropPdfCapture(a, b) {
   aiImagePage = currentPage;
   closeCapture();
   setAssistantButton(true);
-  openAiAssistant(true);
+  openAssistant({ context: { kind: "image", page: aiImagePage, image: aiImage } });
 }
 
 const BUILTIN_AI_OPTIONS = {
@@ -5055,76 +5053,912 @@ function aiStatus(message) {
     display = `Preparando el modelo local${percent ? ` · ${percent}%` : ""}`;
   else if (/loading model/i.test(raw))
     display = `Cargando el modelo local${percent ? ` · ${percent}%` : ""}`;
+  if (!status) return;
   status.textContent = display;
   status.classList.toggle("is-loading", loading);
   status.style.setProperty("--ai-progress", `${Math.min(100, Number(percent || 0))}%`);
-  $("aiCard")?.classList.toggle("ai-busy", loading);
-  $("aiCard")?.setAttribute("aria-busy", String(loading));
+}
+// ---- Asistente IA ------------------------------------------------------------
+// Ventana de conversación con contexto explícito (selección, página, documento o
+// recorte), acciones que se ejecutan al pulsarlas y límites de longitud por
+// acción: un resumen nunca puede salir más largo que el texto que resume.
+const ASSISTANT_ACTIONS = {
+  summary: { label: "Resumir", done: "Resumen" },
+  explain: { label: "Explicar", done: "Explicación" },
+  keypoints: { label: "Ideas clave", done: "Ideas clave" },
+  terms: { label: "Términos", done: "Términos" },
+  questions: { label: "Preguntas", done: "Preguntas de estudio" },
+  translate: { label: "Traducir", done: "Traducción" },
+  describe: { label: "Describir", done: "Descripción" },
+  transcribe: { label: "Transcribir", done: "Transcripción" },
+  ask: { label: "Pregunta", done: "Respuesta" },
+};
+const ASSISTANT_TEXT_ACTIONS = ["summary", "explain", "keypoints", "terms", "questions", "translate"];
+const ASSISTANT_IMAGE_ACTIONS = ["describe", "explain", "transcribe"];
+const ASSISTANT_SYSTEM =
+  "Eres el asistente de lectura de Paper Reader. Respondes siempre en español (salvo que se pida traducir a otro idioma), con precisión y sin relleno. Usa solo la información del TEXTO proporcionado; si algo no aparece en él, dilo claramente. No repitas el texto original ni estas instrucciones, y no empieces con frases como «Claro» o «El texto habla de».";
+const READER_TEXT_SURFACES = "#textLayer, #facingTextLayer, #continuousView .textLayer, #reflowReader";
+let assistantThread = [];
+let assistantContext = { kind: "page" };
+let assistantBusy = false;
+let assistantAbort = null;
+let assistantCapability = null;
+let assistantRenderFrame = 0;
+let lastReaderSelection = null;
+const assistantImages = new Map();
+
+function countWords(text) {
+  return (String(text || "").match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) || []).length;
+}
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+// Texto seleccionado en cualquier superficie de lectura: página, página
+// enfrentada, scroll continuo o modo lectura.
+function readerSelectionNow() {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || selection.isCollapsed) return null;
+  const text = selection.toString().replace(/\s+/g, " ").trim();
+  if (text.length < 2) return null;
+  const elementOf = (node) => (node?.nodeType === 1 ? node : node?.parentElement);
+  const anchor = elementOf(selection.anchorNode);
+  const focus = elementOf(selection.focusNode);
+  const surface = anchor?.closest?.(READER_TEXT_SURFACES);
+  if (!surface || !focus?.closest?.(READER_TEXT_SURFACES)) return null;
+  let page = currentPage;
+  if (surface.id === "facingTextLayer") page = currentPage + 1;
+  else {
+    const holder = anchor.closest(".cont-page, .reflow-page");
+    if (holder?.dataset.page) page = Number(holder.dataset.page) || currentPage;
+  }
+  return { text: text.slice(0, 12000), page, main: surface.id === "textLayer", rect: selection.getRangeAt(0).getBoundingClientRect() };
+}
+function rememberReaderSelection() {
+  const selection = readerSelectionNow();
+  if (selection) lastReaderSelection = { text: selection.text, page: selection.page, at: Date.now() };
+  return selection;
+}
+// La selección actual o la última reciente (abrir la paleta o pulsar un botón
+// puede colapsar la selección del documento antes de que la leamos).
+function captureReaderSelection(maxAge = 30000) {
+  const now = rememberReaderSelection();
+  if (now) return { text: now.text, page: now.page };
+  if (lastReaderSelection && Date.now() - lastReaderSelection.at < maxAge) return { text: lastReaderSelection.text, page: lastReaderSelection.page };
+  return null;
+}
+function assistantStorageKey() {
+  return currentBook ? key(currentBook.id, "assistant-thread") : "";
+}
+function saveAssistantThread() {
+  const storageKey = assistantStorageKey();
+  if (!storageKey) return;
+  const stored = assistantThread
+    .filter((message) => !message.pending && message.kind !== "consent")
+    .slice(-40)
+    .map(({ streaming, ...message }) => message);
+  try {
+    setJSON(storageKey, stored);
+  } catch {}
+}
+function assistantLoadDocument() {
+  assistantAbort?.abort();
+  documentContextIndex = null;
+  documentContextIndexId = currentBook?.id || "";
+  documentIndexLoading = null;
+  assistantImages.clear();
+  lastReaderSelection = null;
+  assistantThread = currentBook ? getJSON(assistantStorageKey(), []).filter((message) => message?.role && (message.content || message.error)) : [];
+  assistantContext = { kind: "page" };
+  if (!$("assistantPanel")?.hidden) renderAssistant();
+}
+function assistantContextLabel(context) {
+  if (!context) return "";
+  if (context.kind === "selection") return `Selección · p. ${context.page}`;
+  if (context.kind === "image") return `Recorte · p. ${context.page}`;
+  if (context.kind === "document") return "Todo el documento";
+  return currentBook?.kind === "markdown" ? "Documento" : `Página ${context.page || currentPage}`;
+}
+function setAssistantContext(context) {
+  if (context.kind === "selection") {
+    const selection = context.text ? context : captureReaderSelection();
+    if (!selection?.text) {
+      toast("Selecciona un fragmento del documento primero");
+      return false;
+    }
+    assistantContext = { kind: "selection", text: selection.text, page: selection.page || currentPage };
+  } else if (context.kind === "image") {
+    if (!context.image) return false;
+    assistantContext = { kind: "image", image: context.image, page: context.page || currentPage };
+  } else assistantContext = { kind: context.kind === "document" ? "document" : "page" };
+  renderAssistantDock();
+  return true;
 }
 function setAssistantButton(active) {
   const button = $("captureBtn");
+  if (!button) return;
   button.classList.toggle("assistant-on", active);
-  setIcon(button, "sparkles", active ? "Activo" : "Asistente");
+  button.setAttribute("aria-pressed", String(active));
 }
+async function refreshAssistantCapability() {
+  const model = $("assistantModel");
+  if (!model) return;
+  model.dataset.state = "checking";
+  model.querySelector("span").textContent = "Comprobando la IA local…";
+  const capability = await inspectAiCapability();
+  assistantCapability = capability;
+  const consented = localStorage.getItem("paper.ai-webllm-consent") === "1";
+  const [state, text] =
+    capability.kind === "builtin"
+      ? capability.availability === "available"
+        ? ["ready", "IA del navegador · lista"]
+        : ["download", "IA del navegador · se preparará al usarla"]
+      : capability.kind === "webllm"
+        ? localAiEngine
+          ? ["ready", "Modelo local · listo"]
+          : ["download", consented ? "Modelo local · se cargará al usarlo" : "Modelo local · requiere descarga (≈900 MB)"]
+        : ["off", "IA local no disponible"];
+  model.dataset.state = state;
+  model.querySelector("span").textContent = text;
+  model.title = capability.kind === "none" ? capability.reason : "Todo se procesa en este dispositivo; el documento no se envía a ningún servidor.";
+  if (!assistantThread.length) renderAssistantThread();
+}
+function applyAssistantGeometry() {
+  const panel = $("assistantPanel");
+  if (window.innerWidth <= 700) {
+    panel.style.cssText = "";
+    return;
+  }
+  const saved = getJSON("paper.assistant-window", null);
+  const topbar = 56;
+  const width = Math.min(window.innerWidth - 24, Math.max(340, saved?.width || 420));
+  const height = Math.min(window.innerHeight - topbar - 24, Math.max(360, saved?.height || Math.min(720, window.innerHeight - topbar - 90)));
+  const notesOpen = !$("notebookPanel").hidden;
+  const left = Number.isFinite(saved?.left) ? saved.left : window.innerWidth - width - 16 - (notesOpen ? 396 : 0);
+  const top = Number.isFinite(saved?.top) ? saved.top : topbar + 12;
+  panel.style.width = `${width}px`;
+  panel.style.height = panel.classList.contains("is-minimized") ? "" : `${height}px`;
+  panel.style.left = `${Math.max(8, Math.min(window.innerWidth - Math.min(width, 200) - 8, left))}px`;
+  panel.style.top = `${Math.max(8, Math.min(window.innerHeight - 52, top))}px`;
+}
+function saveAssistantGeometry() {
+  const panel = $("assistantPanel");
+  if (window.innerWidth <= 700 || panel.hidden) return;
+  const box = panel.getBoundingClientRect();
+  const saved = getJSON("paper.assistant-window", {});
+  setJSON("paper.assistant-window", {
+    left: Math.round(box.left),
+    top: Math.round(box.top),
+    width: Math.round(box.width),
+    height: panel.classList.contains("is-minimized") ? saved.height : Math.round(box.height),
+  });
+}
+function setAssistantMinimized(minimized) {
+  const panel = $("assistantPanel");
+  panel.classList.toggle("is-minimized", minimized);
+  setIcon("assistantMinimize", minimized ? "chevronUp" : "minus");
+  $("assistantMinimize").title = minimized ? "Restaurar" : "Minimizar";
+  applyAssistantGeometry();
+}
+function openAssistant(options = {}) {
+  if (!currentBook) return toast("Abre un documento primero");
+  const panel = $("assistantPanel");
+  const wasHidden = panel.hidden;
+  if (options.context) {
+    if (!setAssistantContext(options.context)) return false;
+  } else if (wasHidden) {
+    const selection = captureReaderSelection(8000);
+    if (selection) assistantContext = { kind: "selection", ...selection };
+    else if (assistantContext.kind === "selection" || assistantContext.kind === "image") assistantContext = { kind: "page" };
+  }
+  panel.hidden = false;
+  if (panel.classList.contains("is-minimized")) setAssistantMinimized(false);
+  if (wasHidden) applyAssistantGeometry();
+  document.body.classList.add("assistant-open");
+  setAssistantButton(true);
+  hideAnnotationActions();
+  renderAssistant();
+  if (wasHidden || !assistantCapability) refreshAssistantCapability();
+  if (options.focus !== false) requestAnimationFrame(() => $("assistantInput").focus({ preventScroll: true }));
+  return true;
+}
+function closeAssistant() {
+  assistantAbort?.abort();
+  $("assistantPanel").hidden = true;
+  document.body.classList.remove("assistant-open");
+  setAssistantButton(false);
+}
+function toggleAssistant() {
+  $("assistantPanel").hidden ? openAssistant() : closeAssistant();
+}
+function syncAssistantPage() {
+  const panel = $("assistantPanel");
+  if (!panel || panel.hidden || assistantContext.kind !== "page") return;
+  renderAssistantDock();
+}
+// -- Render -------------------------------------------------------------------
 function formatAiAnswer(text) {
-  const escaped = escapeHtml(text).replace(
-    /\*\*(.+?)\*\*/g,
-    "<strong>$1</strong>",
-  );
-  const lines = escaped.split("\n");
-  let html = "",
-    inList = false;
-  for (const raw of lines) {
+  const inline = (value) =>
+    escapeHtml(value)
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, "$1<em>$2</em>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/[\[(](?:p\.|pág\.|página)\s*(\d{1,4})(?:\s*[-–,]\s*(\d{1,4}))?[\])]/gi, (match, first, second) => {
+        const pages = [first, second].filter(Boolean);
+        return pages.map((page) => `<button type="button" class="as-cite" data-page="${page}" title="Ir a la página ${page}">p. ${page}</button>`).join("");
+      });
+  let html = "";
+  let list = "";
+  const closeList = () => {
+    if (list) html += `</${list}>`;
+    list = "";
+  };
+  for (const raw of String(text || "").split("\n")) {
     const line = raw.trim();
     if (!line) {
-      if (inList) {
-        html += "</ul>";
-        inList = false;
-      }
+      closeList();
       continue;
     }
-    if (/^#{1,3}\s+/.test(line)) {
-      if (inList) {
-        html += "</ul>";
-        inList = false;
-      }
-      html += `<h3>${line.replace(/^#{1,3}\s+/, "")}</h3>`;
+    const qa = line.match(/^(?:\d+[.)]\s*)?P\s*:\s*(.+?)\s*\|\|\s*R\s*:\s*(.+)$/i);
+    if (qa) {
+      closeList();
+      html += `<div class="as-qa"><strong>${inline(qa[1])}</strong><p>${inline(qa[2])}</p></div>`;
       continue;
     }
-    if (/^(?:[-*•]|\d+[.)])\s+/.test(line)) {
-      if (!inList) {
-        html += "<ul>";
-        inList = true;
-      }
-      html += `<li>${line.replace(/^(?:[-*•]|\d+[.)])\s+/, "")}</li>`;
+    if (/^#{1,4}\s+/.test(line)) {
+      closeList();
+      html += `<h4>${inline(line.replace(/^#{1,4}\s+/, ""))}</h4>`;
       continue;
     }
-    if (inList) {
-      html += "</ul>";
-      inList = false;
+    const bullet = line.match(/^(?:[-*•]|(\d+)[.)])\s+(.*)$/);
+    if (bullet) {
+      const kind = bullet[1] ? "ol" : "ul";
+      if (list !== kind) {
+        closeList();
+        html += `<${kind}>`;
+        list = kind;
+      }
+      html += `<li>${inline(bullet[2])}</li>`;
+      continue;
     }
-    html += `<p>${line}</p>`;
+    closeList();
+    html += `<p>${inline(line)}</p>`;
   }
-  if (inList) html += "</ul>";
+  closeList();
   return html;
 }
-function renderAiAnswer() {
-  const response = $("aiResponse");
-  response.hidden = !aiAnswerRaw.trim();
-  $("aiAnswer").innerHTML = formatAiAnswer(aiAnswerRaw);
+function renderAssistant() {
+  renderAssistantThread();
+  renderAssistantDock();
 }
-function appendAiChunk(chunk) {
-  aiAnswerRaw += chunk;
-  renderAiAnswer();
+function assistantActionsFor(context) {
+  return context.kind === "image" ? ASSISTANT_IMAGE_ACTIONS : ASSISTANT_TEXT_ACTIONS;
 }
-async function streamBuiltInAnswer(session, prompt, signal) {
-  let previous = "";
-  for await (const chunk of session.promptStreaming(prompt, { signal })) {
-    const value = String(chunk || "");
-    const delta = previous && value.startsWith(previous) ? value.slice(previous.length) : value;
-    appendAiChunk(delta);
-    previous = value.startsWith(previous) ? value : `${previous}${value}`;
+function renderAssistantDock() {
+  const panel = $("assistantPanel");
+  if (!panel || panel.hidden) return;
+  const context = assistantContext;
+  const selection = context.kind === "selection" ? context : captureReaderSelection(8000);
+  const isMarkdown = currentBook?.kind === "markdown";
+  const scopes = [
+    { kind: "selection", label: "Selección", disabled: !selection },
+    { kind: "page", label: isMarkdown ? "Documento" : `Página ${currentPage}` },
+    ...(isMarkdown ? [] : [{ kind: "document", label: "Todo el PDF" }]),
+    ...(context.kind === "image" ? [{ kind: "image", label: "Recorte" }] : []),
+  ];
+  const quote =
+    context.kind === "selection"
+      ? `<div class="as-quote"><span>“${escapeHtml(context.text.length > 220 ? `${context.text.slice(0, 220)}…` : context.text)}”</span><small>${countWords(context.text)} palabras · p. ${context.page}</small><button type="button" class="as-quote-clear" data-assistant-clear title="Quitar la selección" aria-label="Quitar la selección">${iconSvg("close")}</button></div>`
+      : context.kind === "image"
+        ? `<div class="as-quote as-quote-image"><img src="${context.image}" alt="Recorte del PDF"><small>Recorte de la página ${context.page}</small><button type="button" class="as-quote-clear" data-assistant-clear title="Quitar el recorte" aria-label="Quitar el recorte">${iconSvg("close")}</button></div>`
+        : "";
+  $("assistantContext").innerHTML = `<div class="as-scope" role="radiogroup" aria-label="Sobre qué preguntar">${scopes
+    .map((scope) => `<button type="button" role="radio" data-assistant-scope="${scope.kind}" aria-checked="${scope.kind === context.kind}" ${scope.disabled ? "disabled title=\"Selecciona texto en el documento\"" : ""}>${scope.label}</button>`)
+    .join("")}${pdfDoc ? `<button type="button" class="as-crop" data-assistant-crop title="Recortar una zona del PDF (imagen, tabla, fórmula…)" aria-label="Recortar una zona del PDF">${iconSvg("crop")}</button>` : ""}</div>${quote}`;
+  $("assistantActions").innerHTML = assistantActionsFor(context)
+    .map((action) => `<button type="button" class="as-chip" data-assistant-action="${action}" ${assistantBusy ? "disabled" : ""}>${ASSISTANT_ACTIONS[action].label}</button>`)
+    .join("");
+  const placeholders = {
+    selection: "Pregunta sobre la selección…",
+    page: isMarkdown ? "Pregunta sobre el documento…" : `Pregunta sobre la página ${currentPage}…`,
+    document: "Pregunta sobre todo el documento…",
+    image: "Pregunta sobre el recorte…",
+  };
+  $("assistantInput").placeholder = placeholders[context.kind];
+  const send = $("assistantSend");
+  send.classList.toggle("is-stop", assistantBusy);
+  setIcon(send, assistantBusy ? "square" : "send");
+  send.title = assistantBusy ? "Detener (Esc)" : "Enviar (Enter)";
+  send.setAttribute("aria-label", send.title);
+}
+function assistantEmptyHtml() {
+  const capability = assistantCapability;
+  const unavailable = capability?.kind === "none";
+  return `<div class="as-empty"><div class="as-empty-mark">${iconSvg("sparkles")}</div><strong>Tu asistente de lectura</strong><p>Elige sobre qué trabajar —una <b>selección</b>, la <b>página</b> o <b>todo el PDF</b>— y pulsa una acción o escribe una pregunta.</p><ul><li><b>Selecciona texto</b> en el documento y usa los botones que aparecen junto a él.</li><li>Las respuestas citan las páginas: pulsa <span class="as-cite">p. 4</span> para ir allí.</li><li>Todo se procesa en este dispositivo. Nada sale de tu navegador.</li></ul>${
+    unavailable ? `<div class="as-warning"><strong>IA local no disponible</strong><p>${escapeHtml(capability.reason)}</p><p>Funciona en Chrome o Edge actualizados (IA integrada o WebGPU).</p></div>` : ""
+  }</div>`;
+}
+function assistantMessageHtml(message, index) {
+  if (message.role === "user") {
+    const action = message.action && message.action !== "ask" ? ASSISTANT_ACTIONS[message.action]?.label : "";
+    const quote = message.context?.quote ? `<blockquote>“${escapeHtml(message.context.quote)}”</blockquote>` : "";
+    return `<article class="as-msg as-user" data-index="${index}"><div class="as-bubble">${action ? `<b class="as-action-tag">${action}</b>` : ""}${message.content && message.action === "ask" ? `<p>${escapeHtml(message.content)}</p>` : ""}<small>${escapeHtml(assistantContextLabel(message.context))}</small>${quote}</div></article>`;
   }
+  if (message.kind === "consent") {
+    return `<article class="as-msg as-bot as-consent" data-index="${index}"><div class="as-card"><strong>${message.vision ? "Descargar el modelo visual" : "Descargar el modelo de IA local"}</strong><p>${
+      message.vision
+        ? "Tu navegador no trae IA con visión. Para analizar recortes se descarga una vez un modelo de unos 4 GB que funciona con tu GPU."
+        : "Tu navegador no trae IA integrada. Para usar el asistente se descarga una vez un modelo de unos 900 MB que funciona con tu GPU (WebGPU)."
+    } Queda guardado en este dispositivo y el documento nunca se envía a ningún servidor.</p><div class="as-card-actions"><button type="button" class="btn primary" data-assistant-consent="${index}">Descargar y continuar</button><button type="button" class="btn" data-assistant-dismiss="${index}">Ahora no</button></div></div></article>`;
+  }
+  if (message.error) {
+    return `<article class="as-msg as-bot as-error" data-index="${index}"><div class="as-card"><strong>No se pudo completar</strong><p>${escapeHtml(message.error)}</p>${message.request ? `<div class="as-card-actions"><button type="button" class="btn" data-assistant-retry="${index}">Reintentar</button></div>` : ""}</div></article>`;
+  }
+  const body = message.content ? formatAiAnswer(message.content) : "";
+  const typing = message.pending && !message.content ? `<div class="as-typing"><i></i><i></i><i></i><span>${escapeHtml(message.phase || "Pensando…")}</span></div>` : "";
+  const label = ASSISTANT_ACTIONS[message.action]?.done || "Respuesta";
+  const sources = message.sources?.length
+    ? `<div class="as-sources"><span>Fuentes</span>${message.sources.map((page) => `<button type="button" class="as-cite" data-page="${page}">p. ${page}</button>`).join("")}</div>`
+    : "";
+  const canRegenerate = message.request && (message.request.context.kind !== "image" || assistantImages.has(message.id));
+  const tools = message.pending
+    ? ""
+    : `<footer class="as-tools">${message.meta ? `<span class="as-meta">${escapeHtml(message.meta)}</span>` : ""}<div>${
+        message.action === "questions" ? `<button type="button" data-assistant-cards="${index}" title="Crear tarjetas de estudio">${iconSvg("check")}<span>Tarjetas</span></button>` : ""
+      }<button type="button" data-assistant-copy="${index}" title="Copiar">${iconSvg("copy")}</button><button type="button" data-assistant-note="${index}" title="Guardar en las notas de la página">${iconSvg("sticky")}</button>${
+        canRegenerate ? `<button type="button" data-assistant-retry="${index}" title="Generar de nuevo">${iconSvg("rotate")}</button>` : ""
+      }</div></footer>`;
+  return `<article class="as-msg as-bot${message.pending ? " is-pending" : ""}" data-index="${index}"><header><span>${iconSvg("sparkles")}${label}</span></header><div class="as-answer">${body}${typing}</div>${sources}${tools}</article>`;
+}
+function renderAssistantThread() {
+  const thread = $("assistantThread");
+  if (!thread || $("assistantPanel").hidden) return;
+  const nearBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80;
+  thread.innerHTML = assistantThread.length ? assistantThread.map(assistantMessageHtml).join("") : assistantEmptyHtml();
+  if (nearBottom || assistantBusy) thread.scrollTop = thread.scrollHeight;
+}
+function renderAssistantMessage(index) {
+  cancelAnimationFrame(assistantRenderFrame);
+  assistantRenderFrame = requestAnimationFrame(() => {
+    const thread = $("assistantThread");
+    const node = thread?.querySelector(`.as-msg[data-index="${index}"]`);
+    if (!node) return renderAssistantThread();
+    const nearBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 120;
+    node.outerHTML = assistantMessageHtml(assistantThread[index], index);
+    if (nearBottom) thread.scrollTop = thread.scrollHeight;
+  });
+}
+// -- Contexto y prompts -------------------------------------------------------
+async function assistantPageText(pageNumber) {
+  if (currentBook?.kind === "markdown") return String(markdownContent || "");
+  if (!pdfDoc) return "";
+  return getPagePlainText(pageNumber);
+}
+// Fragmentos repartidos por todo el documento, para resumir o estudiar el PDF
+// completo sin superar la ventana de contexto de un modelo local.
+function sampleDocumentChunks(chunks, budget = 8000) {
+  if (!chunks.length) return [];
+  const perChunk = Math.max(400, Math.floor(budget / Math.min(chunks.length, 12)));
+  const count = Math.max(1, Math.min(chunks.length, Math.floor(budget / perChunk)));
+  const picked = [];
+  for (let index = 0; index < count; index++) picked.push(chunks[Math.floor((index * chunks.length) / count)]);
+  return [...new Set(picked)].map((chunk) => ({ ...chunk, content: chunk.content.slice(0, perChunk) }));
+}
+async function assistantSourceText(context, action, question, signal) {
+  if (context.kind === "selection") {
+    let extra = "";
+    if (action === "ask") {
+      const page = (await assistantPageText(context.page).catch(() => "")).replace(/\s+/g, " ");
+      if (page.length > context.text.length + 40) extra = page.slice(0, 1800);
+    }
+    return { text: context.text, extra, pages: [context.page], label: `selección de la página ${context.page}` };
+  }
+  if (context.kind === "page") {
+    const page = currentBook?.kind === "markdown" ? 1 : context.page;
+    const text = (await assistantPageText(page)).trim().slice(0, 7000);
+    return { text, pages: currentBook?.kind === "markdown" ? [] : [page], label: currentBook?.kind === "markdown" ? "documento" : `página ${page}` };
+  }
+  const chunks = await ensureDocumentContextIndex(signal);
+  if (action === "ask") {
+    const ranked = rankAiChunks(chunks, question);
+    const chosen = (ranked.filter((chunk) => chunk.score > 0.5).length ? ranked.filter((chunk) => chunk.score > 0.5) : ranked).slice(0, 6);
+    const text = chosen.map((chunk) => `[p. ${chunk.page}]\n${chunk.content}`).join("\n\n").slice(0, 8000);
+    return { text, pages: [...new Set(chosen.map((chunk) => chunk.page))].sort((a, b) => a - b), label: "fragmentos más relevantes del documento", cited: true };
+  }
+  const sample = sampleDocumentChunks(chunks, 8000);
+  const text = sample.map((chunk) => `[p. ${chunk.page}]\n${chunk.content}`).join("\n\n");
+  return { text, pages: [], label: "fragmentos repartidos por todo el documento", cited: true, sampled: true };
+}
+// Instrucción, límite de palabras y tokens para cada acción. El límite se pide
+// al modelo y además se hace cumplir al recibir la respuesta.
+function assistantPlan(action, words, source, question) {
+  const doc = source.sampled;
+  const cite = source.cited ? " Cita las páginas entre corchetes, por ejemplo [p. 3]." : "";
+  let limit;
+  let task;
+  switch (action) {
+    case "summary":
+      limit = doc ? 220 : clampNumber(words * 0.3, 15, 170);
+      task = `Resume el TEXTO en ${limit} palabras como máximo (el original tiene ${words}). ${
+        limit <= 45 ? "Hazlo en una o dos frases." : "Usa un párrafo breve o, si ayuda, hasta 5 viñetas."
+      } Conserva solo lo esencial y no añadas información externa ni opiniones.${doc ? " Los fragmentos proceden de distintas partes del documento: da una visión general." : ""}${cite}`;
+      break;
+    case "explain":
+      limit = clampNumber(Math.max(words, 90), 90, 230);
+      task = `Explica el TEXTO a alguien que lo lee por primera vez: qué quiere decir y por qué importa. Usa lenguaje sencillo y, si ayuda, un ejemplo breve. Máximo ${limit} palabras.${cite}`;
+      break;
+    case "keypoints": {
+      const count = doc ? 6 : words < 120 ? 3 : words < 400 ? 4 : 5;
+      limit = count * 24;
+      task = `Enumera las ${count} ideas clave del TEXTO como viñetas que empiecen por «- », una frase corta cada una (máximo 20 palabras). No escribas nada más.${cite}`;
+      break;
+    }
+    case "terms":
+      limit = 190;
+      task = `Extrae hasta 6 términos o conceptos importantes del TEXTO y defínelos según el propio texto. Formato por línea: «- **Término**: definición breve». Si no hay términos técnicos, dilo en una frase.${cite}`;
+      break;
+    case "questions": {
+      const count = doc ? 5 : words < 150 ? 2 : 3;
+      limit = count * 60;
+      task = `Crea ${count} preguntas de estudio sobre el TEXTO con su respuesta breve y correcta. Escribe una por línea con este formato exacto: «P: pregunta || R: respuesta». No escribas nada más.`;
+      break;
+    }
+    case "translate":
+      limit = clampNumber(words * 1.5 + 20, 30, 1400);
+      task = "Traduce el TEXTO al español. Si ya está en español, tradúcelo al inglés. Devuelve solo la traducción, conservando párrafos y listas, sin comentarios.";
+      break;
+    default:
+      limit = /detall|extens|profund|todo|complet/i.test(question) ? 380 : 190;
+      task = `Responde a la PREGUNTA usando el TEXTO. Empieza directamente por la respuesta, sé concreto y usa como máximo unas ${limit} palabras. Si la respuesta no está en el texto, dilo.${cite}`;
+  }
+  return { limit, hardLimit: Math.ceil(limit * 1.2) + 6, maxTokens: Math.min(1600, Math.ceil(limit * 2.1) + 60), task };
+}
+function assistantHistory() {
+  const pairs = [];
+  for (let index = assistantThread.length - 1; index > 0 && pairs.length < 2; index--) {
+    const answer = assistantThread[index];
+    const asked = assistantThread[index - 1];
+    if (answer.role === "assistant" && answer.content && !answer.pending && asked.role === "user" && asked.action === "ask") {
+      pairs.unshift(`Usuario: ${asked.content}\nAsistente: ${answer.content.slice(0, 600)}`);
+      index--;
+    }
+  }
+  return pairs.join("\n\n");
+}
+// Recorta al final de la última frase completa dentro del límite.
+function trimToWords(text, limit) {
+  const tokens = String(text).split(/(\s+)/);
+  let words = 0;
+  let cut = "";
+  for (const token of tokens) {
+    if (/\S/.test(token) && ++words > limit) break;
+    cut += token;
+  }
+  const sentenceEnd = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf(".\n"), cut.lastIndexOf("\n- "), cut.lastIndexOf("? "), cut.lastIndexOf("! "));
+  if (sentenceEnd > cut.length * 0.5) return cut.slice(0, sentenceEnd + 1).trim();
+  return `${cut.trim().replace(/[,;:]$/, "")}…`;
+}
+// -- Motores ------------------------------------------------------------------
+function consentError(vision = false) {
+  const error = new Error("Se necesita permiso para descargar el modelo local.");
+  error.name = "ConsentRequired";
+  error.vision = vision;
+  return error;
+}
+async function streamLocalText({ prompt, maxTokens, signal, onToken }) {
+  const capability = await inspectAiCapability();
+  if (capability.kind === "none") throw new Error(capability.reason);
+  if (capability.kind === "builtin") {
+    const base = await getBuiltInAi();
+    if (!base) throw new Error("La IA integrada no está disponible.");
+    // Cada petición usa una copia limpia: si no, el historial se acumula en la
+    // sesión y las respuestas se contaminan con las anteriores.
+    const session = base.clone ? await base.clone({ signal }) : base;
+    try {
+      let previous = "";
+      for await (const chunk of session.promptStreaming(`${ASSISTANT_SYSTEM}\n\n${prompt}`, { signal })) {
+        const value = String(chunk || "");
+        const delta = previous && value.startsWith(previous) ? value.slice(previous.length) : value;
+        previous = value.startsWith(previous) ? value : `${previous}${value}`;
+        if (delta) onToken(delta);
+      }
+    } finally {
+      if (session !== base) session.destroy?.();
+    }
+    return;
+  }
+  if (!localAiEngine && localStorage.getItem("paper.ai-webllm-consent") !== "1") throw consentError(false);
+  const engine = await getWebLlmAi();
+  aiStatus("");
+  const stream = await engine.chat.completions.create({
+    messages: [
+      { role: "system", content: ASSISTANT_SYSTEM },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.2,
+    max_tokens: maxTokens,
+    stream: true,
+  });
+  for await (const chunk of stream) {
+    if (signal.aborted) {
+      engine.interruptGenerate?.();
+      throw new DOMException("Detenido", "AbortError");
+    }
+    const delta = chunk.choices?.[0]?.delta?.content || "";
+    if (delta) onToken(delta);
+  }
+}
+async function streamLocalVision({ prompt, image, signal, onToken }) {
+  const vision = await inspectVisionCapability();
+  if (!vision.ok) throw new Error(vision.reason);
+  if (vision.kind === "builtin") {
+    try {
+      const base = await getBuiltInVisionAi();
+      const session = base.clone ? await base.clone({ signal }) : base;
+      const blob = await fetch(image).then((response) => response.blob());
+      try {
+        let previous = "";
+        const input = [{ role: "user", content: [{ type: "text", value: prompt }, { type: "image", value: blob }] }];
+        for await (const chunk of session.promptStreaming(input, { signal })) {
+          const value = String(chunk || "");
+          const delta = previous && value.startsWith(previous) ? value.slice(previous.length) : value;
+          previous = value.startsWith(previous) ? value : `${previous}${value}`;
+          if (delta) onToken(delta);
+        }
+      } finally {
+        if (session !== base) session.destroy?.();
+      }
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      builtInVisionSession = null;
+      console.warn("La visión integrada falló; se intenta WebGPU", error);
+    }
+  }
+  if (!visionAiEngine && localStorage.getItem("paper.ai-vision-consent") !== "1") throw consentError(true);
+  const engine = await getVisionAi();
+  const stream = await engine.chat.completions.create({
+    messages: [
+      { role: "system", content: "Eres un asistente de lectura visual riguroso. Responde siempre en español y distingue lo visible de tus inferencias." },
+      { role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: image } }] },
+    ],
+    temperature: 0.2,
+    max_tokens: 500,
+    stream: true,
+  });
+  for await (const chunk of stream) {
+    if (signal.aborted) {
+      engine.interruptGenerate?.();
+      throw new DOMException("Detenido", "AbortError");
+    }
+    const delta = chunk.choices?.[0]?.delta?.content || "";
+    if (delta) onToken(delta);
+  }
+}
+// -- Envío --------------------------------------------------------------------
+function assistantRequestFromContext(action, question) {
+  const context = assistantContext;
+  if (context.kind === "selection") return { action, question, context: { kind: "selection", text: context.text, page: context.page } };
+  if (context.kind === "image") return { action, question, context: { kind: "image", page: context.page } };
+  if (context.kind === "document") return { action, question, context: { kind: "document" } };
+  return { action, question, context: { kind: "page", page: currentBook?.kind === "markdown" ? 1 : currentPage } };
+}
+async function runAssistantAction(action, context) {
+  if (!openAssistant({ context, focus: false })) return;
+  await sendAssistant({ action });
+}
+async function sendAssistant({ action = "ask", question = "", request = null } = {}) {
+  if (!currentBook || assistantBusy) return;
+  request = request || assistantRequestFromContext(action, question.trim());
+  action = request.action;
+  question = (request.question || "").trim();
+  if (action === "ask" && !question) return;
+  const context = request.context;
+  const image = context.kind === "image" ? request.image || assistantContext.image || "" : "";
+  if (context.kind === "image" && !image) return toast("El recorte ya no está disponible; vuelve a recortar la zona");
+  const quote = context.kind === "selection" ? (context.text.length > 180 ? `${context.text.slice(0, 180)}…` : context.text) : "";
+  assistantThread.push({ role: "user", action, content: action === "ask" ? question : ASSISTANT_ACTIONS[action].label, context: { kind: context.kind, page: context.page, quote }, createdAt: Date.now() });
+  const message = { id: crypto.randomUUID?.() || `${Date.now()}`, role: "assistant", action, content: "", pending: true, phase: "Preparando…", sources: [], request: { action, question, context }, createdAt: Date.now() };
+  if (image) assistantImages.set(message.id, image);
+  assistantThread.push(message);
+  const index = assistantThread.length - 1;
+  assistantBusy = true;
+  assistantAbort = new AbortController();
+  const signal = assistantAbort.signal;
+  renderAssistant();
+  const phase = (text) => {
+    message.phase = text;
+    if (!message.content) renderAssistantMessage(index);
+  };
+  let trimmed = false;
+  let inputWords = 0;
+  try {
+    let plan;
+    if (context.kind === "image") {
+      const prompts = {
+        describe: "Describe con precisión lo que muestra esta imagen de un documento: tipo de contenido (gráfico, tabla, diagrama, fórmula, texto…), elementos principales y lo que comunica. Máximo 160 palabras.",
+        explain: "Explica qué significa el contenido de esta imagen de un documento y por qué es relevante, con lenguaje sencillo. Máximo 180 palabras.",
+        transcribe: "Transcribe fielmente el texto visible en la imagen, respetando líneas y listas. No añadas comentarios.",
+        ask: `Responde a esta pregunta sobre la imagen de forma concreta (máximo 180 palabras): ${question}`,
+      };
+      plan = { hardLimit: action === "transcribe" ? 900 : 230 };
+      message.sources = [context.page];
+      phase("Analizando el recorte…");
+      await streamLocalVision({
+        prompt: prompts[action] || prompts.describe,
+        image,
+        signal,
+        onToken: (delta) => {
+          message.content += delta;
+          renderAssistantMessage(index);
+        },
+      });
+    } else {
+      phase(context.kind === "document" ? "Leyendo el documento…" : "Leyendo el texto…");
+      const source = await assistantSourceText(context, action, question, signal);
+      inputWords = countWords(source.text);
+      if (!inputWords) {
+        message.content =
+          context.kind === "selection"
+            ? "La selección no contiene texto suficiente para trabajar con ella."
+            : "Esta página no tiene texto extraíble: puede ser una imagen escaneada. Usa **Recortar** (el icono junto a los ámbitos) para analizar una zona como imagen.";
+        message.local = true;
+        return;
+      }
+      if (action === "summary" && inputWords < 30) {
+        message.content = `El texto ya es muy breve (${inputWords} palabras), así que no tiene sentido resumirlo. Prueba **Explicar** si quieres entenderlo mejor.`;
+        message.local = true;
+        return;
+      }
+      plan = assistantPlan(action, inputWords, source, question);
+      message.sources = source.pages;
+      const history = action === "ask" ? assistantHistory() : "";
+      const prompt = [
+        `INSTRUCCIÓN: ${plan.task}`,
+        `TEXTO (${source.label}):\n"""\n${source.text}\n"""`,
+        source.extra ? `CONTEXTO ADICIONAL (resto de la página; úsalo solo si hace falta para entender la selección):\n"""\n${source.extra}\n"""` : "",
+        history ? `CONVERSACIÓN PREVIA:\n${history}` : "",
+        action === "ask" ? `PREGUNTA: ${question}` : "",
+        "RESPUESTA:",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      phase("Pensando…");
+      const local = new AbortController();
+      const stop = () => local.abort();
+      signal.addEventListener("abort", stop, { once: true });
+      try {
+        await streamLocalText({
+          prompt,
+          maxTokens: plan.maxTokens,
+          signal: local.signal,
+          onToken: (delta) => {
+            message.content += delta;
+            if (countWords(message.content) > plan.hardLimit) {
+              trimmed = true;
+              local.abort();
+            }
+            renderAssistantMessage(index);
+          },
+        });
+      } catch (error) {
+        if (!(trimmed && error?.name === "AbortError")) throw error;
+      } finally {
+        signal.removeEventListener("abort", stop);
+      }
+    }
+    message.content = message.content.trim().replace(/^(?:RESPUESTA|Respuesta)\s*:\s*/, "");
+    if (trimmed || (plan?.hardLimit && countWords(message.content) > plan.hardLimit)) {
+      message.content = trimToWords(message.content, plan.limit || plan.hardLimit);
+      trimmed = true;
+    }
+    if (!message.content) throw new Error("El modelo no devolvió ninguna respuesta. Inténtalo de nuevo.");
+    const outWords = countWords(message.content);
+    if (action === "summary" && inputWords) message.meta = `${inputWords} → ${outWords} palabras`;
+    else if (trimmed) message.meta = "Acortada para respetar la longitud";
+  } catch (error) {
+    if (error?.name === "ConsentRequired") {
+      assistantThread[index] = { role: "assistant", kind: "consent", vision: error.vision, request: message.request, imageId: message.id };
+      return;
+    }
+    if (error?.name === "AbortError") {
+      if (message.content.trim()) {
+        message.content = message.content.trim();
+        message.meta = "Detenida";
+      } else assistantThread.splice(index - 1, 2);
+      return;
+    }
+    console.error(error);
+    assistantThread[index] = { role: "assistant", action, error: friendlyAiError(error, context.kind === "image"), request: message.request, id: message.id };
+  } finally {
+    message.pending = false;
+    delete message.phase;
+    assistantBusy = false;
+    assistantAbort = null;
+    aiStatus("");
+    saveAssistantThread();
+    renderAssistant();
+  }
+}
+function retryAssistant(index) {
+  const message = assistantThread[index];
+  if (!message?.request || assistantBusy) return;
+  const request = { ...message.request, image: assistantImages.get(message.id || message.imageId) };
+  // Se sustituye el par pregunta/respuesta en vez de duplicarlo.
+  const start = assistantThread[index - 1]?.role === "user" ? index - 1 : index;
+  assistantThread.splice(start, index - start + 1);
+  sendAssistant({ request });
+}
+async function copyAssistantMessage(index) {
+  const content = assistantThread[index]?.content;
+  if (!content) return;
+  try {
+    await navigator.clipboard.writeText(content);
+    toast("Respuesta copiada");
+  } catch {
+    toast("No se pudo copiar");
+  }
+}
+function saveAssistantToNotes(index) {
+  const message = assistantThread[index];
+  if (!message?.content || !currentBook) return;
+  const page = message.request?.context?.page || message.sources?.[0] || currentPage;
+  const label = ASSISTANT_ACTIONS[message.action]?.done || "Respuesta de la IA";
+  const quote = message.request?.context?.kind === "selection" ? `> ${message.request.context.text.slice(0, 300)}\n\n` : "";
+  const mark = newNoteMark(page, { note: `✦ ${label}\n\n${quote}${message.content}`.slice(0, 8000) });
+  commitAnnotations([...annotations(), mark]);
+  renderAnnotations();
+  renderAnnotationList();
+  toast(`Guardado en las notas de la página ${page}`);
+}
+function createCardsFromAssistant(index) {
+  const message = assistantThread[index];
+  if (!message?.content) return;
+  const page = message.request?.context?.page || currentPage;
+  const cards = message.content
+    .split(/\n+/)
+    .map((line) => line.match(/P\s*:\s*(.+?)\s*\|\|\s*R\s*:\s*(.+)/i))
+    .filter(Boolean)
+    .map((match) => newCard(match[1], match[2], { page, sourceKey: `ai:${page}:${hashText(match[1])}`, origin: "IA" }));
+  const known = new Set(studyCards().map((card) => card.sourceKey));
+  const fresh = cards.filter((card) => !known.has(card.sourceKey));
+  if (!fresh.length) return toast(cards.length ? "Estas tarjetas ya están en tu mazo" : "No se encontraron preguntas con el formato esperado");
+  saveStudyCards([...studyCards(), ...fresh]);
+  toast(`${fresh.length} tarjeta${fresh.length > 1 ? "s" : ""} añadida${fresh.length > 1 ? "s" : ""} al estudio`);
+}
+function clearAssistantThread() {
+  if (assistantBusy) assistantAbort?.abort();
+  assistantThread = [];
+  assistantImages.clear();
+  const storageKey = assistantStorageKey();
+  if (storageKey) localStorage.removeItem(storageKey);
+  renderAssistant();
+  $("assistantInput").focus();
+}
+function submitAssistantInput() {
+  if (assistantBusy) {
+    assistantAbort?.abort();
+    return;
+  }
+  const input = $("assistantInput");
+  const question = input.value.trim();
+  if (!question) return;
+  input.value = "";
+  autosizeAssistantInput();
+  sendAssistant({ action: "ask", question });
+}
+function autosizeAssistantInput() {
+  const input = $("assistantInput");
+  input.style.height = "auto";
+  input.style.height = `${Math.min(160, input.scrollHeight)}px`;
+}
+function bindAssistant() {
+  const panel = $("assistantPanel");
+  setIcon("assistantNew", "trash");
+  setIcon("assistantMinimize", "minus");
+  setIcon("assistantClose", "close");
+  $("assistantSpark").innerHTML = iconSvg("sparkles");
+  $("assistantClose").onclick = closeAssistant;
+  $("assistantMinimize").onclick = () => setAssistantMinimized(!panel.classList.contains("is-minimized"));
+  $("assistantNew").onclick = clearAssistantThread;
+  $("assistantComposer").addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitAssistantInput();
+  });
+  $("assistantInput").addEventListener("input", autosizeAssistantInput);
+  $("assistantInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!assistantBusy) submitAssistantInput();
+    }
+  });
+  panel.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    if (assistantBusy) assistantAbort?.abort();
+    else closeAssistant();
+  });
+  panel.addEventListener("click", (event) => {
+    const target = event.target.closest("button");
+    if (!target) return;
+    const data = target.dataset;
+    if (data.page) return jumpToPage(Number(data.page));
+    if (data.assistantScope) {
+      if (data.assistantScope === "image") return;
+      setAssistantContext({ kind: data.assistantScope });
+      return $("assistantInput").focus({ preventScroll: true });
+    }
+    if (data.assistantClear !== undefined) return setAssistantContext({ kind: "page" });
+    if (data.assistantCrop !== undefined) {
+      closeAssistant();
+      return openCapture();
+    }
+    if (data.assistantAction) return sendAssistant({ action: data.assistantAction });
+    if (data.assistantCopy) return copyAssistantMessage(Number(data.assistantCopy));
+    if (data.assistantNote) return saveAssistantToNotes(Number(data.assistantNote));
+    if (data.assistantCards) return createCardsFromAssistant(Number(data.assistantCards));
+    if (data.assistantRetry) return retryAssistant(Number(data.assistantRetry));
+    if (data.assistantConsent) {
+      const message = assistantThread[Number(data.assistantConsent)];
+      localStorage.setItem(message.vision ? "paper.ai-vision-consent" : "paper.ai-webllm-consent", "1");
+      return retryAssistant(Number(data.assistantConsent));
+    }
+    if (data.assistantDismiss) {
+      const index = Number(data.assistantDismiss);
+      assistantThread.splice(assistantThread[index - 1]?.role === "user" ? index - 1 : index, 2);
+      saveAssistantThread();
+      renderAssistant();
+    }
+  });
+  // Arrastrar desde la cabecera, como la ventana de notas.
+  let drag = null;
+  const handle = $("assistantDragHandle");
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button") || window.innerWidth <= 700) return;
+    const box = panel.getBoundingClientRect();
+    drag = { id: event.pointerId, dx: event.clientX - box.left, dy: event.clientY - box.top };
+    handle.setPointerCapture(event.pointerId);
+    panel.classList.add("is-dragging");
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    panel.style.left = `${Math.max(8, Math.min(window.innerWidth - 120, event.clientX - drag.dx))}px`;
+    panel.style.top = `${Math.max(8, Math.min(window.innerHeight - 52, event.clientY - drag.dy))}px`;
+  });
+  const endDrag = (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    drag = null;
+    panel.classList.remove("is-dragging");
+    saveAssistantGeometry();
+  };
+  handle.addEventListener("pointerup", endDrag);
+  handle.addEventListener("pointercancel", endDrag);
+  handle.addEventListener("dblclick", (event) => {
+    if (!event.target.closest("button")) setAssistantMinimized(!panel.classList.contains("is-minimized"));
+  });
+  let resizeTimer = 0;
+  new ResizeObserver(() => {
+    if (panel.hidden || panel.classList.contains("is-minimized")) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(saveAssistantGeometry, 250);
+  }).observe(panel);
+  window.addEventListener("resize", () => {
+    if (!panel.hidden) applyAssistantGeometry();
+  }, { passive: true });
+  // Menú de selección: las acciones de IA se ejecutan con la selección exacta.
+  const actions = $("annotationActions");
+  actions.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button")) event.preventDefault();
+  });
+  actions.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-selection-ai]");
+    if (!button) return;
+    const selection = captureReaderSelection();
+    if (!selection) return toast("Selecciona un fragmento primero");
+    hideAnnotationActions();
+    const context = { kind: "selection", ...selection };
+    if (button.dataset.selectionAi === "ask") openAssistant({ context });
+    else runAssistantAction(button.dataset.selectionAi, context);
+  });
 }
 const AI_STOP_WORDS = new Set("a al algo ante bajo con contra cual cuando de del desde donde el ella ellas ellos en entre era es esa ese eso esta este esto fue ha hay la las lo los más me mi muy no o para pero por porque que se si sin sobre su sus te tu un una y ya the of to in is it for on with as at by from or an be this that".split(" "));
 function aiTokens(text) {
@@ -5150,48 +5984,6 @@ function chunkAiText(text, page, size = 1450, overlap = 180) {
     if (end >= normalized.length) break;
   }
   return chunks;
-}
-function aiConversationKey() {
-  return currentBook ? key(currentBook.id, "ai-conversation-v2") : "";
-}
-function saveAiConversation() {
-  const storageKey = aiConversationKey();
-  if (!storageKey) return;
-  try {
-    setJSON(storageKey, aiMessages.slice(-30));
-  } catch {
-    toast("No se pudo guardar la conversación local");
-  }
-}
-function renderAiConversation() {
-  const conversation = $("aiConversation");
-  if (!conversation) return;
-  conversation.hidden = !aiMessages.length;
-  conversation.innerHTML = aiMessages.map((message) => {
-    const sources = message.sources?.length
-      ? `<small>${message.sources.map((page) => `p. ${page}`).join(" · ")}</small>`
-      : "";
-    return `<article class="ai-message ${message.role}"><header><strong>${message.role === "user" ? "Tú" : "Paper AI"}</strong>${sources}</header><div>${message.role === "assistant" ? formatAiAnswer(message.content) : `<p>${escapeHtml(message.content)}</p>`}</div></article>`;
-  }).join("");
-  conversation.scrollTop = conversation.scrollHeight;
-}
-function resetAiDocumentState() {
-  documentContextIndex = null;
-  documentContextIndexId = currentBook?.id || "";
-  documentIndexLoading = null;
-  aiSourcePages = [];
-  aiMessages = currentBook ? getJSON(aiConversationKey(), []).filter((message) => message?.role && message?.content).slice(-30) : [];
-  renderAiConversation();
-}
-function renderAiSources(pages = []) {
-  aiSourcePages = [...new Set(pages)].sort((a, b) => a - b);
-  const sources = $("aiSources");
-  if (!sources) return;
-  sources.hidden = !aiSourcePages.length;
-  sources.innerHTML = aiSourcePages.map((page) => `<button type="button" data-ai-source-page="${page}">p. ${page}</button>`).join("");
-  sources.querySelectorAll("[data-ai-source-page]").forEach((button) => {
-    button.onclick = () => jumpToPage(Number(button.dataset.aiSourcePage));
-  });
 }
 async function ensureDocumentContextIndex(signal) {
   if (!currentBook) return [];
@@ -5235,25 +6027,6 @@ function rankAiChunks(chunks, query) {
     return { ...chunk, score };
   }).sort((a, b) => b.score - a.score || Math.abs(a.page - currentPage) - Math.abs(b.page - currentPage));
 }
-async function buildAiContext(question, signal) {
-  if (aiScope === "selection" && aiSelection) {
-    const page = await pageContext();
-    renderAiSources([currentPage]);
-    return `SELECCIÓN (p. ${currentPage}):\n${aiSelection}\n\nCONTEXTO DE PÁGINA (p. ${currentPage}):\n${page}`.slice(0, 7500);
-  }
-  if (aiScope === "page") {
-    const page = await pageContext();
-    renderAiSources([currentPage]);
-    return `PÁGINA ${currentPage}:\n${page}`.slice(0, 7500);
-  }
-  const chunks = await ensureDocumentContextIndex(signal);
-  const ranked = rankAiChunks(chunks, `${question} ${aiSelection}`);
-  const selected = ranked.filter((chunk) => chunk.score > 0).slice(0, 6);
-  const fallback = selected.length ? selected : ranked.slice(0, 4);
-  const pages = fallback.map((chunk) => chunk.page);
-  renderAiSources(pages);
-  return fallback.map((chunk) => `[PÁGINA ${chunk.page}]\n${chunk.content}`).join("\n\n").slice(0, 9000);
-}
 async function inspectAiCapability() {
   if (globalThis.LanguageModel?.availability) {
     try {
@@ -5296,92 +6069,6 @@ async function inspectAiCapability() {
       reason: "No se pudo inicializar WebGPU en este dispositivo.",
     };
   }
-}
-async function openAiAssistantLegacy(fromCapture = false) {
-  const text = window.getSelection()?.toString().trim();
-  if (!fromCapture && !text)
-    return toast("Selecciona un fragmento para consultarlo");
-  if (!fromCapture) aiImage = "";
-  aiSelection = (text || "").slice(0, 5000);
-  aiScope = "selection";
-  $("aiScope").value = aiScope;
-  aiAnswerRaw = "";
-  renderAiAnswer();
-  $("aiSelectionLabel").textContent = fromCapture
-    ? "Recorte seleccionado"
-    : "Fragmento seleccionado";
-  $("aiQuote").textContent = fromCapture
-    ? "Captura de una zona del PDF lista para analizar."
-    : aiSelection;
-  $("aiImagePreview").hidden = !fromCapture;
-  $("aiImagePreview").src = fromCapture ? aiImage : "";
-  $("aiQuestion").value = fromCapture
-    ? "Describe la información visible en esta captura y señala los elementos importantes."
-    : "Explícame este fragmento de forma clara y señala las ideas principales.";
-  document
-    .querySelectorAll("[data-ai-prompt]")
-    .forEach((button) =>
-      button.classList.toggle(
-        "active",
-        button.textContent.includes("Explicar"),
-      ),
-    );
-  $("aiPanel").hidden = false;
-  hideAnnotationActions();
-  if (fromCapture) {
-    aiStatus(
-      "Captura lista. El modelo local actual es textual: podrás consultarla cuando actives un modelo con visión.",
-    );
-    $("aiQuestion").focus();
-    return;
-  }
-  aiStatus("Comprobando compatibilidad de IA local…");
-  const capability = await inspectAiCapability();
-  aiStatus(
-    capability.kind === "builtin"
-      ? capability.availability === "available"
-        ? "Modelo local del navegador listo."
-        : "El navegador descargará su modelo local al consultar."
-      : capability.kind === "webllm"
-        ? "IA local disponible con WebGPU. La primera descarga ocupa aproximadamente 900 MB."
-        : capability.reason,
-  );
-  $("aiQuestion").focus();
-}
-function closeAiAssistant() {
-  aiAbortController?.abort();
-  $("aiPanel").hidden = true;
-  setAssistantButton(false);
-}
-async function openAssistantForDocument() {
-  if (!currentBook) return toast("Abre un documento primero");
-  $("aiCard")._expandAi?.();
-  aiScope = "document";
-  aiSelection = "";
-  aiImage = "";
-  aiImagePage = 0;
-  $("aiScope").value = "document";
-  $("aiSelectionLabel").textContent = "Documento";
-  $("aiQuote").textContent = "Paper buscará localmente las páginas más relevantes para cada pregunta.";
-  $("aiImagePreview").hidden = true;
-  renderAiSources([]);
-  renderAiConversation();
-  $("aiQuestion").placeholder = "Pregunta sobre este documento…";
-  $("aiPanel").hidden = false;
-  setAssistantButton(true);
-  aiStatus("Comprobando la IA local de este dispositivo…");
-  $("aiQuestion").focus();
-  const capability = await inspectAiCapability();
-  if ($("aiPanel").hidden) return;
-  aiStatus(
-    capability.kind === "builtin"
-      ? capability.availability === "available"
-        ? "IA integrada lista. Todo se procesa en este dispositivo."
-        : "IA integrada compatible. El navegador descargará su modelo al consultar."
-      : capability.kind === "webllm"
-        ? "IA local compatible mediante WebGPU · primera descarga aproximada: 900 MB."
-        : capability.reason,
-  );
 }
 async function inspectVisionCapability() {
   if (globalThis.LanguageModel?.availability) {
@@ -5454,16 +6141,6 @@ function friendlyAiError(error, vision = false) {
   return message
     ? `No se pudo iniciar la IA${vision ? " visual" : ""}: ${message}`
     : `No se pudo iniciar la IA${vision ? " visual" : ""}. Comprueba WebGPU, memoria y espacio disponible.`;
-}
-async function copyAiAnswer() {
-  const answer = aiAnswerRaw.trim() || [...aiMessages].reverse().find((message) => message.role === "assistant")?.content || "";
-  if (!answer) return;
-  try {
-    await navigator.clipboard.writeText(answer);
-    toast("Respuesta copiada");
-  } catch {
-    toast("No se pudo copiar la respuesta");
-  }
 }
 async function getBuiltInAi() {
   if (builtInAiSession) return builtInAiSession;
@@ -5589,140 +6266,6 @@ async function getVisionAi() {
     throw e;
   } finally {
     visionAiLoading = null;
-  }
-}
-async function openAiAssistant(fromCapture = false) {
-  const text = window.getSelection()?.toString().trim();
-  if (!fromCapture && !text)
-    return toast("Selecciona un fragmento para consultarlo");
-  if (!fromCapture) {
-    aiImage = "";
-    aiImagePage = 0;
-  }
-  aiSelection = fromCapture ? "" : (text || "").slice(0, 5000);
-  aiScope = "selection";
-  $("aiScope").value = aiScope;
-  $("aiSelectionLabel").textContent = fromCapture
-    ? "Recorte seleccionado"
-    : "Fragmento seleccionado";
-  $("aiQuote").textContent = fromCapture
-    ? "Captura de una zona del PDF lista para analizar."
-    : aiSelection;
-  $("aiImagePreview").hidden = !fromCapture;
-  $("aiImagePreview").src = fromCapture ? aiImage : "";
-  renderAiSources([fromCapture ? aiImagePage || currentPage : currentPage]);
-  renderAiConversation();
-  $("aiQuestion").value = fromCapture
-    ? "Describe la información visible en esta captura y señala los elementos importantes."
-    : "Explícame este fragmento de forma clara y señala las ideas principales.";
-  document
-    .querySelectorAll("[data-ai-prompt]")
-    .forEach((button) =>
-      button.classList.toggle(
-        "active",
-        button.textContent.includes("Explicar"),
-      ),
-    );
-  $("aiPanel").hidden = false;
-  hideAnnotationActions();
-  if (fromCapture) {
-    aiStatus("Comprobando si este dispositivo puede ejecutar visión local…");
-    const vision = await inspectVisionCapability();
-    aiStatus(
-      vision.ok
-        ? vision.kind === "builtin"
-          ? vision.availability === "available"
-            ? "Visión integrada lista. La captura se procesa localmente en el navegador."
-            : "El navegador preparará su modelo visual integrado al consultar."
-          : "Visión WebGPU disponible. La primera consulta descargará aproximadamente 4 GB y no enviará la captura a ningún servidor."
-        : vision.reason,
-    );
-    $("aiQuestion").focus();
-    return;
-  }
-  aiStatus("Comprobando compatibilidad de IA local…");
-  const capability = await inspectAiCapability();
-  aiStatus(
-    capability.kind === "builtin"
-      ? capability.availability === "available"
-        ? "Modelo local del navegador listo."
-        : "El navegador descargará su modelo local al consultar."
-      : capability.kind === "webllm"
-        ? "IA local disponible con WebGPU. La primera descarga ocupa aproximadamente 900 MB."
-        : capability.reason,
-  );
-  $("aiQuestion").focus();
-}
-async function pageContext() {
-  if (currentBook?.kind === "markdown") return markdownContent.slice(0, 7500);
-  if (!pdfDoc) return "";
-  const page = await getCachedPage(currentPage);
-  const content = await getCachedTextContent(page);
-  return content.items
-    .map((item) => item.str)
-    .join(" ")
-    .slice(0, 6000);
-}
-async function askLocalAiLegacy() {
-  if (aiImage && !aiSelection) {
-    aiStatus(
-      "Esta captura necesita un modelo local con visión. El modelo instalado actualmente procesa texto, no imágenes.",
-    );
-    return;
-  }
-  if (!aiSelection) return;
-  const button = $("askAiSubmit"),
-    question = $("aiQuestion").value.trim() || "Explica este texto.";
-  button.disabled = true;
-  $("cancelAi").hidden = false;
-  aiAnswerRaw = "";
-  renderAiAnswer();
-  aiAbortController = new AbortController();
-  try {
-    const capability = await inspectAiCapability();
-    if (capability.kind === "none") throw new Error(capability.reason);
-    const context = await pageContext();
-    const prompt = `Actúa como un asistente de lectura riguroso y responde siempre en español. Usa solo el texto proporcionado; si falta información, indícalo.\n\nFragmento seleccionado:\n---\n${aiSelection}\n---\n\nContexto de la página:\n---\n${context}\n---\n\nPregunta: ${question}`;
-    if (capability.kind === "builtin") {
-      const session = await getBuiltInAi();
-      aiStatus("Pensando en tu dispositivo…");
-      await streamBuiltInAnswer(session, prompt, aiAbortController.signal);
-    } else {
-      const engine = await getWebLlmAi();
-      aiStatus("Pensando en tu dispositivo…");
-      const stream = await engine.chat.completions.create({
-        messages: [
-          {
-            role: "system",
-            content:
-              "Eres un asistente de lectura riguroso. Responde siempre en español y usa únicamente el texto proporcionado.",
-          },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.3,
-        max_tokens: 450,
-        stream: true,
-      });
-      for await (const chunk of stream) {
-        if (aiAbortController.signal.aborted) break;
-        appendAiChunk(chunk.choices[0]?.delta?.content || "");
-      }
-    }
-    aiStatus(
-      "Respuesta generada localmente. El documento no ha salido de tu navegador.",
-    );
-    $("copyAiAnswer").hidden = !aiAnswerRaw.trim();
-  } catch (e) {
-    if (e.name === "AbortError") {
-      aiStatus("Consulta detenida.");
-      return;
-    }
-    console.error(e);
-    aiStatus(`IA no disponible: ${e.message || "error de inicialización"}`);
-  } finally {
-    button.disabled = false;
-    $("cancelAi").hidden = true;
-    aiAbortController = null;
   }
 }
 
@@ -5921,33 +6464,6 @@ function navigateSearch(direction) {
   openSearchMatch((searchIndex + direction + searchMatches.length) % searchMatches.length);
 }
 
-async function streamWebLlmVision(question) {
-  const engine = await getVisionAi();
-  aiStatus("Analizando la captura con WebGPU…");
-  const stream = await engine.chat.completions.create({
-    messages: [
-      {
-        role: "system",
-        content:
-          "Eres un asistente de lectura visual riguroso. Responde siempre en español.",
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: question },
-          { type: "image_url", image_url: { url: aiImage } },
-        ],
-      },
-    ],
-    temperature: 0.25,
-    max_tokens: 500,
-    stream: true,
-  });
-  for await (const chunk of stream) {
-    if (aiAbortController.signal.aborted) break;
-    appendAiChunk(chunk.choices[0]?.delta?.content || "");
-  }
-}
 
 function showEmpty() {
   if (ttsActive) stopReadAloud();
@@ -5993,121 +6509,6 @@ function showEmpty() {
   renderBookmarks();
 }
 
-async function askLocalAi() {
-  const isVision = Boolean(aiImage && aiScope === "selection"),
-    button = $("askAiSubmit"),
-    question = $("aiQuestion").value.trim() || (isVision ? "Describe esta captura." : "Explica este contenido.");
-  if (!isVision && aiScope === "selection" && !aiSelection)
-    return toast("Selecciona texto, añade un recorte o cambia el ámbito de la consulta");
-  const messagesBeforeRequest = structuredClone(aiMessages);
-  button.disabled = true;
-  $("cancelAi").hidden = false;
-  aiAnswerRaw = "";
-  aiMessages.push({ role: "user", content: question, createdAt: Date.now() });
-  renderAiConversation();
-  renderAiAnswer();
-  aiAbortController = new AbortController();
-  try {
-    if (isVision) {
-      const vision = await inspectVisionCapability();
-      if (!vision.ok) throw new Error(vision.reason);
-      renderAiSources([aiImagePage || currentPage]);
-      const history = messagesBeforeRequest.slice(-6).map((message) => `${message.role === "user" ? "Usuario" : "Asistente"}: ${message.content}`).join("\n");
-      const visionQuestion = `${history ? `Conversación previa:\n${history}\n\n` : ""}${question}`;
-      if (vision.kind === "builtin") {
-        try {
-          const session = await getBuiltInVisionAi();
-          const imageBlob = await fetch(aiImage).then((response) =>
-            response.blob(),
-          );
-          aiStatus("Analizando la captura con la IA integrada…");
-          const prompt = [
-            {
-              role: "user",
-              content: [
-                { type: "text", value: visionQuestion },
-                { type: "image", value: imageBlob },
-              ],
-            },
-          ];
-          await streamBuiltInAnswer(session, prompt, aiAbortController.signal);
-        } catch (builtInError) {
-          builtInVisionSession = null;
-          console.warn(
-            "La visión integrada falló; se intenta WebGPU",
-            builtInError,
-          );
-          aiStatus("La visión integrada no respondió. Probando WebGPU…");
-          await streamWebLlmVision(visionQuestion);
-        }
-      } else {
-        await streamWebLlmVision(visionQuestion);
-      }
-    } else {
-      const capability = await inspectAiCapability();
-      if (capability.kind === "none") throw new Error(capability.reason);
-      const context = await buildAiContext(question, aiAbortController.signal);
-      const history = messagesBeforeRequest.slice(-6).map((message) => `${message.role === "user" ? "Usuario" : "Asistente"}: ${message.content}`).join("\n\n");
-      const prompt = `Actúa como un asistente documental riguroso. Responde siempre en español y usa exclusivamente el contexto incluido. Si la respuesta no está en él, dilo claramente. Cuando el contexto indique páginas, cita las afirmaciones como [p. N].\n\nCONTEXTO LOCAL:\n---\n${context}\n---\n${history ? `\nCONVERSACIÓN PREVIA:\n${history}\n` : ""}\nPREGUNTA: ${question}`;
-      if (capability.kind === "builtin") {
-        const session = await getBuiltInAi();
-        aiStatus("Pensando en tu dispositivo…");
-        await streamBuiltInAnswer(session, prompt, aiAbortController.signal);
-      } else {
-        const engine = await getWebLlmAi();
-        aiStatus("Pensando en tu dispositivo…");
-        const stream = await engine.chat.completions.create({
-          messages: [
-            {
-              role: "system",
-              content:
-                "Eres un asistente documental riguroso. Responde en español, no inventes información y cita las páginas del contexto como [p. N].",
-            },
-            ...messagesBeforeRequest.slice(-6).map((message) => ({ role: message.role, content: message.content })),
-            { role: "user", content: prompt },
-          ],
-          temperature: 0.3,
-          max_tokens: 700,
-          stream: true,
-        });
-        for await (const chunk of stream) {
-          if (aiAbortController.signal.aborted) break;
-          appendAiChunk(chunk.choices[0]?.delta?.content || "");
-        }
-      }
-    }
-    const answer = aiAnswerRaw.trim();
-    if (!answer) throw new Error("El modelo no devolvió una respuesta.");
-    aiMessages.push({ role: "assistant", content: answer, sources: [...aiSourcePages], createdAt: Date.now() });
-    saveAiConversation();
-    renderAiConversation();
-    aiAnswerRaw = "";
-    renderAiAnswer();
-    aiStatus(
-      "Respuesta generada localmente. El documento no ha salido de tu navegador.",
-    );
-    $("copyAiAnswer").hidden = false;
-  } catch (e) {
-    if (e.name === "AbortError") {
-      aiMessages = messagesBeforeRequest;
-      aiAnswerRaw = "";
-      renderAiConversation();
-      renderAiAnswer();
-      aiStatus("Consulta detenida.");
-      return;
-    }
-    console.error(e);
-    aiMessages = messagesBeforeRequest;
-    aiAnswerRaw = "";
-    renderAiConversation();
-    renderAiAnswer();
-    aiStatus(friendlyAiError(e, isVision));
-  } finally {
-    button.disabled = false;
-    $("cancelAi").hidden = true;
-    aiAbortController = null;
-  }
-}
 // Por debajo de 1180px la barra lateral es un cajón flotante (ver CSS).
 function isDrawerLayout() {
   return window.innerWidth < 1180;
@@ -6626,206 +7027,6 @@ function buildThemeChoices() {
     button.classList.toggle("active", button.dataset.themeChoice === document.documentElement.dataset.theme);
   });
 }
-function configureAiWindow() {
-  const panel = $("aiPanel");
-  const card = panel.querySelector(".ai-card");
-  const header = card.querySelector("header");
-  if (localStorage.getItem("paper.assistant-layout") !== "2") {
-    localStorage.removeItem("paper.ai-window");
-    localStorage.setItem("paper.assistant-layout", "2");
-  }
-  card.id = "aiCard";
-  header.id = "aiDragHandle";
-  $("aiTitle").textContent = "Paper AI";
-  const spark = card.querySelector(".ai-spark");
-  spark.setAttribute("role", "button");
-  spark.setAttribute("tabindex", "0");
-  spark.title = "Contraer Assistant";
-  const savedWindow = JSON.parse(localStorage.getItem("paper.ai-window") || "null");
-  const savedIsland = JSON.parse(localStorage.getItem("paper.ai-island") || "null");
-  const expandAi = () => {
-    card.classList.remove("ai-minimized");
-    const saved = JSON.parse(localStorage.getItem("paper.ai-window") || "null") || savedWindow;
-    card.style.right = "auto";
-    card.style.bottom = "auto";
-    if (saved && window.innerWidth > 700) {
-      card.classList.add("ai-positioned");
-      card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - 140, saved.left))}px`, "important");
-      card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 90, saved.top))}px`, "important");
-      card.style.setProperty("right", "auto", "important");
-      card.style.setProperty("bottom", "auto", "important");
-      if (saved.width) card.style.setProperty("width", `${Math.min(saved.width, window.innerWidth - 16)}px`, "important");
-      if (saved.height) card.style.setProperty("height", `${Math.min(saved.height, window.innerHeight - 16)}px`, "important");
-    } else if (window.innerWidth <= 700) {
-      card.classList.remove("ai-positioned");
-      ["left", "top", "right", "bottom", "width", "height"].forEach((property) => card.style.removeProperty(property));
-    }
-  };
-  const minimizeAi = () => {
-    if (!card.classList.contains("ai-minimized")) {
-      const box = card.getBoundingClientRect();
-      localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
-    }
-    card.classList.add("ai-minimized");
-    card.style.width = "58px";
-    card.style.height = "58px";
-    card.style.right = "auto";
-    card.style.bottom = "auto";
-    const position = JSON.parse(localStorage.getItem("paper.ai-island") || "null") || savedIsland;
-    card.style.setProperty("left", `${position?.left ?? Math.max(12, window.innerWidth - 82)}px`, "important");
-    card.style.setProperty("top", `${position?.top ?? Math.max(72, window.innerHeight - 152)}px`, "important");
-    $("captureBtn").classList.add("assistant-on");
-  };
-  const toggleAiIsland = (event) => {
-    event?.preventDefault();
-    event?.stopPropagation();
-    card.classList.contains("ai-minimized") ? expandAi() : minimizeAi();
-  };
-  card._expandAi = expandAi;
-  spark.addEventListener("pointerdown", (event) => event.stopPropagation());
-  spark.addEventListener("click", toggleAiIsland);
-  spark.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") toggleAiIsland(event);
-  });
-  if (!$("newAiChat")) {
-    const controls = document.createElement("div");
-    controls.className = "tool-row ai-head-controls";
-    controls.innerHTML = '<select class="field" id="aiScope" aria-label="Ámbito de la consulta"><option value="selection">Selección</option><option value="page">Página actual</option><option value="document">Documento completo</option></select><button class="btn" id="newAiChat" title="Nueva conversación">＋ <span>Nueva</span></button>';
-    header.insertBefore(controls, $("closeAiPanel"));
-  }
-  if (!$("minimizeAi")) {
-    const minimize = document.createElement("button");
-    minimize.className = "btn icon";
-    minimize.id = "minimizeAi";
-    minimize.title = "Contraer Assistant";
-    minimize.textContent = "−";
-    $("closeAiPanel").before(minimize);
-    minimize.onclick = minimizeAi;
-  }
-  $("aiScope").onchange = (event) => {
-    aiScope = event.target.value;
-    if (aiScope === "document" || aiScope === "page") {
-      aiImage = "";
-      aiImagePage = 0;
-      aiSelection = "";
-      $("aiSelectionLabel").textContent = aiScope === "document" ? "Documento completo" : `Página ${currentPage}`;
-      $("aiQuote").textContent = aiScope === "document"
-        ? "Paper buscará localmente las páginas más relevantes para cada pregunta."
-        : "La respuesta usará únicamente el texto extraíble de la página actual.";
-      $("aiImagePreview").hidden = true;
-      renderAiSources(aiScope === "page" ? [currentPage] : []);
-      $("aiPanel").hidden = false;
-    } else {
-      $("aiSelectionLabel").textContent = aiSelection ? "Fragmento seleccionado" : "Selección";
-      $("aiQuote").textContent = aiSelection || "Selecciona texto o usa el recorte para añadir contexto.";
-      renderAiSources(aiSelection ? [currentPage] : []);
-    }
-  };
-  if (savedWindow && window.innerWidth > 700) {
-    card.classList.add("ai-positioned");
-    card.style.setProperty("left", `${Math.max(8, savedWindow.left)}px`, "important");
-    card.style.setProperty("top", `${Math.max(8, savedWindow.top)}px`, "important");
-    card.style.setProperty("right", "auto", "important");
-    card.style.setProperty("bottom", "auto", "important");
-    if (savedWindow.width) card.style.width = `${savedWindow.width}px`;
-    if (savedWindow.height) card.style.height = `${savedWindow.height}px`;
-  }
-  let drag = null;
-  header.addEventListener("pointerdown", (event) => {
-    if (card.classList.contains("ai-minimized") || event.target.closest("button,select,input")) return;
-    const box = card.getBoundingClientRect();
-    drag = { id: event.pointerId, x: event.clientX - box.left, y: event.clientY - box.top };
-    card.classList.add("ai-positioned");
-    card.style.setProperty("width", `${box.width}px`, "important");
-    card.style.setProperty("height", `${box.height}px`, "important");
-    card.style.setProperty("right", "auto", "important");
-    card.style.setProperty("bottom", "auto", "important");
-    header.setPointerCapture(event.pointerId);
-    event.preventDefault();
-  });
-  header.addEventListener("pointermove", (event) => {
-    if (!drag || drag.id !== event.pointerId) return;
-    const box = card.getBoundingClientRect();
-    card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - box.width - 8, event.clientX - drag.x))}px`, "important");
-    card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 64, event.clientY - drag.y))}px`, "important");
-  });
-  header.addEventListener("pointerup", (event) => {
-    if (!drag || drag.id !== event.pointerId) return;
-    drag = null;
-    const box = card.getBoundingClientRect();
-    localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
-  });
-  let islandDrag = null;
-  card.addEventListener("pointerdown", (event) => {
-    if (!card.classList.contains("ai-minimized")) return;
-    const box = card.getBoundingClientRect();
-    islandDrag = { id: event.pointerId, x: event.clientX - box.left, y: event.clientY - box.top, startX: event.clientX, startY: event.clientY, moved: false };
-    card.setPointerCapture(event.pointerId);
-    event.preventDefault();
-  });
-  card.addEventListener("pointermove", (event) => {
-    if (!islandDrag || islandDrag.id !== event.pointerId) return;
-    if (Math.hypot(event.clientX - islandDrag.startX, event.clientY - islandDrag.startY) > 4) islandDrag.moved = true;
-    card.style.setProperty("left", `${Math.max(8, Math.min(window.innerWidth - 66, event.clientX - islandDrag.x))}px`, "important");
-    card.style.setProperty("top", `${Math.max(8, Math.min(window.innerHeight - 66, event.clientY - islandDrag.y))}px`, "important");
-  });
-  card.addEventListener("pointerup", (event) => {
-    if (!islandDrag || islandDrag.id !== event.pointerId) return;
-    const moved = islandDrag.moved;
-    islandDrag = null;
-    const box = card.getBoundingClientRect();
-    localStorage.setItem("paper.ai-island", JSON.stringify({ left: box.left, top: box.top }));
-    if (!moved) expandAi();
-  });
-  new ResizeObserver(() => {
-    if (
-      panel.hidden ||
-      window.innerWidth <= 700 ||
-      card.classList.contains("ai-minimized")
-    )
-      return;
-    const box = card.getBoundingClientRect();
-    if (box.width < 420 || box.height < 300) return;
-    localStorage.setItem("paper.ai-window", JSON.stringify({ left: box.left, top: box.top, width: box.width, height: box.height }));
-  }).observe(card);
-  window.addEventListener("resize", () => {
-    if (card.classList.contains("ai-minimized")) return;
-    if (window.innerWidth <= 700) {
-      card.classList.remove("ai-positioned");
-      ["left", "top", "right", "bottom", "width", "height"].forEach((property) => card.style.removeProperty(property));
-    }
-  }, { passive: true });
-  $("newAiChat").onclick = () => {
-    aiAnswerRaw = "";
-    aiMessages = [];
-    aiSelection = "";
-    aiImage = "";
-    aiImagePage = 0;
-    const storageKey = aiConversationKey();
-    if (storageKey) localStorage.removeItem(storageKey);
-    $("aiQuote").textContent = "Selecciona texto, un recorte o consulta el documento.";
-    $("aiImagePreview").hidden = true;
-    $("aiQuestion").value = "";
-    renderAiSources([]);
-    renderAiConversation();
-    renderAiAnswer();
-    aiStatus("Nueva conversación local.");
-    $("aiQuestion").focus();
-  };
-  if (!$("aiCaptureBtn")) {
-    const capture = document.createElement("button");
-    capture.className = "btn icon";
-    capture.id = "aiCaptureBtn";
-    capture.title = "Recortar una zona del PDF";
-    capture.setAttribute("aria-label", capture.title);
-    capture.textContent = "⌗";
-    $("askAiSubmit").parentElement.prepend(capture);
-    capture.onclick = () => {
-      $("aiPanel").hidden = true;
-      openCapture();
-    };
-  }
-}
 function configureResponsiveUi() {
   if (!$("sidebarBackdrop")) {
     const backdrop = document.createElement("button");
@@ -6939,7 +7140,7 @@ $("annotationLayer").addEventListener("click", (event) => {
   }
   if (annotationSelectMode) openAnnotationEditor(id, event.target.getBoundingClientRect());
 });
-$("captureBtn").onclick = openAssistantForDocument;
+$("captureBtn").onclick = () => toggleAssistant();
 $("captureOverlay").addEventListener("pointerdown", (e) => {
   captureStart = { x: e.clientX, y: e.clientY };
   $("captureOverlay").setPointerCapture(e.pointerId);
@@ -6975,27 +7176,6 @@ $("notePanel").onclick = (e) => {
 };
 $("noteText").onkeydown = (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") saveNote();
-};
-$("askAiBtn").onclick = openAiAssistant;
-$("closeAiPanel").onclick = closeAiAssistant;
-$("askAiSubmit").onclick = askLocalAi;
-$("cancelAi").onclick = () => aiAbortController?.abort();
-$("copyAiAnswer").onclick = copyAiAnswer;
-document.querySelectorAll("[data-ai-prompt]").forEach(
-  (button) =>
-    (button.onclick = () => {
-      document
-        .querySelectorAll("[data-ai-prompt]")
-        .forEach((item) => item.classList.toggle("active", item === button));
-      $("aiQuestion").value = button.dataset.aiPrompt;
-      askLocalAi();
-    }),
-);
-$("aiPanel").onclick = (e) => {
-  if (e.target === $("aiPanel")) closeAiAssistant();
-};
-$("aiQuestion").onkeydown = (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") askLocalAi();
 };
 function setUiScale(value) {
   const n = Math.max(0.85, Math.min(1.25, value));
@@ -7146,6 +7326,10 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     toggleNotebook();
   }
+  if ((e.key === "i" || e.key === "I") && currentBook) {
+    e.preventDefault();
+    toggleAssistant();
+  }
   if (e.key === "Escape" && !$("zoomMenu").hidden) {
     closeZoomMenu();
     return;
@@ -7289,7 +7473,7 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
   buildThemeChoices();
   updateFocusButton();
   buildInkPalette();
-  configureAiWindow();
+  bindAssistant();
   configureFooterIsland();
   configureResponsiveUi();
   setTheme(localStorage.getItem("paper.theme") || "light");

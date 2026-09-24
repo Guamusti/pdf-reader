@@ -37,3 +37,11 @@ Incluye:
 - **IA en un paso**: resumir la página, explicar la selección o generar tarjetas desde la paleta.
 - **Página actual**: guardarla como PNG, copiar su imagen o su texto. El pie muestra el tiempo de lectura restante según tu ritmo.
 - **Atajos** (`?`) y `Ctrl/⌘ + Z` para deshacer anotaciones.
+
+### Novedades v5
+
+- **Modo lectura continuo** (`L`): todo el PDF se convierte en texto adaptable que se lee de corrido; la tipografía, el interlineado, el ancho y las columnas se aplican al documento entero y conservan tu posición.
+- **Asistente IA rediseñado** (`I`): ventana con conversación, ámbito visible (selección, página, todo el PDF o recorte) y acciones que se ejecutan con un toque: resumir, explicar, ideas clave, términos, preguntas y traducir.
+- **Selección en cualquier vista**: el menú de selección con Explicar, Resumir y Preguntar funciona en página, doble página, scroll continuo y modo lectura.
+- **Longitud controlada**: cada acción tiene un límite de palabras proporcional al texto; un resumen nunca es más largo que el original y la respuesta se recorta si el modelo se excede.
+- Citas `p. N` clicables, copiar, guardar la respuesta en las notas de la página, regenerar, convertir preguntas en tarjetas de estudio y detener la respuesta en cualquier momento. La descarga del modelo local solo se hace tras pedir permiso.
