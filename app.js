@@ -347,57 +347,248 @@ async function deleteBook(id) {
   await renderLibrary();
   toast("PDF eliminado de la biblioteca");
 }
+// ---- Biblioteca -------------------------------------------------------------
+let libraryFilter = localStorage.getItem("paper.library-filter") || "all";
+let libraryCoverUrls = [];
+let libraryCoverQueue = Promise.resolve();
+const libraryCoverPending = new Set();
+function libraryDisplayName(name) {
+  return String(name || "Documento").replace(/\.(pdf|md|markdown)$/i, "").replace(/[_]+/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+function relativeTime(timestamp) {
+  if (!timestamp) return "";
+  const minutes = Math.round((Date.now() - timestamp) / 60000);
+  if (minutes < 1) return "ahora mismo";
+  if (minutes < 60) return `hace ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `hace ${hours} h`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return "ayer";
+  if (days < 7) return `hace ${days} días`;
+  return new Date(timestamp).toLocaleDateString("es", { day: "numeric", month: "short", year: new Date(timestamp).getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+}
+function libraryStatus(book, stats) {
+  if (stats.progress >= 100) return "done";
+  if (stats.page <= 1 && Number(stats.totalMs || 0) < 5000) return "new";
+  return "reading";
+}
+// Portada real: la primera página del PDF, guardada con el documento.
+async function renderPdfCover(doc) {
+  const page = await doc.getPage(1);
+  const base = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: 360 / base.width });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: context, viewport }).promise;
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+}
+async function ensureBookCover(rec, doc = null) {
+  if (!rec || rec.kind === "markdown" || rec.cover || libraryCoverPending.has(rec.id)) return;
+  libraryCoverPending.add(rec.id);
+  libraryCoverQueue = libraryCoverQueue.then(async () => {
+    let own = null;
+    try {
+      const source = doc || (own = await pdfjsLib.getDocument({ data: new Uint8Array(await rec.blob.arrayBuffer()) }).promise);
+      const cover = await renderPdfCover(source);
+      if (!cover) return;
+      const fresh = (await dbGet(rec.id)) || rec;
+      fresh.cover = cover;
+      if (!fresh.pages) fresh.pages = source.numPages;
+      await dbPut(fresh);
+      if (currentBook?.id === rec.id) currentBook.cover = cover;
+      const url = URL.createObjectURL(cover);
+      libraryCoverUrls.push(url);
+      document.querySelectorAll(`[data-cover-for="${CSS.escape(encodeURIComponent(rec.id))}"]`).forEach((holder) => {
+        holder.classList.add("has-image");
+        holder.querySelector("img")?.remove();
+        holder.insertAdjacentHTML("afterbegin", `<img src="${url}" alt="" loading="lazy">`);
+      });
+    } catch (error) {
+      console.warn("No se pudo generar la portada", error);
+    } finally {
+      own?.destroy?.();
+      libraryCoverPending.delete(rec.id);
+    }
+  });
+  return libraryCoverQueue;
+}
+function libraryCoverHtml(book, url, large = false) {
+  const isMarkdown = book.kind === "markdown";
+  const name = libraryDisplayName(book.name);
+  return `<span class="lib-cover${isMarkdown ? " is-markdown" : ""}${url ? " has-image" : ""}${large ? " is-large" : ""}" data-cover-for="${encodeURIComponent(book.id)}">${
+    url ? `<img src="${url}" alt="" loading="lazy">` : ""
+  }<span class="lib-cover-fallback"><b>${escapeHtml(name.slice(0, 80))}</b></span><span class="lib-badge">${isMarkdown ? "MD" : "PDF"}</span></span>`;
+}
 async function renderLibrary() {
   flushReadingSession(false);
   const books = await dbAll();
+  libraryCoverUrls.forEach((url) => URL.revokeObjectURL(url));
+  libraryCoverUrls = [];
+  const coverUrl = (book) => {
+    if (!(book.cover instanceof Blob)) return "";
+    const url = URL.createObjectURL(book.cover);
+    libraryCoverUrls.push(url);
+    return url;
+  };
   const query = ($("librarySearch")?.value || "").trim().toLocaleLowerCase();
-  const type = $("libraryType")?.value || "all";
-  const sort = $("librarySort")?.value || "recent";
+  const sort = $("librarySort")?.value || localStorage.getItem("paper.library-sort") || "recent";
+  const view = localStorage.getItem("paper.library-view") || "grid";
   const estimates = new Map(books.map((book) => [book.id, readingEstimate(book)]));
+  const status = new Map(books.map((book) => [book.id, libraryStatus(book, estimates.get(book.id))]));
+  const counts = { all: books.length, reading: 0, new: 0, done: 0, markdown: 0 };
+  books.forEach((book) => {
+    counts[status.get(book.id)]++;
+    if (book.kind === "markdown") counts.markdown++;
+  });
+  if (libraryFilter !== "all" && !counts[libraryFilter]) libraryFilter = "all";
+  const matchesFilter = (book) => libraryFilter === "all" || (libraryFilter === "markdown" ? book.kind === "markdown" : status.get(book.id) === libraryFilter);
   const visibleBooks = books
-    .filter((book) => (!query || book.name.toLocaleLowerCase().includes(query)) && (type === "all" || (book.kind || "pdf") === type))
+    .filter((book) => (!query || book.name.toLocaleLowerCase().includes(query) || libraryDisplayName(book.name).toLocaleLowerCase().includes(query)) && matchesFilter(book))
     .sort((a, b) => {
-      if (sort === "name") return a.name.localeCompare(b.name, "es", { sensitivity: "base" });
+      if (sort === "name") return libraryDisplayName(a.name).localeCompare(libraryDisplayName(b.name), "es", { sensitivity: "base", numeric: true });
       if (sort === "progress") return estimates.get(b.id).progress - estimates.get(a.id).progress;
       if (sort === "remaining") return estimates.get(a.id).remainingMs - estimates.get(b.id).remainingMs;
-      return b.openedAt - a.openedAt;
+      if (sort === "added") return (b.addedAt || b.openedAt || 0) - (a.addedAt || a.openedAt || 0);
+      return (b.openedAt || 0) - (a.openedAt || 0);
     });
-  if ($("librarySummary")) {
-    const pdfs = books.filter((book) => book.kind !== "markdown").length;
-    const markdown = books.length - pdfs;
-    const totalMs = [...estimates.values()].reduce((sum, stats) => sum + Number(stats.totalMs || 0), 0);
-    const remainingMs = [...estimates.values()].reduce((sum, stats) => sum + Number(stats.remainingMs || 0), 0);
-    const pagesRead = books.reduce((sum, book) => sum + Math.min(book.pages || 1, estimates.get(book.id).page), 0);
-    const pagesTotal = books.reduce((sum, book) => sum + Number(book.pages || 1), 0);
-    $("librarySummary").innerHTML = `<div class="library-stat primary"><small>Biblioteca</small><strong>${books.length}</strong><span>${pdfs} PDF · ${markdown} MD</span></div><div class="library-stat"><small>Leído</small><strong>${formatReadingDuration(totalMs, true)}</strong><span>${pagesRead} de ${pagesTotal} páginas</span></div><div class="library-stat"><small>Tiempo restante</small><strong>${formatReadingDuration(remainingMs, true)}</strong><span>Estimación adaptativa</span></div>`;
+  const totalMs = [...estimates.values()].reduce((sum, stats) => sum + Number(stats.totalMs || 0), 0);
+  const remainingMs = books.reduce((sum, book) => sum + (status.get(book.id) === "done" ? 0 : Number(estimates.get(book.id).remainingMs || 0)), 0);
+  $("librarySummary").textContent = books.length
+    ? [`${books.length} documento${books.length === 1 ? "" : "s"}`, totalMs >= 60000 ? `${formatReadingDuration(totalMs, true)} leídos` : "", remainingMs >= 60000 ? `≈ ${formatReadingDuration(remainingMs, true)} por leer` : ""].filter(Boolean).join(" · ")
+    : "Tus PDFs, privados y siempre a mano";
+  // Continuar leyendo: el documento en curso más reciente.
+  const resume = !query && libraryFilter === "all" ? [...books].filter((book) => status.get(book.id) === "reading").sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0))[0] : null;
+  const continueBox = $("libraryContinue");
+  if (resume) {
+    const stats = estimates.get(resume.id);
+    continueBox.hidden = false;
+    continueBox.innerHTML = `<button class="lib-hero" data-id="${encodeURIComponent(resume.id)}">${libraryCoverHtml(resume, coverUrl(resume), true)}<span class="lib-hero-copy"><small>${currentBook?.id === resume.id ? "Abierto ahora" : `Continuar leyendo · ${relativeTime(resume.openedAt)}`}</small><strong title="${escapeHtml(resume.name)}">${escapeHtml(libraryDisplayName(resume.name))}</strong><span>Página ${stats.page} de ${resume.pages || "—"} · ${stats.progress}% · ≈ ${formatReadingDuration(stats.remainingMs, true)} para terminar</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i><em class="lib-hero-cta">${currentBook?.id === resume.id ? "Volver a la lectura" : "Continuar"} ${iconSvg("chevronRight")}</em></span></button>`;
+  } else {
+    continueBox.hidden = true;
+    continueBox.innerHTML = "";
   }
-  $("library").innerHTML = visibleBooks.length
+  const filters = [
+    ["all", "Todos"],
+    ["reading", "Leyendo"],
+    ["new", "Sin empezar"],
+    ["done", "Terminados"],
+    ...(counts.markdown ? [["markdown", "Markdown"]] : []),
+  ];
+  $("libraryFilters").innerHTML = books.length
+    ? filters.map(([id, label]) => `<button type="button" role="radio" data-library-filter="${id}" aria-checked="${libraryFilter === id}" ${id !== "all" && !counts[id] ? "disabled" : ""}>${label}<span>${counts[id]}</span></button>`).join("")
+    : "";
+  document.querySelectorAll("[data-library-view]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.libraryView === view)));
+  $("librarySort").value = sort;
+  $("libraryPanel").classList.toggle("is-empty", !books.length);
+  const grid = $("library");
+  grid.dataset.view = view;
+  grid.innerHTML = visibleBooks.length
     ? visibleBooks
-        .map((b) => {
-          const stats = estimates.get(b.id),
-            page = stats.page,
-            progress = stats.progress;
-          const type = b.kind === "markdown" ? "MD" : "PDF";
-          const readingMeta = stats.totalMs >= 5_000
-            ? `${formatReadingDuration(stats.averagePageMs, true)}/pág. · ${Math.round(stats.averageChars / 100) / 10}k car./pág.`
-            : `Estimación por longitud · ${Math.round(stats.averageChars / 100) / 10}k car./pág.`;
-          return `<article class="book-entry ${currentBook?.id === b.id ? "current" : ""}"><button class="book ${currentBook?.id === b.id ? "active" : ""}" data-id="${encodeURIComponent(b.id)}"><span class="book-cover ${type === "MD" ? "markdown" : ""}"><i>${type}</i><b></b><b></b><b></b></span><span class="book-copy"><span class="book-type">${type === "MD" ? "Documento Markdown" : "Documento PDF"}</span><strong>${escapeHtml(b.name)}</strong><small>${b.pages ? `Página ${page} de ${b.pages}` : new Date(b.openedAt).toLocaleDateString()}</small><span class="book-reading"><b>${progress >= 100 ? "Completado" : `≈ ${formatReadingDuration(stats.remainingMs, true)} restantes`}</b><small>${readingMeta}</small></span><i class="book-progress"><b style="width:${progress}%"></b></i><span class="book-continue">${currentBook?.id === b.id ? "Abierto ahora" : progress ? "Continuar leyendo →" : "Abrir documento →"}</span></span><em>${progress}%</em></button><button class="btn icon book-remove" data-remove-book="${encodeURIComponent(b.id)}" aria-label="Eliminar ${escapeHtml(b.name)}" title="Eliminar documento">×</button></article>`;
+        .map((book) => {
+          const stats = estimates.get(book.id);
+          const state = status.get(book.id);
+          const isCurrent = currentBook?.id === book.id;
+          const pageInfo = book.kind === "markdown" ? "Markdown" : book.pages ? `p. ${stats.page} de ${book.pages}` : "PDF";
+          const detail = state === "done" ? "Terminado" : state === "new" ? `Sin empezar · ≈ ${formatReadingDuration(stats.remainingMs, true)}` : `≈ ${formatReadingDuration(stats.remainingMs, true)} restantes`;
+          return `<article class="lib-book${isCurrent ? " is-current" : ""} is-${state}"><button class="lib-open" data-id="${encodeURIComponent(book.id)}" title="${escapeHtml(book.name)}">${libraryCoverHtml(book, coverUrl(book))}<span class="lib-info"><strong class="lib-name">${escapeHtml(libraryDisplayName(book.name))}</strong><span class="lib-meta">${pageInfo}${state === "reading" ? ` · ${stats.progress}%` : ""}</span><span class="lib-detail">${isCurrent ? "Abierto ahora" : detail}</span><span class="lib-when">${relativeTime(book.openedAt)}</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i></span></button><button class="lib-remove" data-remove-book="${encodeURIComponent(book.id)}" aria-label="Eliminar ${escapeHtml(book.name)}" title="Eliminar de la biblioteca">${iconSvg("trash")}</button></article>`;
         })
         .join("")
-    : `<div class="library-empty"><span>${query ? "⌕" : "＋"}</span><strong>${query ? "No hay coincidencias" : "Tu biblioteca está vacía"}</strong><p>${query ? "Prueba con otro nombre de archivo." : "Añade un PDF o Markdown para empezar a leer."}</p></div>`;
-  document
-    .querySelectorAll(".book[data-id]")
-    .forEach(
-      (el) =>
-        (el.onclick = () => openStored(decodeURIComponent(el.dataset.id))),
-    );
-  document
-    .querySelectorAll("[data-remove-book]")
-    .forEach(
-      (el) =>
-        (el.onclick = () =>
-          deleteBook(decodeURIComponent(el.dataset.removeBook))),
-    );
+    : books.length
+      ? `<div class="lib-empty"><strong>Nada por aquí</strong><p>${query ? `Ningún documento coincide con «${escapeHtml(query)}».` : "No hay documentos con este filtro."}</p></div>`
+      : `<div class="lib-empty is-first"><span>${iconSvg("library")}</span><strong>Tu biblioteca está vacía</strong><p>Añade un PDF o un Markdown para empezar. Se guardan solo en este dispositivo.</p><label class="lib-add" for="fileInput">${iconSvg("plus")}<span>Añadir documento</span></label></div>`;
+  books.filter((book) => book.kind !== "markdown" && !book.cover).forEach((book) => ensureBookCover(book));
+}
+function openLibrary() {
+  flushReadingSession(true);
+  $("libraryPanel").hidden = false;
+  document.body.classList.add("library-open");
+  renderLibrary();
+  requestAnimationFrame(() => (window.innerWidth > 700 ? $("librarySearch") : $("closeLibrary")).focus({ preventScroll: true }));
+}
+function closeLibrary() {
+  $("libraryPanel").hidden = true;
+  document.body.classList.remove("library-open");
+  markReadingActivity();
+}
+async function addFiles(files) {
+  const list = [...(files || [])].filter(Boolean);
+  if (!list.length) return;
+  for (const [index, file] of list.entries()) await addFile(file, index === list.length - 1);
+  if (list.length > 1) toast(`${list.length} documentos añadidos`);
+}
+function bindLibrary() {
+  setIcon("closeLibrary", "close");
+  $("libraryAddIcon").innerHTML = iconSvg("plus");
+  $("librarySearchIcon").innerHTML = iconSvg("search");
+  document.querySelector('[data-library-view="grid"]').innerHTML = iconSvg("grid");
+  document.querySelector('[data-library-view="list"]').innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>';
+  const sort = localStorage.getItem("paper.library-sort");
+  if (sort) $("librarySort").value = sort;
+  $("homeBtn").onclick = openLibrary;
+  $("emptyLibraryBtn").onclick = openLibrary;
+  $("closeLibrary").onclick = closeLibrary;
+  $("librarySearch").addEventListener("input", renderLibrary);
+  $("librarySort").addEventListener("change", () => {
+    localStorage.setItem("paper.library-sort", $("librarySort").value);
+    renderLibrary();
+  });
+  const panel = $("libraryPanel");
+  panel.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-remove-book]");
+    if (remove) return deleteBook(decodeURIComponent(remove.dataset.removeBook));
+    const open = event.target.closest("[data-id]");
+    if (open) {
+      const id = decodeURIComponent(open.dataset.id);
+      closeLibrary();
+      if (currentBook?.id !== id) openStored(id);
+      return;
+    }
+    const filter = event.target.closest("[data-library-filter]");
+    if (filter) {
+      libraryFilter = filter.dataset.libraryFilter;
+      localStorage.setItem("paper.library-filter", libraryFilter);
+      return renderLibrary();
+    }
+    const view = event.target.closest("[data-library-view]");
+    if (view) {
+      localStorage.setItem("paper.library-view", view.dataset.libraryView);
+      return renderLibrary();
+    }
+  });
+  panel.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !currentBook) return;
+    if (event.target === $("librarySearch") && $("librarySearch").value) return;
+    event.stopPropagation();
+    closeLibrary();
+  });
+  // Arrastrar archivos a cualquier parte de la aplicación.
+  let dragDepth = 0;
+  const hasFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
+  window.addEventListener("dragenter", (event) => {
+    if (!hasFiles(event)) return;
+    dragDepth++;
+    if (panel.hidden) openLibrary();
+    $("libraryDrop").hidden = false;
+  });
+  window.addEventListener("dragover", (event) => {
+    if (hasFiles(event)) event.preventDefault();
+  });
+  window.addEventListener("dragleave", (event) => {
+    if (!hasFiles(event)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) $("libraryDrop").hidden = true;
+  });
+  window.addEventListener("drop", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    $("libraryDrop").hidden = true;
+    addFiles(event.dataTransfer.files);
+  });
 }
 function escapeHtml(s) {
   const d = document.createElement("div");
@@ -405,7 +596,7 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
-async function addFile(file) {
+async function addFile(file, open = true) {
   if (!file) return;
   const isMarkdown = /\.(md|markdown)$/i.test(file.name) || file.type === "text/markdown";
   if (
@@ -420,15 +611,23 @@ async function addFile(file) {
   try {
     const id = bookId(file),
       buffer = await file.arrayBuffer();
-    await dbPut({
+    const existing = await dbGet(id);
+    const record = {
+      ...existing,
       id,
       name: file.name,
       kind: isMarkdown ? "markdown" : "pdf",
       blob: new Blob([buffer], { type: isMarkdown ? "text/markdown" : "application/pdf" }),
+      addedAt: existing?.addedAt || Date.now(),
       openedAt: Date.now(),
-      pages: isMarkdown ? 1 : null,
-    });
-    await openStored(id);
+      pages: isMarkdown ? 1 : existing?.pages || null,
+    };
+    await dbPut(record);
+    if (open) await openStored(id);
+    else {
+      ensureBookCover(record);
+      if (!$("libraryPanel").hidden) renderLibrary();
+    }
   } catch (e) {
     console.error(e);
     toast("No se pudo guardar el PDF");
@@ -543,6 +742,7 @@ async function openStored(id) {
     rec.openedAt = Date.now();
     await dbPut(rec);
     currentBook = rec;
+    if (!rec.cover) ensureBookCover(rec, pdfDoc);
     assistantLoadDocument();
     resetAnnotationHistory();
     migrateLegacyPageNotes();
@@ -6535,7 +6735,11 @@ function setSidebarPanel(panel) {
   $("sidebarContentsTab").setAttribute("aria-selected", String(!notes));
   $("sidebarNotesTab").setAttribute("aria-selected", String(notes));
 }
-$("fileInput").onchange = (e) => addFile(e.target.files?.[0]);
+$("fileInput").onchange = async (e) => {
+  const files = [...(e.target.files || [])];
+  e.target.value = "";
+  await addFiles(files);
+};
 $("prevBtn").onclick = () => stepPage(-1);
 $("nextBtn").onclick = () => stepPage(1);
 $("toolbarPrev").onclick = () => stepPage(-1);
@@ -6701,28 +6905,7 @@ $("closeSidebar").onclick = () => {
     scheduleLayoutRefit();
   }
 };
-$("homeBtn").onclick = () => {
-  flushReadingSession(true);
-  $("libraryPanel").hidden = false;
-  renderLibrary();
-};
-$("emptyLibraryBtn").onclick = $("homeBtn").onclick;
-$("closeLibrary").onclick = () => {
-  $("libraryPanel").hidden = true;
-  markReadingActivity();
-};
-$("libraryPanel").onclick = (e) => {
-  if (e.target === $("libraryPanel")) {
-    $("libraryPanel").hidden = true;
-    markReadingActivity();
-  }
-};
-$("library").addEventListener("click", (e) => {
-  if (e.target.closest(".book")) $("libraryPanel").hidden = true;
-});
-$("librarySearch").addEventListener("input", renderLibrary);
-$("libraryType").addEventListener("change", renderLibrary);
-$("librarySort").addEventListener("change", renderLibrary);
+bindLibrary();
 $("rotateBtn").onclick = async () => {
   if (!pdfDoc || isRotating) return;
   isRotating = true;

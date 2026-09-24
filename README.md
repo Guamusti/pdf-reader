@@ -45,3 +45,4 @@ Incluye:
 - **Selección en cualquier vista**: el menú de selección con Explicar, Resumir y Preguntar funciona en página, doble página, scroll continuo y modo lectura.
 - **Longitud controlada**: cada acción tiene un límite de palabras proporcional al texto; un resumen nunca es más largo que el original y la respuesta se recorta si el modelo se excede.
 - Citas `p. N` clicables, copiar, guardar la respuesta en las notas de la página, regenerar, convertir preguntas en tarjetas de estudio y detener la respuesta en cualquier momento. La descarga del modelo local solo se hace tras pedir permiso.
+- **Biblioteca renovada**: portadas reales (primera página de cada PDF), bloque «Continuar leyendo», filtros por estado (leyendo, sin empezar, terminados), vista de cuadrícula o lista, orden por fecha de apertura o de alta, añadir varios archivos a la vez y arrastrar PDFs o Markdown a cualquier parte de la ventana.
