@@ -1,5 +1,5 @@
-const CACHE = 'paper-reader-v82';
-const CORE = ['/', '/index.html', '/reader-ui.css?v=32', '/reader-v3.css?v=2', '/app.js?v=69', '/ai-worker.js?v=1', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'paper-reader-v83';
+const CORE = ['/', '/index.html', '/reader-ui.css?v=32', '/reader-v3.css?v=3', '/app.js?v=70', '/ai-worker.js?v=1', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 const PDFJS = ['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs', 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs'];
 
 // El precacheo es tolerante a fallos: si un recurso concreto no se puede

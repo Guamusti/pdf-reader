@@ -517,6 +517,7 @@ async function openStored(id) {
     flushNotebook();
     setStickyPlacement(false);
     if (activeStickyId) closeStickyEditor();
+    if (currentBook?.id !== id) setAutoScroll(false);
     const rec = await dbGet(id);
     if (!rec) throw new Error("Documento no encontrado");
     if (rec.kind === "markdown") {
@@ -590,6 +591,7 @@ async function openStored(id) {
     await renderOutline();
     renderLibrary();
     if (!$("notebookPanel").hidden) renderNotebook();
+    if (localStorage.getItem("paper.ruler") === "1") setReadingRuler(true, true);
     document.body.classList.remove("sidebar-open");
     markReadingActivity();
   } catch (e) {
@@ -696,6 +698,8 @@ function updatePageChrome() {
   $("prevBtn").disabled = currentPage === 1;
   $("nextBtn").disabled = currentPage === pdfDoc.numPages;
   syncNotebookPage();
+  updateRemainingTime();
+  scheduleRuler();
 }
 // ---- Historial de vistas (atrás / adelante) ----
 // Registra los saltos "no secuenciales" (índice, enlaces, búsqueda, marcadores)
@@ -1214,6 +1218,11 @@ function paletteActions() {
     { icon: "✎", title: "Añadir nota adhesiva en esta página", keys: "post-it comentario apunte pegar", shortcut: ["N"], when: hasPdf && !reflowMode, run: () => setStickyPlacement(true) },
     { icon: "▥", title: $("notebookPanel").hidden ? "Abrir cuaderno de notas" : "Cerrar cuaderno de notas", keys: "apuntes notas pagina resumen", shortcut: ["C"], when: hasDoc, run: toggleNotebook },
     { icon: "▥", title: "Escribir la nota del documento", keys: "resumen general apuntes", when: hasDoc, run: () => openNotebook("doc") },
+    { icon: "▭", title: rulerOn ? "Quitar la regla de lectura" : "Regla de lectura (foco en una franja)", keys: "guia foco concentracion dislexia linea", shortcut: ["G"], when: hasDoc, run: () => setReadingRuler(!rulerOn) },
+    { icon: "⇣", title: autoScroll.on ? "Detener el desplazamiento automático" : "Desplazamiento automático", keys: "autoscroll teleprompter scroll", shortcut: ["A"], when: hasDoc, run: () => setAutoScroll(!autoScroll.on) },
+    { icon: "▧", title: "Guardar esta página como imagen (PNG)", keys: "exportar captura png descargar", when: hasPdf, run: exportPageImage },
+    { icon: "⧉", title: "Copiar la imagen de esta página", keys: "portapapeles captura", when: hasPdf, run: copyPageImage },
+    { icon: "¶", title: "Copiar el texto de esta página", keys: "portapapeles extraer", when: hasPdf, run: copyPageText },
     { icon: "↶", title: "Deshacer anotación", keys: "undo", shortcut: ["Ctrl", "Z"], when: hasDoc && annotationUndo.length > 0, run: undoAnnotation },
     { icon: "✦", title: "Preguntar al documento (IA local)", keys: "asistente ia chat pregunta", when: hasDoc, run: openAssistantForDocument },
     { icon: "☀", title: "Tema claro", keys: "apariencia color", run: () => setTheme("light") },
@@ -1462,7 +1471,7 @@ async function applyPaletteSearch(raw, page = 0, occurrence = 0) {
 // ---- Atajos de teclado ----
 const SHORTCUT_GROUPS = [
   ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
-  ["Lectura", [["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
+  ["Lectura", [["Regla de lectura", ["G"]], ["Mover la regla", ["↑", "↓"]], ["Desplazamiento automático", ["A"]], ["Pausar / velocidad (auto-scroll)", ["Espacio", "[", "]"]], ["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
   ["Notas y anotaciones", [["Nota adhesiva en la página", ["N"]], ["Cuaderno de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
   ["General", [["Atajos de teclado", ["?"]], ["Cerrar paneles", ["Esc"]]]],
 ];
@@ -1705,6 +1714,230 @@ function bindStickyInteractions() {
   });
   window.addEventListener("resize", positionStickyEditor);
   $("viewer").addEventListener("scroll", positionStickyEditor, { passive: true });
+}
+
+// ---- Regla de lectura ----
+// Oscurece el visor salvo una franja horizontal que sigue al puntero; con ↑/↓
+// avanza media franja y desplaza el documento cuando llega al borde.
+const RULER_HEIGHTS = { small: 46, medium: 78, large: 124 };
+let rulerOn = false;
+let rulerRatio = 0.38;
+let rulerFrame = 0;
+function rulerHeight() {
+  return RULER_HEIGHTS[localStorage.getItem("paper.ruler-size")] || RULER_HEIGHTS.medium;
+}
+function positionRuler() {
+  rulerFrame = 0;
+  const ruler = $("readingRuler");
+  if (!rulerOn || ruler.hidden) return;
+  const box = $("viewer").getBoundingClientRect();
+  const height = rulerHeight();
+  const top = Math.max(0, Math.min(box.height - height, rulerRatio * box.height - height / 2));
+  ruler.style.left = `${box.left}px`;
+  ruler.style.top = `${box.top}px`;
+  ruler.style.width = `${box.width}px`;
+  ruler.style.height = `${box.height}px`;
+  ruler.style.setProperty("--ruler-top", `${top}px`);
+  ruler.style.setProperty("--ruler-h", `${height}px`);
+}
+function scheduleRuler() {
+  if (rulerOn && !rulerFrame) rulerFrame = requestAnimationFrame(positionRuler);
+}
+function setReadingRuler(on, quiet = false) {
+  if (on && !currentBook) return quiet ? undefined : toast("Abre un documento primero");
+  rulerOn = Boolean(on);
+  $("readingRuler").hidden = !rulerOn;
+  $("rulerBtn")?.setAttribute("aria-pressed", String(rulerOn));
+  localStorage.setItem("paper.ruler", rulerOn ? "1" : "0");
+  if (rulerOn) {
+    positionRuler();
+    if (!quiet) toast("Regla de lectura: mueve el puntero o usa ↑ ↓");
+  }
+}
+function moveRulerBy(direction) {
+  const viewer = $("viewer");
+  const box = viewer.getBoundingClientRect();
+  const step = rulerHeight() * 0.5;
+  const next = rulerRatio * box.height + direction * step;
+  const margin = rulerHeight();
+  // Cerca de los bordes se desplaza el documento y la franja se queda quieta.
+  if ((direction > 0 && next > box.height - margin) || (direction < 0 && next < margin)) {
+    const before = viewer.scrollTop;
+    viewer.scrollBy({ top: direction * step, behavior: "auto" });
+    if (viewer.scrollTop === before && pdfDoc && viewMode !== "continuous") {
+      if (direction > 0 && currentPage < pdfDoc.numPages) {
+        rulerRatio = 0.2;
+        renderPage(currentPage + 1);
+      } else if (direction < 0 && currentPage > 1) {
+        rulerRatio = 0.8;
+        renderPage(currentPage - 1, { resetScroll: false }).then(() => (viewer.scrollTop = viewer.scrollHeight));
+      }
+    }
+  } else {
+    rulerRatio = Math.max(0.05, Math.min(0.95, next / box.height));
+  }
+  scheduleRuler();
+}
+function setRulerSize(size) {
+  localStorage.setItem("paper.ruler-size", size);
+  document.querySelectorAll("[data-ruler-size]").forEach((button) => button.classList.toggle("active", button.dataset.rulerSize === size));
+  scheduleRuler();
+}
+
+// ---- Desplazamiento automático ----
+const AUTOSCROLL_SPEEDS = [14, 20, 28, 38, 52, 70, 94, 125, 165, 220];
+const autoScroll = { on: false, paused: false, level: 3, last: 0, carry: 0, raf: 0, holdUntil: 0, turning: false };
+function updateAutoScrollUi() {
+  $("autoScrollBar").hidden = !autoScroll.on;
+  $("autoScrollBtn")?.setAttribute("aria-pressed", String(autoScroll.on));
+  $("autoScrollToggle").textContent = autoScroll.paused ? "▶" : "⏸";
+  $("autoScrollSpeed").textContent = `Velocidad ${autoScroll.level + 1}`;
+}
+function autoScrollTick(time) {
+  if (!autoScroll.on) return;
+  const dt = autoScroll.last ? (time - autoScroll.last) / 1000 : 0;
+  autoScroll.last = time;
+  if (!autoScroll.paused && !autoScroll.turning && dt > 0 && dt < 0.25 && performance.now() > autoScroll.holdUntil) {
+    const viewer = $("viewer");
+    autoScroll.carry += AUTOSCROLL_SPEEDS[autoScroll.level] * dt;
+    const step = Math.floor(autoScroll.carry);
+    if (step >= 1) {
+      autoScroll.carry -= step;
+      const before = viewer.scrollTop;
+      viewer.scrollTop = before + step;
+      if (Math.abs(viewer.scrollTop - before) < 0.5) autoScrollReachedEnd();
+    }
+  }
+  autoScroll.raf = requestAnimationFrame(autoScrollTick);
+}
+async function autoScrollReachedEnd() {
+  const canTurn = pdfDoc && viewMode !== "continuous" && currentPage < pdfDoc.numPages;
+  if (!canTurn) {
+    setAutoScroll(false);
+    toast("Fin del documento");
+    return;
+  }
+  autoScroll.turning = true;
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  if (autoScroll.on) await renderPage(currentPage + (viewMode === "double" ? 2 : 1));
+  autoScroll.holdUntil = performance.now() + 900;
+  autoScroll.turning = false;
+}
+function setAutoScroll(on) {
+  if (on && !currentBook) return toast("Abre un documento primero");
+  autoScroll.on = Boolean(on);
+  autoScroll.paused = false;
+  autoScroll.last = 0;
+  autoScroll.carry = 0;
+  cancelAnimationFrame(autoScroll.raf);
+  if (autoScroll.on) {
+    autoScroll.level = Math.max(0, Math.min(AUTOSCROLL_SPEEDS.length - 1, Number(localStorage.getItem("paper.autoscroll-level") ?? 3)));
+    autoScroll.raf = requestAnimationFrame(autoScrollTick);
+    toast("Auto-scroll: espacio pausa · [ ] velocidad");
+  }
+  updateAutoScrollUi();
+}
+function changeAutoScrollSpeed(delta) {
+  autoScroll.level = Math.max(0, Math.min(AUTOSCROLL_SPEEDS.length - 1, autoScroll.level + delta));
+  localStorage.setItem("paper.autoscroll-level", String(autoScroll.level));
+  updateAutoScrollUi();
+}
+function toggleAutoScrollPause() {
+  autoScroll.paused = !autoScroll.paused;
+  autoScroll.last = 0;
+  updateAutoScrollUi();
+}
+
+// ---- Exportar y copiar la página actual ----
+async function renderPageToCanvas(pageNumber, targetWidth = 2000) {
+  const page = await getCachedPage(pageNumber);
+  const base = page.getViewport({ scale: 1, rotation });
+  const viewport = page.getViewport({ scale: Math.min(4, Math.max(1, targetWidth / base.width)), rotation });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: context, viewport }).promise;
+  return canvas;
+}
+async function exportPageImage() {
+  if (!pdfDoc || !currentBook) return toast("Abre un PDF primero");
+  try {
+    const canvas = await renderPageToCanvas(currentPage);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${currentBook.name.replace(/\.pdf$/i, "")}-p${currentPage}.png`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`Página ${currentPage} guardada como imagen`);
+  } catch (error) {
+    console.error(error);
+    toast("No se pudo exportar la página");
+  }
+}
+async function copyPageImage() {
+  if (!pdfDoc) return toast("Abre un PDF primero");
+  try {
+    if (!window.ClipboardItem || !navigator.clipboard?.write) throw new Error("sin soporte");
+    const canvas = await renderPageToCanvas(currentPage, 1600);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    toast("Imagen de la página copiada");
+  } catch {
+    toast("Este navegador no permite copiar imágenes; usa «Guardar PNG»");
+  }
+}
+async function copyPageText() {
+  if (!pdfDoc) return toast("Abre un PDF primero");
+  try {
+    const text = await getPagePlainText(currentPage);
+    if (!text.trim()) return toast("Esta página no tiene texto extraíble");
+    await navigator.clipboard.writeText(text);
+    toast(`Texto de la página ${currentPage} copiado`);
+  } catch {
+    toast("No se pudo copiar el texto");
+  }
+}
+function updateRemainingTime() {
+  const label = $("pageRemaining");
+  if (!label) return;
+  if (!currentBook || !pdfDoc) {
+    label.hidden = true;
+    return;
+  }
+  const estimate = readingEstimate({ ...currentBook, pages: pdfDoc.numPages });
+  label.hidden = estimate.remainingMs < 60_000;
+  label.textContent = `· ${formatReadingDuration(estimate.remainingMs, true)} restantes`;
+  label.title = "Estimación según tu ritmo de lectura en este documento";
+}
+function bindReadingTools() {
+  $("viewer").addEventListener("pointermove", (event) => {
+    if (!rulerOn || event.pointerType === "touch") return;
+    const box = $("viewer").getBoundingClientRect();
+    rulerRatio = Math.max(0.02, Math.min(0.98, (event.clientY - box.top) / box.height));
+    scheduleRuler();
+  }, { passive: true });
+  window.addEventListener("resize", scheduleRuler, { passive: true });
+  $("rulerBtn").onclick = () => setReadingRuler(!rulerOn);
+  document.querySelectorAll("[data-ruler-size]").forEach((button) => (button.onclick = () => setRulerSize(button.dataset.rulerSize)));
+  setRulerSize(localStorage.getItem("paper.ruler-size") || "medium");
+  $("autoScrollBtn").onclick = () => setAutoScroll(!autoScroll.on);
+  $("autoScrollToggle").onclick = toggleAutoScrollPause;
+  $("autoScrollSlower").onclick = () => changeAutoScrollSpeed(-1);
+  $("autoScrollFaster").onclick = () => changeAutoScrollSpeed(1);
+  $("autoScrollClose").onclick = () => setAutoScroll(false);
+  // El desplazamiento manual tiene prioridad durante un momento.
+  for (const type of ["wheel", "touchstart"]) {
+    $("viewer").addEventListener(type, () => {
+      if (autoScroll.on) autoScroll.holdUntil = performance.now() + 1500;
+    }, { passive: true });
+  }
+  $("exportPageImageBtn").onclick = exportPageImage;
+  $("copyPageTextBtn").onclick = copyPageText;
 }
 
 // ---- Cuaderno: notas libres por página y del documento ----
@@ -4505,6 +4738,12 @@ function showEmpty() {
   document.body.classList.remove("has-doc");
   setStickyPlacement(false);
   if (!$("notebookPanel").hidden) closeNotebook();
+  setAutoScroll(false);
+  if (rulerOn) {
+    rulerOn = false;
+    $("readingRuler").hidden = true;
+  }
+  updateRemainingTime();
   $("emptyState").hidden = false;
   $("canvasWrap").hidden = true;
   $("reflowReader").hidden = true;
@@ -4819,6 +5058,7 @@ document.querySelectorAll("[data-palette-opt]").forEach((button) => {
 $("closeShortcuts").onclick = closeShortcuts;
 bindStickyInteractions();
 bindNotebook();
+bindReadingTools();
 $("shortcutsPanel").addEventListener("pointerdown", (event) => {
   if (event.target === $("shortcutsPanel")) closeShortcuts();
 });
@@ -5617,6 +5857,23 @@ window.addEventListener("keydown", (e) => {
     navigateForward();
     return;
   }
+  if (rulerOn && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault();
+    moveRulerBy(e.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (autoScroll.on && e.key === " " && !presentationMode) {
+    e.preventDefault();
+    toggleAutoScrollPause();
+    return;
+  }
+  if (autoScroll.on && (e.key === "[" || e.key === "]")) {
+    e.preventDefault();
+    changeAutoScrollSpeed(e.key === "]" ? 1 : -1);
+    return;
+  }
+  if ((e.key === "g" || e.key === "G") && currentBook) setReadingRuler(!rulerOn);
+  if ((e.key === "a" || e.key === "A") && currentBook) setAutoScroll(!autoScroll.on);
   if (presentationMode && e.key === " ") {
     e.preventDefault();
     stepPage(1);
