@@ -1347,16 +1347,13 @@ function buildPaletteItems(query) {
     }
   }
   // 3) Secciones del índice
-  const outline = [...document.querySelectorAll("#outlineList .outline-item[data-page]")].map((node) => ({
-    title: node.querySelector(".outline-name")?.textContent || node.textContent,
-    page: Number(node.dataset.page),
-  }));
+  const outline = outlineEntries();
   const outlineHits = outline
     .map((entry) => ({ entry, score: paletteScore(raw, entry.title) }))
     .filter((hit) => hit.score > (raw ? 11 : 0))
     .sort((a, b) => b.score - a.score)
     .slice(0, raw ? 6 : 5)
-    .map(({ entry }) => ({ icon: "§", title: entry.title, meta: [`p. ${entry.page}`], run: () => jumpToPage(entry.page) }));
+    .map(({ entry }) => ({ icon: "§", title: entry.title, subtitle: entry.path || "", meta: [`p. ${entry.page}`], run: () => jumpToPage(entry.page) }));
   push("Índice", outlineHits);
   // 4) Acciones
   const actionHits = paletteActions()
@@ -3329,10 +3326,9 @@ async function renderLinkLayerInto(layer, page, viewport, token) {
       anchor.addEventListener("click", async (event) => {
         event.preventDefault();
         try {
-          const dest = typeof link.dest === "string" ? await pdfDoc.getDestination(link.dest) : link.dest;
-          if (!Array.isArray(dest) || !dest[0]) return;
-          const index = await pdfDoc.getPageIndex(dest[0]);
-          jumpToPage(index + 1);
+          const page = await resolveDestPage(link.dest);
+          if (!page) throw new Error("Destino no válido");
+          jumpToPage(page);
         } catch {
           toast("No se pudo abrir el enlace");
         }
@@ -3495,52 +3491,162 @@ function toggleBookmark() {
   renderBookmarks();
   updateBookmarkButton();
 }
+// ---- Índice (árbol plegable) ----
+// El índice del PDF se construye como árbol: cada nivel se pliega, la sección
+// en la que estás se despliega y se marca sola, y se puede filtrar por texto.
+let outlineTree = [];
+let activeOutlineId = "";
+const outlineExpanded = new Set();
+// Resuelve un destino a número de página. Algunos PDF guardan el índice de
+// página como número en lugar de una referencia al objeto página.
+async function resolveDestPage(dest) {
+  try {
+    if (typeof dest === "string") dest = await pdfDoc.getDestination(dest);
+    if (!Array.isArray(dest) || dest[0] === null || dest[0] === undefined) return null;
+    if (typeof dest[0] === "number") return Math.max(1, Math.min(pdfDoc.numPages, dest[0] + 1));
+    return (await pdfDoc.getPageIndex(dest[0])) + 1;
+  } catch {
+    return null;
+  }
+}
+async function buildOutlineTree(items, depth = 0, path = "") {
+  return Promise.all(
+    items.map(async (item, index) => {
+      const id = path ? `${path}.${index}` : String(index);
+      const children = item.items?.length ? await buildOutlineTree(item.items, depth + 1, id) : [];
+      let page = await resolveDestPage(item.dest);
+      if (!page && children.length) page = children.find((child) => child.page)?.page || null;
+      return { id, title: String(item.title || "Sin título").replace(/\s+/g, " ").trim(), page, depth, children };
+    }),
+  );
+}
+function flattenOutline(nodes = outlineTree, out = []) {
+  for (const node of nodes) {
+    out.push(node);
+    flattenOutline(node.children, out);
+  }
+  return out;
+}
+function outlineEntries() {
+  const byId = new Map(flattenOutline().map((node) => [node.id, node]));
+  return [...byId.values()]
+    .filter((node) => node.page)
+    .map((node) => ({
+      title: node.title,
+      page: node.page,
+      depth: node.depth,
+      path: outlineAncestors(node.id).map((id) => byId.get(id)?.title).filter(Boolean).join(" › "),
+    }));
+}
+function outlineAncestors(id) {
+  const parts = String(id).split(".");
+  return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("."));
+}
+function renderOutlineTree() {
+  const root = $("outlineList");
+  if (!outlineTree.length) return;
+  const query = normalizeText($("outlineFilter").value.trim());
+  const activePath = new Set(outlineAncestors(activeOutlineId));
+  const titleHtml = (title) => {
+    if (!query) return escapeHtml(title);
+    const at = normalizeText(title).indexOf(query);
+    return at < 0 ? escapeHtml(title) : `${escapeHtml(title.slice(0, at))}<mark>${escapeHtml(title.slice(at, at + query.length))}</mark>${escapeHtml(title.slice(at + query.length))}`;
+  };
+  const renderNode = (node) => {
+    const childHtml = node.children.map(renderNode).filter(Boolean);
+    const matches = !query || normalizeText(node.title).includes(query);
+    if (query && !matches && !childHtml.length) return "";
+    const hasChildren = node.children.length > 0;
+    const expanded = hasChildren && (query ? childHtml.length > 0 : outlineExpanded.has(node.id));
+    const classes = ["outline-node", `depth-${Math.min(node.depth, 3)}`, node.id === activeOutlineId ? "is-active" : "", activePath.has(node.id) ? "in-path" : ""].filter(Boolean).join(" ");
+    return `<li class="${classes}" role="treeitem"${hasChildren ? ` aria-expanded="${expanded}"` : ""}><div class="outline-row" style="--depth:${node.depth}">${hasChildren ? `<button class="outline-toggle" data-outline-toggle="${node.id}" aria-label="${expanded ? "Contraer" : "Expandir"} ${escapeHtml(node.title)}">${iconSvg("chevronRight")}</button>` : '<span class="outline-toggle-spacer"></span>'}<button class="outline-item${node.id === activeOutlineId ? " active" : ""}" data-outline-id="${node.id}"${node.page ? ` data-page="${node.page}"` : ""} title="${escapeHtml(node.title)}"><span class="outline-name">${titleHtml(node.title)}</span>${node.page ? `<span class="outline-page">${node.page}</span>` : ""}</button></div>${expanded ? `<ul role="group">${childHtml.join("")}</ul>` : ""}</li>`;
+  };
+  const html = outlineTree.map(renderNode).filter(Boolean).join("");
+  root.innerHTML = html ? `<ul class="outline-tree" role="tree" aria-label="Índice del documento">${html}</ul>` : '<span class="outline-empty">Ninguna sección coincide.</span>';
+}
 async function renderOutline() {
   const root = $("outlineList");
   root.innerHTML = "";
+  outlineTree = [];
+  activeOutlineId = "";
+  outlineExpanded.clear();
+  $("outlineTools").hidden = true;
+  $("outlineFilterWrap").hidden = true;
+  $("outlineFilter").value = "";
   if (!pdfDoc) return;
   try {
     const outline = await pdfDoc.getOutline();
     if (!outline?.length) {
-      root.innerHTML =
-        '<span style="color:var(--muted);font-size:13px">Este PDF no incluye índice.</span>';
+      root.innerHTML = '<span class="outline-empty">Este PDF no incluye índice.</span>';
       return;
     }
-    const resolvePage = async (item) => {
-      let dest = item.dest;
-      if (typeof dest === "string") dest = await pdfDoc.getDestination(dest);
-      if (!Array.isArray(dest) || !dest[0]) return null;
-      return (await pdfDoc.getPageIndex(dest[0])) + 1;
-    };
-    const addItems = async (items, depth = 0) => {
-      for (const item of items) {
-        const page = await resolvePage(item);
-        const button = document.createElement("button");
-        button.className = "outline-item";
-        button.style.marginLeft = `${depth * 10}px`;
-        if (page) button.dataset.page = page;
-        button.innerHTML = `<i class="outline-dot"></i><span class="outline-name">${escapeHtml(item.title || "Sin título")}</span>${page ? `<span class="outline-page">${page}</span>` : ""}`;
-        button.onclick = () => {
-          if (page) jumpToPage(page);
-          else toast("No se pudo abrir esta sección");
-        };
-        root.appendChild(button);
-        if (item.items?.length) await addItems(item.items, depth + 1);
-      }
-    };
-    await addItems(outline);
-    updateOutlineSelection();
-  } catch {
-    root.innerHTML =
-      '<span style="color:var(--muted);font-size:13px">No se pudo leer el índice.</span>';
+    outlineTree = await buildOutlineTree(outline);
+    const all = flattenOutline();
+    const hasNesting = all.some((node) => node.children.length);
+    $("outlineTools").hidden = !hasNesting;
+    $("outlineFilterWrap").hidden = all.length < 12;
+    // Índices cortos se muestran enteros; en los largos, sólo el primer nivel
+    // (más la rama de la sección actual, que se despliega sola).
+    if (all.length <= 24) all.forEach((node) => node.children.length && outlineExpanded.add(node.id));
+    updateOutlineSelection(true);
+  } catch (error) {
+    console.error("No se pudo leer el índice", error);
+    root.innerHTML = '<span class="outline-empty">No se pudo leer el índice.</span>';
   }
 }
-function updateOutlineSelection() {
-  const items = [...document.querySelectorAll(".outline-item[data-page]")];
-  let active = null;
-  for (const item of items)
-    if (Number(item.dataset.page) <= currentPage) active = item;
-  items.forEach((item) => item.classList.toggle("active", item === active));
+// Sección activa: la de página más alta que no supera la página actual (a
+// igualdad, la última en el orden del documento, es decir, la más concreta).
+function updateOutlineSelection(force = false) {
+  if (!outlineTree.length) return;
+  let best = null;
+  for (const node of flattenOutline()) {
+    if (node.page && node.page <= currentPage && (!best || node.page >= best.page)) best = node;
+  }
+  const nextId = best?.id || "";
+  if (!force && nextId === activeOutlineId) return;
+  activeOutlineId = nextId;
+  outlineAncestors(nextId).forEach((id) => outlineExpanded.add(id));
+  renderOutlineTree();
+  const row = $("outlineList").querySelector(".outline-item.active");
+  const sidebarVisible = document.body.classList.contains("sidebar-open") || (!isDrawerLayout() && !document.body.classList.contains("sidebar-collapsed"));
+  if (row && sidebarVisible && !$("sidebarContentsPanel").hidden) row.scrollIntoView({ block: "nearest" });
+}
+function bindOutline() {
+  setIcon("outlineExpandAll", "chevronDown");
+  setIcon("outlineCollapseAll", "chevronUp");
+  $("outlineFilterWrap").querySelector(".outline-filter-icon").innerHTML = iconSvg("search");
+  $("outlineList").addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-outline-toggle]")?.dataset.outlineToggle;
+    if (toggle) {
+      outlineExpanded.has(toggle) ? outlineExpanded.delete(toggle) : outlineExpanded.add(toggle);
+      renderOutlineTree();
+      return;
+    }
+    const item = event.target.closest(".outline-item");
+    if (!item) return;
+    const page = Number(item.dataset.page);
+    if (page) {
+      jumpToPage(page);
+      if (isDrawerLayout()) document.body.classList.remove("sidebar-open");
+    } else toast("No se pudo abrir esta sección");
+  });
+  $("outlineFilter").addEventListener("input", renderOutlineTree);
+  $("outlineFilter").addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && event.target.value) {
+      event.stopPropagation();
+      event.target.value = "";
+      renderOutlineTree();
+    }
+    if (event.key === "Enter") ($("outlineList").querySelector(".outline-item[data-page]:has(mark)") || $("outlineList").querySelector(".outline-item[data-page]"))?.click();
+  });
+  $("outlineExpandAll").onclick = () => {
+    flattenOutline().forEach((node) => node.children.length && outlineExpanded.add(node.id));
+    renderOutlineTree();
+  };
+  $("outlineCollapseAll").onclick = () => {
+    outlineExpanded.clear();
+    renderOutlineTree();
+  };
 }
 function cancelThumbnailWork() {
   thumbGeneration++;
@@ -4543,7 +4649,8 @@ function buildInkPalette() {
     strip.id = "inkStrip";
     strip.dataset.activeTool = "Marcador";
     strip.hidden = true;
-    strip.innerHTML = '<div class="ink-strip-inner"><button class="ink-drag-handle" data-strip-drag title="Mover barra Ink" aria-label="Mover barra Ink">⠿</button><button data-strip-select title="Seleccionar y editar anotación" aria-label="Seleccionar anotación">↖</button><button data-strip-tool="pen" title="Pluma libre"><span class="tool-glyph pen-glyph">✎</span><i class="tool-color"></i></button><button data-strip-tool="highlight" title="Marcador de texto"><span class="tool-glyph marker-glyph">▰</span><i class="tool-color"></i></button><button data-strip-tool="underline" title="Subrayado recto"><span class="tool-glyph">A</span><i class="tool-line straight"></i></button><button data-strip-tool="wavy" title="Subrayado ondulado"><span class="tool-glyph">A</span><i class="tool-line wavy"></i></button><button data-strip-tool="strike" title="Tachado"><span class="tool-glyph strike-glyph">A</span><i class="tool-line strike-line"></i></button><button data-strip-tool="box" title="Dibujar recuadro"><span class="tool-glyph">□</span><i class="tool-color"></i></button><button data-strip-tool="arrow" title="Dibujar flecha"><span class="tool-glyph">↗</span><i class="tool-color"></i></button><button data-strip-note title="Añadir nota al texto"><span class="tool-glyph note-glyph">T+</span></button><button data-strip-eraser title="Goma: toca una anotación"><span class="tool-glyph">⌫</span></button><button data-strip-color title="Estilo de la herramienta actual"><i class="ink-dot"></i><i class="ink-dot secondary"></i></button><span class="ink-divider"></span><button data-strip-undo title="Deshacer">↶</button><button data-strip-redo title="Rehacer">↷</button><button data-strip-close title="Contraer Ink">⌃</button></div>';
+    const toolButton = (tool, icon, label) => `<button data-strip-tool="${tool}" title="${label}" aria-label="${label}">${iconSvg(icon)}<i class="tool-color"></i></button>`;
+    strip.innerHTML = `<div class="ink-strip-inner"><button class="ink-drag-handle" data-strip-drag title="Mover la barra (doble clic para recolocarla)" aria-label="Mover barra Ink">${iconSvg("grip")}</button><span class="ink-sep"></span><button data-strip-select title="Seleccionar y editar anotaciones (S)" aria-label="Seleccionar anotación">${iconSvg("cursor")}</button><span class="ink-sep"></span>${toolButton("pen", "pen", "Pluma libre")}${toolButton("highlight", "highlighter", "Marcador de texto")}<span class="ink-sep"></span>${toolButton("underline", "underline", "Subrayado")}${toolButton("wavy", "wavy", "Subrayado ondulado")}${toolButton("strike", "strike", "Tachado")}<span class="ink-sep"></span>${toolButton("box", "square", "Recuadro")}${toolButton("arrow", "arrow", "Flecha")}<button data-strip-note title="Nota en un punto de la página (N)" aria-label="Añadir nota en la página">${iconSvg("sticky")}</button><span class="ink-sep"></span><button data-strip-eraser title="Goma: toca una anotación para borrarla" aria-label="Goma">${iconSvg("eraser")}</button><button data-strip-color title="Color y grosor de la herramienta" aria-label="Color y grosor"><i class="ink-dot"></i></button><span class="ink-sep"></span><button data-strip-undo title="Deshacer (Ctrl+Z)" aria-label="Deshacer">${iconSvg("back")}</button><button data-strip-redo title="Rehacer (Ctrl+Shift+Z)" aria-label="Rehacer">${iconSvg("forward")}</button><button data-strip-close title="Ocultar la barra Ink" aria-label="Ocultar la barra Ink">${iconSvg("close")}</button></div>`;
     $("openSidebar").closest(".toolbar").append(strip);
     const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
     const colorCard = document.createElement("div");
@@ -6072,6 +6179,7 @@ bindStickyInteractions();
 bindNotebook();
 bindReadingTools();
 bindStudy();
+bindOutline();
 $("shortcutsPanel").addEventListener("pointerdown", (event) => {
   if (event.target === $("shortcutsPanel")) closeShortcuts();
 });
