@@ -46,3 +46,23 @@ Incluye:
 - **Longitud controlada**: cada acción tiene un límite de palabras proporcional al texto; un resumen nunca es más largo que el original y la respuesta se recorta si el modelo se excede.
 - Citas `p. N` clicables, copiar, guardar la respuesta en las notas de la página, regenerar, convertir preguntas en tarjetas de estudio y detener la respuesta en cualquier momento. La descarga del modelo local solo se hace tras pedir permiso.
 - **Biblioteca renovada**: portadas reales (primera página de cada PDF), bloque «Continuar leyendo», filtros por estado (leyendo, sin empezar, terminados), vista de cuadrícula o lista, orden por fecha de apertura o de alta, añadir varios archivos a la vez y arrastrar PDFs o Markdown a cualquier parte de la ventana.
+
+### Novedades v6
+
+- **Tus datos, a salvo**: anotaciones, notas, tarjetas y ajustes se guardan en IndexedDB (antes en `localStorage`, que se llenaba con ~5 MB y dejaba de guardar sin avisar). Los datos de versiones anteriores se trasladan solos al abrir la app. Si una escritura falla, se avisa y se reintenta.
+- **Cada PDF se reconoce por su contenido** (huella SHA-256): renombrarlo o volver a descargarlo ya no lo separa de sus anotaciones. Si tenías el mismo PDF dos veces, sus notas se combinan.
+- **Almacenamiento protegido**: la app pide al navegador que no borre la biblioteca para liberar espacio.
+- **Copia de seguridad completa** (biblioteca → icono de base de datos): un solo archivo `.paperbackup` con documentos, notas, tarjetas y ajustes, opcionalmente cifrado con contraseña, o solo las notas. Restaurar combina sin borrar nada.
+- **Sincronización entre dispositivos** (Chrome/Edge de escritorio): a través de una carpeta que ya sincronice tu nube (Dropbox, Drive, OneDrive, iCloud), cifrada de extremo a extremo si quieres. Los cambios de dos dispositivos se combinan y los borrados se propagan.
+- **Índice de texto guardado**: cada documento se analiza una vez; buscar en un libro de 1.000 páginas o en toda la biblioteca es instantáneo.
+- **Vista previa al pasar el ratón** por enlaces internos, citas (`[12]`, «Smith et al., 2019»), figuras y tablas, sin salir de la página.
+- **Citas** (panel lateral): título, autores, DOI y arXiv del documento; bibliografía extraída con enlaces a DOI/arXiv/Scholar; copiar cita o BibTeX; exportar `.bib` y `.ris` (Zotero, Mendeley, EndNote) o copiar los DOI para «Añadir por identificador» en Zotero. «Completar con doi.org» consulta solo el DOI.
+- **Vista dividida** (`D`): un segundo lector a la derecha con otro documento o el mismo en otra página.
+- **Abrir con Paper Reader**: instalada, aparece en «Abrir con» para PDF y Markdown y como destino al compartir en el móvil.
+- **Móvil**: el scroll continuo ya no vuelve a la primera página al ampliar, girar u ocultarse la barra de direcciones; las páginas ampliadas no se deforman; deslizar solo pasa página cuando el gesto es claramente horizontal; tocar la página muestra u oculta los controles en cualquier modo y hay un botón fijo para salir del modo inmersivo.
+
+### Pruebas
+
+```bash
+node --test tests/storage.test.mjs tests/sync.test.mjs tests/references.test.mjs
+```

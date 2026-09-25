@@ -2,11 +2,61 @@ import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
 
+import {
+  openDatabase,
+  KvStore,
+  idbRequest,
+  idbDone,
+  contentId,
+  isContentId,
+  mergeValue,
+  createBackupBlob,
+  readBackupBlob,
+  backupKind,
+  encryptBackupBlob,
+  decryptBackupBlob,
+} from "./storage.js?v=1";
+import { folderSyncSupported, openSyncFolder, syncFolder } from "./sync.js?v=1";
+import {
+  buildLines,
+  extractReferences,
+  citationAt,
+  findEntryForCitation,
+  captionPattern,
+  findDoi,
+  findArxiv,
+  toBibtex,
+  toRis,
+  bibKey,
+  formatCitation,
+  metaFromCsl,
+} from "./references.js?v=1";
+
 const $ = (id) => document.getElementById(id);
-const DB_NAME = "paper-reader-db",
-  STORE = "pdfs";
-let db = null,
-  pdfDoc = null,
+const STORE = "pdfs";
+// Notas, anotaciones, tarjetas, progreso y preferencias: caché síncrona sobre
+// IndexedDB (ver storage.js). Se carga antes de cualquier lectura.
+const kv = new KvStore();
+let db = null;
+try {
+  db = await openDatabase({
+    onBlocked: () => showLoader(true, "Actualizando Paper Reader…", "Cierra las demás pestañas de Paper Reader para continuar"),
+  });
+  await kv.open(db);
+  showLoader(false);
+} catch (error) {
+  console.error("No se pudo abrir el almacenamiento local", error);
+  kv.mode = "local";
+}
+// Cambios hechos en otra pestaña: se refleja lo que afecta al documento abierto.
+kv.onRemoteChange = (keys) => {
+  if (currentBook && keys.some((k) => k.startsWith(`paper.${currentBook.id}.`))) refreshCurrentDocumentData();
+};
+kv.onError = (error) => {
+  console.error("No se pudieron guardar los cambios", error);
+  toast(error?.name === "QuotaExceededError" ? "No queda espacio para guardar los cambios. Libera espacio o elimina documentos." : "No se pudieron guardar los últimos cambios; se reintentará.", 6000);
+};
+let pdfDoc = null,
   markdownContent = "",
   currentBook = null,
   currentPage = 1,
@@ -21,8 +71,8 @@ let db = null,
   searchQuery = "",
   searchIndex = -1,
   annotationColor = "yellow",
-  inkOpacity = Number(localStorage.getItem("paper.ink-opacity") || 0.82),
-  inkWidth = Number(localStorage.getItem("paper.ink-width") || 3),
+  inkOpacity = Number(kv.getItem("paper.ink-opacity") || 0.82),
+  inkWidth = Number(kv.getItem("paper.ink-width") || 3),
   annotationFilter = "all",
   inkTool = "highlight",
   markerMode = false,
@@ -139,8 +189,8 @@ function applyInkToolStyle(tool = inkTool) {
   annotationColor = style.color;
   inkOpacity = Number(style.opacity);
   inkWidth = Number(style.width);
-  localStorage.setItem("paper.ink-opacity", String(inkOpacity));
-  localStorage.setItem("paper.ink-width", String(inkWidth));
+  kv.setItem("paper.ink-opacity", String(inkOpacity));
+  kv.setItem("paper.ink-width", String(inkWidth));
 }
 
 function updateCurrentInkToolStyle(patch) {
@@ -149,12 +199,12 @@ function updateCurrentInkToolStyle(patch) {
   applyInkToolStyle();
 }
 
-function toast(msg) {
+function toast(msg, duration = 1600) {
   const e = $("toast");
   e.textContent = msg;
   e.classList.add("show");
   clearTimeout(e.t);
-  e.t = setTimeout(() => e.classList.remove("show"), 1600);
+  e.t = setTimeout(() => e.classList.remove("show"), duration);
 }
 function showLoader(
   show,
@@ -170,16 +220,27 @@ function key(id, suffix) {
 }
 function getJSON(k, d) {
   try {
-    return JSON.parse(localStorage.getItem(k) || JSON.stringify(d));
+    return JSON.parse(kv.getItem(k) || JSON.stringify(d));
   } catch {
     return d;
   }
 }
 function setJSON(k, v) {
-  localStorage.setItem(k, JSON.stringify(v));
+  kv.setItem(k, JSON.stringify(v));
 }
-function bookId(file) {
+// El id de un documento es la huella SHA-256 de su contenido: renombrarlo o
+// volver a descargarlo no separa el PDF de sus anotaciones. Sin WebCrypto (sitio
+// sin HTTPS) se recurre al id antiguo por nombre, tamaño y fecha.
+async function documentIdFor(buffer, file) {
+  try {
+    if (globalThis.crypto?.subtle) return await contentId(buffer);
+  } catch (error) {
+    console.warn("No se pudo calcular la huella del documento", error);
+  }
   return `${file.name}:${file.size}:${file.lastModified}`;
+}
+function documentKeys(id) {
+  return kv.keys(`paper.${id}.`);
 }
 
 function getReadingStats(id) {
@@ -257,7 +318,7 @@ function formatReadingDuration(ms, compact = false) {
 }
 function readingEstimate(book) {
   const stats = getReadingStats(book.id);
-  const page = Math.max(1, Math.min(Number(localStorage.getItem(key(book.id, "page")) || 1), book.pages || 1));
+  const page = Math.max(1, Math.min(Number(kv.getItem(key(book.id, "page")) || 1), book.pages || 1));
   const pageTimes = Object.entries(stats.pageMs || {}).filter(([, ms]) => Number(ms) >= 5_000);
   const knownChars = Object.values(stats.pageChars || {}).map(Number).filter((value) => value > 0);
   const averageChars = knownChars.length ? knownChars.reduce((a, b) => a + b, 0) / knownChars.length : 1_900;
@@ -288,18 +349,7 @@ function readingEstimate(book) {
 }
 
 function openDb() {
-  return new Promise((resolve, reject) => {
-    const r = indexedDB.open(DB_NAME, 1);
-    r.onupgradeneeded = () => {
-      if (!r.result.objectStoreNames.contains(STORE))
-        r.result.createObjectStore(STORE, { keyPath: "id" });
-    };
-    r.onsuccess = () => {
-      db = r.result;
-      resolve(db);
-    };
-    r.onerror = () => reject(r.error);
-  });
+  return db ? Promise.resolve(db) : Promise.reject(new Error("IndexedDB no está disponible"));
 }
 function dbPut(record) {
   return new Promise((resolve, reject) => {
@@ -332,12 +382,103 @@ function dbDelete(id) {
   });
 }
 
+// Índice de texto por documento: el texto de cada página se extrae una vez y
+// se guarda, así las búsquedas (en el documento o en toda la biblioteca), la
+// paleta y la IA no vuelven a analizar el PDF.
+const TEXT_INDEX_VERSION = 1;
+function getTextIndex(id) {
+  if (!db) return Promise.resolve(null);
+  return idbRequest(db.transaction("texts").objectStore("texts").get(id))
+    .then((record) => (record?.v === TEXT_INDEX_VERSION && Array.isArray(record.pages) ? record : null))
+    .catch(() => null);
+}
+async function putTextIndex(id, pages) {
+  if (!db) return;
+  const tx = db.transaction("texts", "readwrite");
+  tx.objectStore("texts").put({ id, v: TEXT_INDEX_VERSION, pages, builtAt: Date.now() });
+  await idbDone(tx);
+}
+async function deleteTextIndex(id) {
+  if (!db) return;
+  const tx = db.transaction("texts", "readwrite");
+  tx.objectStore("texts").delete(id);
+  await idbDone(tx).catch(() => {});
+}
+async function extractDocumentText(doc, { onProgress, isCancelled } = {}) {
+  const pages = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    if (isCancelled?.()) return null;
+    try {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      pages.push(content.items.map((item) => item.str).join(" "));
+    } catch {
+      pages.push("");
+    }
+    onProgress?.(i, doc.numPages);
+    if (i % 8 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return pages;
+}
+// Texto del documento abierto. `pages` se va rellenando mientras se indexa
+// (la paleta muestra resultados parciales) y `complete` indica que está entero.
+let docText = { id: "", bookId: "", pages: [], done: 0, complete: false, checked: false, started: false, doc: null };
+function currentDocPages() {
+  return docText.id === currentBook?.id && docText.complete ? docText.pages : null;
+}
+async function loadCurrentDocText(rec, doc) {
+  const state = { id: rec.id, bookId: rec.id, pages: new Array(doc.numPages).fill(null), done: 0, complete: false, checked: false, started: false, doc };
+  docText = state;
+  const stored = await getTextIndex(rec.id);
+  if (docText !== state) return;
+  state.checked = true;
+  if (stored && stored.pages.length === doc.numPages) {
+    state.pages = stored.pages;
+    state.done = doc.numPages;
+    state.complete = true;
+    state.started = true;
+    schedulePaletteRender();
+    return;
+  }
+  // Se construye en segundo plano, sin competir con el primer render (salvo
+  // que la paleta ya esté esperando resultados).
+  if (!$("palette").hidden) buildDocText(state);
+  else if ("requestIdleCallback" in window) requestIdleCallback(() => buildDocText(state), { timeout: 2000 });
+  else setTimeout(() => buildDocText(state), 500);
+}
+function buildDocText(state = docText) {
+  if (!state.checked || state.started || !state.doc) return;
+  state.started = true;
+  (async () => {
+    const doc = state.doc;
+    for (let i = 1; i <= doc.numPages; i++) {
+      if (docText !== state || pdfDoc !== doc) return;
+      try {
+        const page = await doc.getPage(i);
+        const content = await page.getTextContent();
+        state.pages[i - 1] = content.items.map((item) => item.str).join(" ");
+      } catch {
+        state.pages[i - 1] = "";
+      }
+      state.done = i;
+      if (i % 12 === 0 || i === doc.numPages) schedulePaletteRender();
+      if (i % 8 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    state.complete = true;
+    await putTextIndex(state.id, state.pages).catch((error) => console.warn("No se pudo guardar el índice de texto", error));
+  })();
+}
+
 async function deleteBook(id) {
   if (!confirm("¿Eliminar este PDF y sus datos locales?")) return;
+  await removeBook(id);
+}
+async function removeBook(id, { quiet = false } = {}) {
   await dbDelete(id);
-  localStorage.removeItem(key(id, "bookmarks"));
-  localStorage.removeItem(key(id, "annotations"));
-  localStorage.removeItem(key(id, "reading-stats"));
+  // Todo lo guardado para este documento: anotaciones, notas, tarjetas,
+  // progreso, conversación con la IA, colores de página…
+  for (const k of documentKeys(id)) kv.removeItem(k);
+  await deleteTextIndex(id);
   if (currentBook?.id === id) {
     resetRenderEngine();
     pdfDoc = null;
@@ -345,10 +486,529 @@ async function deleteBook(id) {
     showEmpty();
   }
   await renderLibrary();
-  toast("PDF eliminado de la biblioteca");
+  if (!quiet) toast("PDF eliminado de la biblioteca");
 }
+// ---- Migración: de ids por nombre a ids por contenido ----
+// Las versiones anteriores identificaban cada PDF por nombre, tamaño y fecha.
+// Al arrancar, cada documento antiguo pasa a su huella SHA-256 junto con todos
+// sus datos. Si dos entradas resultan ser el mismo PDF, sus notas se combinan.
+async function dbReplaceRecord(oldId, record) {
+  const tx = db.transaction(STORE, "readwrite");
+  const objects = tx.objectStore(STORE);
+  objects.put(record);
+  if (oldId !== record.id) objects.delete(oldId);
+  await idbDone(tx);
+}
+function moveDocumentData(oldId, newId) {
+  const oldPrefix = `paper.${oldId}.`,
+    newPrefix = `paper.${newId}.`;
+  const now = Date.now();
+  const entries = [];
+  for (const k of kv.keys(oldPrefix)) {
+    const target = newPrefix + k.slice(oldPrefix.length);
+    const incoming = kv.getItem(k);
+    const existing = kv.getItem(target);
+    entries.push([target, existing === null ? incoming : mergeValue(target, undefined, existing, incoming), now], [k, null, now]);
+  }
+  return kv.applyEntries(entries).length;
+}
+async function migrateLegacyDocumentIds() {
+  if (!db || !globalThis.crypto?.subtle) return 0;
+  const legacy = (await dbAll()).filter((record) => !isContentId(record.id) && record.blob);
+  if (!legacy.length) return 0;
+  showLoader(true, "Actualizando la biblioteca…", "Identificando cada documento por su contenido");
+  let migrated = 0;
+  try {
+    for (const [index, record] of legacy.entries()) {
+      $("loaderText").textContent = `${record.name} · ${index + 1}/${legacy.length}`;
+      try {
+        const id = await contentId(await record.blob.arrayBuffer());
+        const existing = await dbGet(id);
+        // Primero los datos (una sola transacción) y después el registro: si
+        // algo se interrumpe, la migración se repite sin perder nada.
+        moveDocumentData(record.id, id);
+        await kv.flush();
+        const merged = existing
+          ? { ...record, ...existing, id, addedAt: Math.min(existing.addedAt || Date.now(), record.addedAt || Date.now()), openedAt: Math.max(existing.openedAt || 0, record.openedAt || 0) }
+          : { ...record, id, size: record.size || record.blob.size };
+        await dbReplaceRecord(record.id, merged);
+        await deleteTextIndex(record.id);
+        migrated++;
+      } catch (error) {
+        console.warn("No se pudo actualizar el documento", record.name, error);
+      }
+    }
+  } finally {
+    showLoader(false);
+  }
+  return migrated;
+}
+
+// ---- Almacenamiento persistente ----
+// Sin este permiso el navegador puede borrar la biblioteca cuando necesita
+// espacio (Safari, además, a los 7 días sin uso si la app no está instalada).
+let persistRequested = false;
+async function requestPersistentStorage() {
+  if (persistRequested || !navigator.storage?.persist) return false;
+  persistRequested = true;
+  try {
+    if (await navigator.storage.persisted()) return true;
+    return await navigator.storage.persist();
+  } catch {
+    return false;
+  }
+}
+async function storageStatus() {
+  let persisted = false,
+    estimate = null;
+  try {
+    persisted = Boolean(await navigator.storage?.persisted?.());
+  } catch {}
+  try {
+    estimate = await navigator.storage?.estimate?.();
+  } catch {}
+  return { supported: Boolean(navigator.storage?.persist), persisted, usage: estimate?.usage || 0, quota: estimate?.quota || 0 };
+}
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`;
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(value < 10 * 1024 ** 2 ? 1 : 0)} MB`;
+  return `${(value / 1024 ** 3).toFixed(1)} GB`;
+}
+
+// ---- Copia de seguridad completa ----
+// Un único archivo .paperbackup con la biblioteca (opcionalmente sin los PDFs),
+// todas las notas, anotaciones, tarjetas y ajustes. Puede cifrarse con una
+// contraseña. Restaurar combina: no borra nada de lo que ya tengas.
+const DEVICE_ONLY_KEYS = /^paper\.(notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|sync-[\w-]+|__[\w-]+)$/;
+async function exportFullBackup({ includeFiles = true, passphrase = "" } = {}) {
+  if (!db) return toast("El almacenamiento local no está disponible");
+  await kv.flush().catch(() => {});
+  showLoader(true, "Preparando la copia…", includeFiles ? "Documentos, notas y ajustes" : "Notas y ajustes");
+  try {
+    const records = await dbAll();
+    const files = [];
+    const docs = records.map(({ blob, cover, ...meta }) => {
+      const entry = { ...meta };
+      if (includeFiles && blob) {
+        entry.file = files.length;
+        files.push(blob);
+      }
+      if (includeFiles && cover instanceof Blob) {
+        entry.cover = files.length;
+        files.push(cover);
+      }
+      return entry;
+    });
+    const values = {};
+    for (const [k, entry] of Object.entries(kv.snapshot())) if (entry.v !== null && !DEVICE_ONLY_KEYS.test(k)) values[k] = entry.v;
+    let blob = createBackupBlob(
+      { schema: "paper-backup", version: 1, app: "Paper Reader", createdAt: new Date().toISOString(), includesFiles: includeFiles, docs, kv: values },
+      files,
+    );
+    if (passphrase) {
+      $("loaderText").textContent = "Cifrando la copia…";
+      blob = await encryptBackupBlob(blob, passphrase);
+    }
+    const date = new Date().toISOString().slice(0, 10);
+    downloadBlob(`paper-reader-${includeFiles ? "copia" : "notas"}-${date}.paperbackup`, blob);
+    kv.setItem("paper.last-backup-at", String(Date.now()));
+    toast(`Copia creada · ${docs.length} documento${docs.length === 1 ? "" : "s"} · ${formatBytes(blob.size)}`, 3200);
+  } catch (error) {
+    console.error("No se pudo crear la copia", error);
+    toast("No se pudo crear la copia de seguridad", 3200);
+  } finally {
+    showLoader(false);
+  }
+}
+async function restoreFullBackup(file, passphrase = "") {
+  const kind = await backupKind(file);
+  if (kind === "unknown") throw new Error("Este archivo no es una copia de Paper Reader");
+  if (kind === "encrypted" && !passphrase) {
+    const error = new Error("Esta copia está cifrada: escribe su contraseña");
+    error.code = "needs-passphrase";
+    throw error;
+  }
+  showLoader(true, "Restaurando la copia…", file.name);
+  try {
+    const source = kind === "encrypted" ? await decryptBackupBlob(file, passphrase) : file;
+    const { manifest, file: fileAt } = await readBackupBlob(source);
+    let added = 0,
+      missing = 0;
+    for (const doc of manifest.docs || []) {
+      const { file: fileIndex, cover: coverIndex, ...meta } = doc;
+      if (!meta.id || (await dbGet(meta.id))) continue;
+      const data = fileIndex !== undefined ? fileAt(fileIndex) : null;
+      if (!data) {
+        missing++;
+        continue;
+      }
+      $("loaderText").textContent = meta.name || "Documento";
+      await dbPut({
+        ...meta,
+        blob: new Blob([await data.arrayBuffer()], { type: meta.kind === "markdown" ? "text/markdown" : "application/pdf" }),
+        cover: coverIndex !== undefined ? new Blob([await fileAt(coverIndex).arrayBuffer()], { type: "image/jpeg" }) : null,
+      });
+      added++;
+    }
+    // Notas y ajustes: se combinan con los actuales (unión de anotaciones,
+    // tarjetas y marcadores; en lo demás se conserva lo que ya tienes).
+    const local = kv.snapshot();
+    const now = Date.now();
+    const entries = [];
+    for (const [k, value] of Object.entries(manifest.kv || {})) {
+      if (DEVICE_ONLY_KEYS.test(k) || typeof value !== "string") continue;
+      const current = local[k]?.v ?? null;
+      const merged = current === null ? value : mergeValue(k, undefined, current, value, local[k]?.t || now, 0);
+      if (merged !== current) entries.push([k, merged, now]);
+    }
+    const changed = kv.applyEntries(entries).length;
+    await kv.flush();
+    requestPersistentStorage();
+    return { added, missing, changed, docs: (manifest.docs || []).length };
+  } finally {
+    showLoader(false);
+  }
+}
+function downloadBlob(name, blob) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+// ---- Ventana «Tus datos»: almacenamiento, copias y sincronización ----
+let pendingRestoreFile = null;
+async function renderDataPanel() {
+  const body = $("dataBody");
+  const [status, records] = await Promise.all([storageStatus(), dbAll().catch(() => [])]);
+  const last = Number(kv.getItem("paper.last-backup-at")) || 0;
+  const encrypt = $("backupEncrypt")?.checked || false;
+  body.innerHTML = `<section class="data-card">
+    <div class="data-card-head"><strong>Almacenamiento en este dispositivo</strong><span class="data-pill ${status.persisted ? "is-ok" : "is-warn"}">${status.persisted ? "Protegido" : "Sin proteger"}</span></div>
+    <p>${records.length} documento${records.length === 1 ? "" : "s"} · ${formatBytes(status.usage)} en uso${status.quota ? ` de ${formatBytes(status.quota)} disponibles` : ""}${kv.mode === "local" ? " · <b>modo de reserva</b> (IndexedDB no disponible)" : ""}.</p>
+    <p class="data-hint">${status.persisted ? "El navegador no borrará tu biblioteca para liberar espacio." : status.supported ? "El navegador podría borrar la biblioteca si se queda sin espacio. Protégela, instala la app o haz copias." : "Este navegador no permite proteger el almacenamiento: haz copias de seguridad de vez en cuando."}</p>
+    ${!status.persisted && status.supported ? '<div class="data-actions"><button class="btn" data-data="persist">Proteger almacenamiento</button></div>' : ""}
+  </section>
+  <section class="data-card">
+    <div class="data-card-head"><strong>Copia de seguridad</strong><span class="data-meta">${last ? `Última: ${relativeTime(last)}` : "Aún no has hecho ninguna"}</span></div>
+    <p>Un solo archivo con todo: documentos, anotaciones, notas, tarjetas, progreso y ajustes.</p>
+    <label class="data-check"><input type="checkbox" id="backupEncrypt"${encrypt ? " checked" : ""}> Cifrar con una contraseña</label>
+    <input class="field data-pass" id="backupPassphrase" type="password" placeholder="Contraseña (mínimo 8 caracteres)" autocomplete="new-password"${encrypt ? "" : " hidden"}>
+    <div class="data-actions"><button class="btn primary-action" data-data="backup-full">Copia completa</button><button class="btn" data-data="backup-notes">Solo notas y ajustes</button></div>
+    <p class="data-hint">La copia «solo notas» ocupa muy poco: al volver a añadir los mismos PDFs, sus notas aparecen solas.</p>
+  </section>
+  <section class="data-card">
+    <div class="data-card-head"><strong>Restaurar</strong></div>
+    <p>Combina una copia con lo que ya tienes. No se borra nada: las anotaciones y tarjetas se suman y, si hay dos versiones de un ajuste, se conserva la tuya.</p>
+    <input class="field data-pass" id="restorePassphrase" type="password" placeholder="Contraseña de la copia" autocomplete="current-password"${pendingRestoreFile ? "" : " hidden"}>
+    <div class="data-actions"><label class="btn" for="restoreInput">Elegir copia…</label><input id="restoreInput" type="file" accept=".paperbackup,application/x-paper-backup,application/octet-stream" hidden>${pendingRestoreFile ? `<button class="btn primary-action" data-data="restore">Restaurar «${escapeHtml(pendingRestoreFile.name)}»</button>` : ""}</div>
+  </section>
+  ${syncSectionHtml()}`;
+}
+function openDataPanel() {
+  $("dataPanel").hidden = false;
+  renderDataPanel().then(() => $("dataPanel").querySelector(".study-card").focus());
+}
+function closeDataPanel() {
+  $("dataPanel").hidden = true;
+  pendingRestoreFile = null;
+}
+async function runRestore(file) {
+  try {
+    const result = await restoreFullBackup(file, $("restorePassphrase")?.value || "");
+    pendingRestoreFile = null;
+    const parts = [
+      result.added ? `${result.added} documento${result.added === 1 ? "" : "s"} añadido${result.added === 1 ? "" : "s"}` : "",
+      result.changed ? `${result.changed} dato${result.changed === 1 ? "" : "s"} combinado${result.changed === 1 ? "" : "s"}` : "",
+      result.missing ? `${result.missing} sin PDF (sus notas aparecerán al añadirlo)` : "",
+    ].filter(Boolean);
+    toast(parts.length ? `Copia restaurada · ${parts.join(" · ")}` : "La copia no contenía nada nuevo", 4200);
+    await renderLibrary();
+    if (currentBook) await openStored(currentBook.id);
+    else {
+      const [latest] = (await dbAll()).sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
+      if (latest) await openStored(latest.id);
+    }
+  } catch (error) {
+    if (error.code === "needs-passphrase") {
+      pendingRestoreFile = file;
+      toast(error.message, 3200);
+    } else {
+      console.error("No se pudo restaurar", error);
+      toast(error.message || "No se pudo restaurar la copia", 3600);
+      if (/contraseña/i.test(error.message)) pendingRestoreFile = file;
+    }
+  }
+  if (!$("dataPanel").hidden) await renderDataPanel();
+  if (pendingRestoreFile) $("restorePassphrase")?.focus();
+}
+function bindDataPanel() {
+  setIcon("libraryDataBtn", "database");
+  $("libraryDataBtn").onclick = openDataPanel;
+  $("closeData").onclick = closeDataPanel;
+  const panel = $("dataPanel");
+  panel.addEventListener("pointerdown", (event) => {
+    if (event.target === panel) closeDataPanel();
+  });
+  panel.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closeDataPanel();
+    }
+  });
+  panel.addEventListener("change", (event) => {
+    if (event.target.id === "backupEncrypt") {
+      $("backupPassphrase").hidden = !event.target.checked;
+      if (event.target.checked) $("backupPassphrase").focus();
+    } else if (event.target.id === "restoreInput") {
+      const [file] = event.target.files || [];
+      event.target.value = "";
+      if (file) runRestore(file);
+    }
+  });
+  panel.addEventListener("click", async (event) => {
+    const action = event.target.closest("[data-data]")?.dataset.data;
+    if (!action) return;
+    if (action === "persist") {
+      persistRequested = false;
+      const granted = await requestPersistentStorage();
+      toast(granted ? "Almacenamiento protegido" : "El navegador no lo ha permitido. Instalar la app suele ayudar.", 3600);
+      renderDataPanel();
+    } else if (action === "backup-full" || action === "backup-notes") {
+      const encrypt = $("backupEncrypt").checked;
+      const passphrase = $("backupPassphrase").value;
+      if (encrypt && passphrase.length < 8) {
+        toast("La contraseña debe tener al menos 8 caracteres");
+        $("backupPassphrase").focus();
+        return;
+      }
+      await exportFullBackup({ includeFiles: action === "backup-full", passphrase: encrypt ? passphrase : "" });
+      renderDataPanel();
+    } else if (action === "restore" && pendingRestoreFile) {
+      runRestore(pendingRestoreFile);
+    } else {
+      handleSyncAction(action);
+    }
+  });
+  panel.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.id === "restorePassphrase" && pendingRestoreFile) runRestore(pendingRestoreFile);
+    if (event.key === "Enter" && event.target.id === "syncPassphrase") handleSyncAction(syncState.needsPassphrase || pendingSyncRoot ? "sync-unlock" : "sync-setup");
+  });
+}
+
+// ---- Sincronización entre dispositivos (ver sync.js) ----
+const syncState = { configured: false, folderName: "", encrypted: false, needsPassphrase: false, permission: "", running: false, progress: "", lastSync: 0, lastSummary: null, error: "" };
+let syncRoot = null,
+  syncKey = null,
+  pendingSyncRoot = null;
+function metaGet(k) {
+  if (!db) return Promise.resolve(null);
+  return idbRequest(db.transaction("meta").objectStore("meta").get(k)).catch(() => null);
+}
+async function metaSet(k, value) {
+  const tx = db.transaction("meta", "readwrite");
+  tx.objectStore("meta").put(value, k);
+  await idbDone(tx);
+}
+async function metaDelete(k) {
+  const tx = db.transaction("meta", "readwrite");
+  tx.objectStore("meta").delete(k);
+  await idbDone(tx);
+}
+async function loadSyncConfig() {
+  if (!db || !folderSyncSupported()) return;
+  const config = await metaGet("sync-config");
+  syncRoot = config?.root || null;
+  syncState.configured = Boolean(syncRoot);
+  if (!syncRoot) return;
+  syncState.folderName = syncRoot.name;
+  syncState.encrypted = Boolean(config.encrypted);
+  syncKey = config.encrypted ? await metaGet("sync-key") : null;
+  syncState.needsPassphrase = syncState.encrypted && !syncKey;
+  syncState.lastSync = Number(kv.getItem("paper.sync-last")) || 0;
+  syncState.permission = await syncRoot.queryPermission({ mode: "readwrite" }).catch(() => "denied");
+}
+const syncAdapter = {
+  listDocs: async () => (await dbAll()).filter((record) => record.blob).map(({ blob, cover, ...meta }) => ({ ...meta, size: meta.size || blob.size })),
+  readDoc: async (id) => (await dbGet(id))?.blob || null,
+  addDoc: async (meta, blob) => {
+    if (!(await dbGet(meta.id))) await dbPut({ ...meta, blob });
+  },
+  deleteDoc: (id) => removeBook(id, { quiet: true }),
+  kvSnapshot: () => kv.snapshot(),
+  applyKv: async (entries) => {
+    kv.applyEntries(entries);
+    await kv.flush();
+  },
+  loadBase: () => metaGet("sync-base"),
+  saveBase: (base) => metaSet("sync-base", base),
+  confirmDeletions: async (docs) =>
+    confirm(`La sincronización eliminaría ${docs.length} documento${docs.length === 1 ? "" : "s"} de este dispositivo porque se borraron en otro:\n\n${docs.slice(0, 8).map((doc) => `• ${libraryDisplayName(doc.name)}`).join("\n")}${docs.length > 8 ? "\n…" : ""}\n\n¿Eliminarlos? (Cancelar los conserva y los vuelve a subir.)`),
+  filterKey: (k) => k.startsWith("paper.") && !DEVICE_ONLY_KEYS.test(k),
+};
+function syncSummaryText(summary) {
+  if (!summary) return "";
+  const parts = [
+    summary.uploaded && `${summary.uploaded} subido${summary.uploaded === 1 ? "" : "s"}`,
+    summary.downloaded && `${summary.downloaded} recibido${summary.downloaded === 1 ? "" : "s"}`,
+    summary.deletedLocal + summary.deletedRemote && `${summary.deletedLocal + summary.deletedRemote} eliminado${summary.deletedLocal + summary.deletedRemote === 1 ? "" : "s"}`,
+    summary.notesIn && `${summary.notesIn} cambio${summary.notesIn === 1 ? "" : "s"} de notas recibido${summary.notesIn === 1 ? "" : "s"}`,
+    summary.missing && `${summary.missing} documento${summary.missing === 1 ? "" : "s"} aún llegando desde la nube`,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "Todo estaba al día";
+}
+function syncSectionHtml() {
+  const head = (pill = "", pillClass = "") => `<div class="data-card-head"><strong>Sincronizar entre dispositivos</strong>${pill ? `<span class="data-pill ${pillClass}">${pill}</span>` : ""}</div>`;
+  if (!folderSyncSupported())
+    return `<section class="data-card">${head("No disponible aquí")}<p>La sincronización por carpeta necesita Chrome o Edge de escritorio. En este dispositivo puedes llevarte tus datos con «Copia completa» y «Restaurar».</p></section>`;
+  const passField = `<input class="field data-pass" id="syncPassphrase" type="password" placeholder="Contraseña de sincronización" autocomplete="current-password">`;
+  if (!syncState.configured && !pendingSyncRoot)
+    return `<section class="data-card">${head()}<p>Elige una carpeta que tu nube ya sincronice (Dropbox, Google Drive, OneDrive, iCloud Drive…). Paper Reader guardará allí tu biblioteca y tus notas y las combinará con las de tus otros dispositivos. Nada pasa por servidores de Paper Reader.</p><label class="data-check"><input type="checkbox" id="syncEncrypt" checked> Cifrar de extremo a extremo (recomendado)</label>${passField.replace('autocomplete="current-password"', 'autocomplete="new-password"')}<div class="data-actions"><button class="btn primary-action" data-data="sync-setup">Elegir carpeta…</button></div><p class="data-hint">Usa la misma carpeta y la misma contraseña en todos tus dispositivos. Si la olvidas, no se puede recuperar.</p></section>`;
+  if (syncState.needsPassphrase || pendingSyncRoot)
+    return `<section class="data-card">${head("Bloqueada", "is-warn")}<p>La carpeta ${escapeHtml((pendingSyncRoot || syncRoot)?.name || "")} está cifrada. Escribe la contraseña de sincronización para usarla en este dispositivo.</p>${passField}<div class="data-actions"><button class="btn primary-action" data-data="sync-unlock">Desbloquear</button><button class="btn" data-data="sync-stop">Cancelar</button></div></section>`;
+  const status = syncState.running
+    ? escapeHtml(syncState.progress || "Sincronizando…")
+    : syncState.error
+      ? `<span class="data-error">${escapeHtml(syncState.error)}</span>`
+      : syncState.lastSync
+        ? `Última sincronización ${relativeTime(syncState.lastSync)}${syncState.lastSummary ? ` · ${escapeHtml(syncSummaryText(syncState.lastSummary))}` : ""}`
+        : "Aún no se ha sincronizado";
+  const permissionNote = syncState.permission !== "granted" ? '<p class="data-hint">El navegador necesita que vuelvas a autorizar el acceso a la carpeta: pulsa «Sincronizar ahora».</p>' : "";
+  return `<section class="data-card">${head(syncState.running ? "Sincronizando…" : syncState.encrypted ? "Cifrada" : "Sin cifrar", syncState.running ? "" : syncState.encrypted ? "is-ok" : "")}<p>Carpeta <b>${escapeHtml(syncState.folderName)}</b> › Paper Reader. Se sincroniza al abrir la app y cada pocos minutos.</p><p class="data-status" id="syncStatus">${status}</p>${permissionNote}<div class="data-actions"><button class="btn primary-action" data-data="sync-now"${syncState.running ? " disabled" : ""}>Sincronizar ahora</button><button class="btn" data-data="sync-stop"${syncState.running ? " disabled" : ""}>Dejar de sincronizar</button></div></section>`;
+}
+function refreshDataPanel() {
+  if (!$("dataPanel").hidden) renderDataPanel();
+}
+function refreshCurrentDocumentData() {
+  if (!currentBook) return;
+  renderAnnotations();
+  renderAnnotationList();
+  renderBookmarks();
+  updateBookmarkButton();
+  updateStudyLaunch();
+  if (!$("notebookPanel").hidden && !$("notebookPanel").contains(document.activeElement)) renderNotebook();
+}
+async function runSync({ interactive = false } = {}) {
+  if (syncState.running || !syncRoot || syncState.needsPassphrase) return null;
+  let permission = await syncRoot.queryPermission({ mode: "readwrite" }).catch(() => "denied");
+  if (permission !== "granted" && interactive) permission = await syncRoot.requestPermission({ mode: "readwrite" }).catch(() => "denied");
+  syncState.permission = permission;
+  if (permission !== "granted") {
+    refreshDataPanel();
+    if (interactive) toast("Sin permiso para usar la carpeta de sincronización", 3200);
+    return null;
+  }
+  syncState.running = true;
+  syncState.error = "";
+  syncState.progress = "";
+  refreshDataPanel();
+  try {
+    flushNotebook();
+    await kv.flush();
+    const dir = await syncRoot.getDirectoryHandle("Paper Reader", { create: true });
+    const summary = await syncFolder({
+      dir,
+      key: syncKey,
+      adapter: syncAdapter,
+      onProgress: (text) => {
+        syncState.progress = text;
+        const status = $("syncStatus");
+        if (status) status.textContent = text;
+      },
+    });
+    syncState.lastSync = Date.now();
+    syncState.lastSummary = summary;
+    kv.setItem("paper.sync-last", String(syncState.lastSync));
+    if (summary.downloaded || summary.deletedLocal || summary.uploaded) renderLibrary();
+    if (summary.notesIn) refreshCurrentDocumentData();
+    if (interactive) toast(`Sincronizado · ${syncSummaryText(summary)}`, 3600);
+    return summary;
+  } catch (error) {
+    console.error("La sincronización falló", error);
+    syncState.error = error?.name === "NotAllowedError" ? "El navegador ha retirado el permiso de la carpeta" : error.message || "La sincronización falló";
+    if (interactive) toast(syncState.error, 4000);
+    return null;
+  } finally {
+    syncState.running = false;
+    refreshDataPanel();
+  }
+}
+async function handleSyncAction(action) {
+  const passphrase = $("syncPassphrase")?.value || "";
+  if (action === "sync-setup") {
+    const encrypt = $("syncEncrypt")?.checked;
+    if (encrypt && passphrase.length < 8) {
+      toast("Escribe una contraseña de al menos 8 caracteres");
+      $("syncPassphrase")?.focus();
+      return;
+    }
+    let root;
+    try {
+      root = await window.showDirectoryPicker({ id: "paper-sync", mode: "readwrite" });
+    } catch {
+      return;
+    }
+    await connectSyncFolder(root, encrypt ? passphrase : "", { wantedEncryption: encrypt });
+  } else if (action === "sync-unlock") {
+    const root = pendingSyncRoot || syncRoot;
+    if (!root) return;
+    if (!passphrase) return $("syncPassphrase")?.focus();
+    await connectSyncFolder(root, passphrase);
+  } else if (action === "sync-now") {
+    await runSync({ interactive: true });
+  } else if (action === "sync-stop") {
+    if (syncState.configured && !confirm("¿Dejar de sincronizar este dispositivo? Tus datos locales y la carpeta se quedan como están.")) return;
+    pendingSyncRoot = null;
+    await Promise.all(["sync-config", "sync-key", "sync-base"].map((k) => metaDelete(k).catch(() => {})));
+    Object.assign(syncState, { configured: false, folderName: "", encrypted: false, needsPassphrase: false, lastSummary: null, error: "" });
+    syncRoot = null;
+    syncKey = null;
+    refreshDataPanel();
+  }
+}
+async function connectSyncFolder(root, passphrase, { wantedEncryption = false } = {}) {
+  try {
+    const permission = root.requestPermission ? await root.requestPermission({ mode: "readwrite" }).catch(() => "denied") : "granted";
+    if (permission !== "granted") throw new Error("Sin permiso para escribir en esa carpeta");
+    const opened = await openSyncFolder(root, passphrase);
+    const previous = await metaGet("sync-config");
+    await metaSet("sync-config", { root, encrypted: opened.encrypted });
+    if (opened.key) await metaSet("sync-key", opened.key);
+    else await metaDelete("sync-key");
+    // Otra carpeta = otro historial: sin base, la primera vez solo se suma.
+    if (!previous?.root || !(await previous.root.isSameEntry?.(root))) await metaDelete("sync-base");
+    pendingSyncRoot = null;
+    await loadSyncConfig();
+    if (wantedEncryption && !opened.encrypted && !opened.created) toast("Esa carpeta ya se usaba sin cifrar y se mantiene así", 4000);
+    await runSync({ interactive: true });
+  } catch (error) {
+    if (error.code === "needs-passphrase" || error.code === "bad-passphrase") {
+      pendingSyncRoot = root;
+      toast(error.message, 3600);
+    } else {
+      console.error("No se pudo preparar la carpeta", error);
+      toast(error.message || "No se pudo usar esa carpeta", 3600);
+    }
+    refreshDataPanel();
+    if (pendingSyncRoot) requestAnimationFrame(() => $("syncPassphrase")?.focus());
+  }
+}
+function startBackgroundSync() {
+  loadSyncConfig()
+    .then(() => {
+      if (syncState.configured && syncState.permission === "granted") runSync();
+    })
+    .catch((error) => console.warn("No se pudo leer la configuración de sincronización", error));
+  setInterval(() => {
+    if (document.visibilityState === "visible" && syncState.configured && syncState.permission === "granted") runSync();
+  }, 5 * 60_000);
+}
+
 // ---- Biblioteca -------------------------------------------------------------
-let libraryFilter = localStorage.getItem("paper.library-filter") || "all";
+let libraryFilter = kv.getItem("paper.library-filter") || "all";
 let libraryCoverUrls = [];
 let libraryCoverQueue = Promise.resolve();
 const libraryCoverPending = new Set();
@@ -435,8 +1095,8 @@ async function renderLibrary() {
     return url;
   };
   const query = ($("librarySearch")?.value || "").trim().toLocaleLowerCase();
-  const sort = $("librarySort")?.value || localStorage.getItem("paper.library-sort") || "recent";
-  const view = localStorage.getItem("paper.library-view") || "grid";
+  const sort = $("librarySort")?.value || kv.getItem("paper.library-sort") || "recent";
+  const view = kv.getItem("paper.library-view") || "grid";
   const estimates = new Map(books.map((book) => [book.id, readingEstimate(book)]));
   const status = new Map(books.map((book) => [book.id, libraryStatus(book, estimates.get(book.id))]));
   const counts = { all: books.length, reading: 0, new: 0, done: 0, markdown: 0 };
@@ -526,14 +1186,14 @@ function bindLibrary() {
   $("librarySearchIcon").innerHTML = iconSvg("search");
   document.querySelector('[data-library-view="grid"]').innerHTML = iconSvg("grid");
   document.querySelector('[data-library-view="list"]').innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>';
-  const sort = localStorage.getItem("paper.library-sort");
+  const sort = kv.getItem("paper.library-sort");
   if (sort) $("librarySort").value = sort;
   $("homeBtn").onclick = openLibrary;
   $("emptyLibraryBtn").onclick = openLibrary;
   $("closeLibrary").onclick = closeLibrary;
   $("librarySearch").addEventListener("input", renderLibrary);
   $("librarySort").addEventListener("change", () => {
-    localStorage.setItem("paper.library-sort", $("librarySort").value);
+    kv.setItem("paper.library-sort", $("librarySort").value);
     renderLibrary();
   });
   const panel = $("libraryPanel");
@@ -550,12 +1210,12 @@ function bindLibrary() {
     const filter = event.target.closest("[data-library-filter]");
     if (filter) {
       libraryFilter = filter.dataset.libraryFilter;
-      localStorage.setItem("paper.library-filter", libraryFilter);
+      kv.setItem("paper.library-filter", libraryFilter);
       return renderLibrary();
     }
     const view = event.target.closest("[data-library-view]");
     if (view) {
-      localStorage.setItem("paper.library-view", view.dataset.libraryView);
+      kv.setItem("paper.library-view", view.dataset.libraryView);
       return renderLibrary();
     }
   });
@@ -609,8 +1269,8 @@ async function addFile(file, open = true) {
     return toast("Selecciona un PDF o Markdown");
   showLoader(true, `Guardando ${isMarkdown ? "Markdown" : "PDF"}…`, "Se queda solo en este dispositivo");
   try {
-    const id = bookId(file),
-      buffer = await file.arrayBuffer();
+    const buffer = await file.arrayBuffer();
+    const id = await documentIdFor(buffer, file);
     const existing = await dbGet(id);
     const record = {
       ...existing,
@@ -618,11 +1278,14 @@ async function addFile(file, open = true) {
       name: file.name,
       kind: isMarkdown ? "markdown" : "pdf",
       blob: new Blob([buffer], { type: isMarkdown ? "text/markdown" : "application/pdf" }),
+      size: buffer.byteLength,
       addedAt: existing?.addedAt || Date.now(),
       openedAt: Date.now(),
       pages: isMarkdown ? 1 : existing?.pages || null,
     };
     await dbPut(record);
+    if (existing) toast(existing.name === file.name ? "Ya estaba en tu biblioteca: se conservan sus notas" : `Es el mismo documento que «${libraryDisplayName(existing.name)}»: se conservan sus notas`, 3200);
+    requestPersistentStorage();
     if (open) await openStored(id);
     else {
       ensureBookCover(record);
@@ -711,7 +1374,12 @@ async function openMarkdownStored(rec) {
   document.body.classList.remove("sidebar-open");
   markReadingActivity();
 }
+// Si se abre otro documento mientras este aún se prepara, la apertura antigua
+// se abandona en vez de pintar sus marcadores o su índice sobre el nuevo.
+let openStoredToken = 0;
 async function openStored(id) {
+  const openToken = ++openStoredToken;
+  const superseded = () => openToken !== openStoredToken;
   showLoader(true);
   try {
     if (currentBook?.id !== id) flushReadingSession(true);
@@ -727,7 +1395,7 @@ async function openStored(id) {
       return;
     }
     markdownContent = "";
-    reflowMode = localStorage.getItem("paper.reading-mode") === "reflow";
+    reflowMode = kv.getItem("paper.reading-mode") === "reflow";
     document.body.classList.toggle("reflow-mode", reflowMode);
     $("markerModeBtn").disabled = reflowMode;
     $("eraserModeBtn").disabled = reflowMode;
@@ -737,12 +1405,18 @@ async function openStored(id) {
     );
     resetRenderEngine();
     const bytes = new Uint8Array(await rec.blob.arrayBuffer());
-    pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+    const loadedDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+    if (superseded()) {
+      loadedDoc.destroy?.();
+      return;
+    }
+    pdfDoc = loadedDoc;
     rec.pages = pdfDoc.numPages;
     rec.openedAt = Date.now();
     await dbPut(rec);
     currentBook = rec;
     if (!rec.cover) ensureBookCover(rec, pdfDoc);
+    loadCurrentDocText(rec, pdfDoc);
     assistantLoadDocument();
     resetAnnotationHistory();
     migrateLegacyPageNotes();
@@ -769,43 +1443,46 @@ async function openStored(id) {
       renderSearchResults();
     }
     currentPage = Math.min(
-      Number(localStorage.getItem(key(id, "page")) || 1),
+      Number(kv.getItem(key(id, "page")) || 1),
       pdfDoc.numPages,
     );
-    const storedScale = Number(localStorage.getItem(key(id, "scale")));
+    const storedScale = Number(kv.getItem(key(id, "scale")));
     scale = storedScale > 0 ? storedScale : 1.25;
-    rotation = Number(localStorage.getItem(key(id, "rotation")) || 0) % 360;
+    rotation = Number(kv.getItem(key(id, "rotation")) || 0) % 360;
     $("emptyState").hidden = true;
     $("canvasWrap").hidden = false;
     document.body.classList.add("has-doc");
     // El zoom se decide por modo: los documentos sin modo guardado (o con un
     // zoom manual sin escala) abren en «Automático», que siempre cabe bien.
-    zoomMode = localStorage.getItem(key(id, "zoom-mode")) || "auto";
+    zoomMode = kv.getItem(key(id, "zoom-mode")) || "auto";
     if (zoomMode === "custom" && !(storedScale > 0)) zoomMode = "auto";
     if (zoomMode !== "custom") scale = await computeZoomForMode(zoomMode);
     $("docTitle").textContent = rec.name;
     $("docMeta").textContent =
       `${pdfDoc.numPages} páginas · guardado localmente`;
     await renderPage(currentPage);
-    const storedViewMode = localStorage.getItem("paper.view-mode") || "single";
+    if (superseded()) return;
+    const storedViewMode = kv.getItem("paper.view-mode") || "single";
     if (!reflowMode && storedViewMode !== "single") await setViewMode(storedViewMode, { silent: true });
+    if (superseded()) return;
     else document.querySelectorAll("[data-view-mode]").forEach((button) =>
       button.classList.toggle("active", button.dataset.viewMode === viewMode),
     );
     renderBookmarks();
     renderAnnotationList();
+    if (!$("sidebarRefsPanel").hidden) renderReferencesPanel();
     await renderOutline();
     renderLibrary();
     if (!$("notebookPanel").hidden) renderNotebook();
-    if (localStorage.getItem("paper.ruler") === "1") setReadingRuler(true, true);
+    if (kv.getItem("paper.ruler") === "1") setReadingRuler(true, true);
     updateStudyLaunch();
     document.body.classList.remove("sidebar-open");
     markReadingActivity();
   } catch (e) {
     console.error(e);
-    toast("No se pudo abrir el PDF");
+    if (!superseded()) toast("No se pudo abrir el PDF");
   } finally {
-    showLoader(false);
+    if (!superseded()) showLoader(false);
   }
 }
 
@@ -1031,11 +1708,18 @@ function teardownContinuous() {
   const container = $("continuousView");
   if (container) container.replaceChildren();
 }
-async function buildContinuousView() {
+// Al vaciar o redimensionar la vista, el navegador mueve el scroll (a 0 al
+// vaciarla): esos saltos no deben tomarse como «el lector ha ido a la página 1».
+let continuousSyncHold = 0;
+function holdContinuousSync(ms = 400) {
+  continuousSyncHold = performance.now() + ms;
+}
+async function buildContinuousView(targetPage = currentPage) {
   const container = $("continuousView");
   if (!container || !pdfDoc) return;
+  holdContinuousSync();
   teardownContinuous();
-  const first = await getCachedPage(currentPage);
+  const first = await getCachedPage(targetPage);
   const baseViewport = first.getViewport({ scale, rotation });
   const fragment = document.createDocumentFragment();
   for (let i = 1; i <= pdfDoc.numPages; i++) {
@@ -1054,7 +1738,46 @@ async function buildContinuousView() {
     threshold: 0.01,
   });
   container.querySelectorAll(".cont-page").forEach((slot) => continuousObserver.observe(slot));
+  holdContinuousSync();
   markContinuousCurrent();
+}
+// Cambio de zoom, giro o tamaño de ventana: se redimensionan las páginas sin
+// reconstruir la vista y se conserva el punto exacto de lectura.
+async function rescaleContinuousView() {
+  const container = $("continuousView");
+  if (!container || !pdfDoc) return;
+  if (container.children.length !== pdfDoc.numPages) {
+    const target = currentPage;
+    await buildContinuousView(target);
+    scrollToContinuousPage(target, { smooth: false });
+    return;
+  }
+  const viewer = $("viewer");
+  const target = currentPage;
+  const before = container.children[target - 1];
+  const ratio = before.offsetHeight ? (viewer.scrollTop - before.offsetTop) / before.offsetHeight : 0;
+  const horizontal = viewer.scrollWidth > viewer.clientWidth ? (viewer.scrollLeft + viewer.clientWidth / 2) / viewer.scrollWidth : 0.5;
+  const page = await getCachedPage(target);
+  if (viewMode !== "continuous") return;
+  const viewport = page.getViewport({ scale, rotation });
+  holdContinuousSync();
+  for (const pageNumber of continuousRendered) {
+    const slot = container.children[pageNumber - 1];
+    if (slot) clearContinuousSlot(slot);
+  }
+  continuousRendered = new Set();
+  for (const slot of container.children) {
+    slot.style.width = `${viewport.width}px`;
+    slot.style.height = `${viewport.height}px`;
+  }
+  const after = container.children[target - 1];
+  viewer.scrollTop = after.offsetTop + ratio * after.offsetHeight;
+  viewer.scrollLeft = Math.max(0, horizontal * viewer.scrollWidth - viewer.clientWidth / 2);
+  // Volver a observar provoca el aviso inicial y se dibujan las visibles.
+  continuousObserver?.disconnect();
+  container.querySelectorAll(".cont-page").forEach((slot) => continuousObserver?.observe(slot));
+  holdContinuousSync();
+  syncCurrentFromScroll(target);
 }
 function onContinuousIntersect(entries) {
   for (const entry of entries) {
@@ -1076,14 +1799,36 @@ async function renderContinuousSlot(slot) {
       sizeTarget: slot,
     });
     if (viewMode !== "continuous") return;
+    // Si la página salió de la vista mientras se dibujaba, se libera ya: si no,
+    // un desplazamiento rápido dejaba cientos de lienzos ocupando memoria.
+    if (!continuousRendered.has(pageNumber)) clearContinuousSlot(slot);
+    trimContinuousRenders();
   } catch {
     continuousRendered.delete(pageNumber);
+  }
+}
+// Límite de páginas dibujadas a la vez (proporcional a las que caben en
+// pantalla): se liberan las más alejadas de la página actual.
+function trimContinuousRenders() {
+  const container = $("continuousView");
+  const sample = container?.children[currentPage - 1];
+  if (!sample) return;
+  const perScreen = Math.ceil($("viewer").clientHeight / Math.max(40, sample.offsetHeight));
+  const limit = Math.max(14, perScreen * 3 + 4);
+  if (continuousRendered.size <= limit) return;
+  const farthest = [...continuousRendered].sort((a, b) => Math.abs(b - currentPage) - Math.abs(a - currentPage));
+  for (const page of farthest.slice(0, continuousRendered.size - limit)) {
+    const slot = container.children[page - 1];
+    if (slot) unloadContinuousSlot(slot);
   }
 }
 function unloadContinuousSlot(slot) {
   const pageNumber = Number(slot.dataset.page);
   if (!continuousRendered.has(pageNumber)) return;
   continuousRendered.delete(pageNumber);
+  clearContinuousSlot(slot);
+}
+function clearContinuousSlot(slot) {
   const canvas = slot.querySelector("canvas");
   if (canvas) {
     canvas.width = 0;
@@ -1095,18 +1840,22 @@ function unloadContinuousSlot(slot) {
   slot.querySelector(".link-layer")?.replaceChildren();
 }
 function markContinuousCurrent() {
-  $("continuousView")
-    ?.querySelectorAll(".cont-page")
-    .forEach((slot) => slot.classList.toggle("is-current", Number(slot.dataset.page) === currentPage));
+  const container = $("continuousView");
+  if (!container) return;
+  container.querySelector(".cont-page.is-current")?.classList.remove("is-current");
+  container.children[currentPage - 1]?.classList.add("is-current");
 }
 function scrollToContinuousPage(pageNumber, options = {}) {
   const container = $("continuousView");
   if (!container) return;
   const target = Math.max(1, Math.min(pdfDoc.numPages, pageNumber));
-  const slot = container.querySelector(`.cont-page[data-page="${target}"]`);
+  const slot = container.children[target - 1];
   syncCurrentFromScroll(target);
   if (slot && options.scroll !== false) {
-    $("viewer").scrollTo({ top: slot.offsetTop - 18, behavior: options.smooth === false ? "auto" : "smooth" });
+    const smooth = options.smooth !== false;
+    // Durante un salto suave no se va marcando cada página por la que pasa.
+    holdContinuousSync(smooth ? 900 : 250);
+    $("viewer").scrollTo({ top: slot.offsetTop - 12, behavior: smooth ? "smooth" : "auto" });
   }
 }
 // Actualiza el estado a partir de la página visible al hacer scroll (sin
@@ -1119,32 +1868,44 @@ function syncCurrentFromScroll(pageNumber) {
   }
   currentPage = pageNumber;
   readingSession.page = currentPage;
-  if (currentBook) localStorage.setItem(key(currentBook.id, "page"), String(currentPage));
+  if (currentBook) kv.setItem(key(currentBook.id, "page"), String(currentPage));
   updatePageChrome();
   updateThumbSelection();
   updateOutlineSelection();
   markContinuousCurrent();
   if (presentationMode) updatePresentationCount();
 }
+// La página actual es la que ocupa la franja de lectura (un tercio desde
+// arriba), el mismo criterio con el que se salta a una página.
+function continuousPageAtReadingLine() {
+  const viewer = $("viewer");
+  const slots = $("continuousView").children;
+  if (!slots.length) return 0;
+  const probe = viewer.scrollTop + Math.min(viewer.clientHeight * 0.33, 260);
+  // Las páginas están en orden vertical: búsqueda binaria en vez de medir
+  // las mil páginas de un libro largo en cada fotograma.
+  let lo = 0,
+    hi = slots.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (slots[mid].offsetTop + slots[mid].offsetHeight < probe) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo + 1;
+}
+let continuousRetryTimer = 0;
 function onContinuousScroll() {
   if (viewMode !== "continuous" || continuousScrollFrame) return;
   continuousScrollFrame = requestAnimationFrame(() => {
     continuousScrollFrame = 0;
-    const viewer = $("viewer");
-    const center = viewer.scrollTop + viewer.clientHeight / 2;
-    let best = currentPage,
-      bestDistance = Infinity;
-    $("continuousView")
-      .querySelectorAll(".cont-page")
-      .forEach((slot) => {
-        const middle = slot.offsetTop + slot.offsetHeight / 2;
-        const distance = Math.abs(middle - center);
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          best = Number(slot.dataset.page);
-        }
-      });
-    if (best !== currentPage) syncCurrentFromScroll(best);
+    if (performance.now() < continuousSyncHold) {
+      // Se vuelve a mirar al terminar la pausa por si el lector siguió moviéndose.
+      clearTimeout(continuousRetryTimer);
+      continuousRetryTimer = setTimeout(onContinuousScroll, continuousSyncHold - performance.now() + 30);
+      return;
+    }
+    const page = continuousPageAtReadingLine();
+    if (page && page !== currentPage) syncCurrentFromScroll(page);
   });
 }
 
@@ -1154,7 +1915,7 @@ async function setViewMode(mode, options = {}) {
   if (reflowMode && mode !== "single") await setReadingMode("pdf");
   const previous = viewMode;
   viewMode = mode;
-  localStorage.setItem("paper.view-mode", mode);
+  kv.setItem("paper.view-mode", mode);
   document.querySelectorAll("[data-view-mode]").forEach((button) =>
     button.classList.toggle("active", button.dataset.viewMode === mode),
   );
@@ -1172,8 +1933,9 @@ async function setViewMode(mode, options = {}) {
   $("reflowReader").hidden = !reflowMode;
   if (!pdfDoc) return;
   if (mode === "continuous") {
-    await buildContinuousView();
-    scrollToContinuousPage(currentPage, { smooth: false });
+    const target = currentPage;
+    await buildContinuousView(target);
+    scrollToContinuousPage(target, { smooth: false });
   } else {
     await renderPage(currentPage, { resetScroll: false });
   }
@@ -1188,7 +1950,7 @@ function stepPage(direction) {
 function refreshCurrentView() {
   if (!pdfDoc) return;
   if (viewMode === "continuous" && !reflowMode) {
-    buildContinuousView().then(() => scrollToContinuousPage(currentPage, { smooth: false }));
+    rescaleContinuousView();
   } else {
     renderPage(currentPage, { resetScroll: false });
   }
@@ -1464,31 +2226,20 @@ function paletteActions() {
     { icon: "◐", title: "Tema sepia", keys: "apariencia papel", run: () => setTheme("sepia") },
     { icon: "↗", title: "Exportar anotaciones a Markdown", keys: "descargar notas md", when: hasDoc, run: exportMarkdown },
     { icon: "↓", title: "Exportar copia de las anotaciones (JSON)", keys: "descargar backup", when: hasDoc, run: exportAnnotations },
+    { icon: "◫", title: splitOpen() ? "Cerrar la vista dividida" : "Vista dividida (dos documentos a la vez)", keys: "split dividir comparar dos paneles lado", shortcut: ["D"], when: hasPdf, run: toggleSplitView },
+    { icon: "❝", title: "Referencias y cita del documento", keys: "bibliografia bibtex zotero doi citar referencias ris", when: hasPdf, run: () => { if (isDrawerLayout()) document.body.classList.add("sidebar-open"); else if (document.body.classList.contains("sidebar-collapsed")) toggleSidebar(); setSidebarPanel("refs"); } },
+    { icon: "⛁", title: "Copia de seguridad y sincronización", keys: "backup exportar restaurar importar sincronizar nube dropbox drive datos", run: openDataPanel },
+    { icon: "⛁", title: "Sincronizar ahora", keys: "sync nube dispositivos", when: syncState.configured, run: () => runSync({ interactive: true }) },
     { icon: "⌨", title: "Ver atajos de teclado", keys: "ayuda teclas", shortcut: ["?"], run: openShortcuts },
   ];
   return actions.filter((action) => action.when === undefined || action.when);
 }
+// La paleta usa el índice de texto del documento (guardado o en construcción).
 function ensurePaletteTextIndex() {
-  if (!pdfDoc || !currentBook) return null;
-  if (paletteTextIndex?.bookId === currentBook.id) return paletteTextIndex;
-  const doc = pdfDoc;
-  const index = { bookId: currentBook.id, pages: new Array(doc.numPages).fill(null), done: 0 };
-  paletteTextIndex = index;
-  (async () => {
-    for (let i = 1; i <= doc.numPages; i++) {
-      if (paletteTextIndex !== index || pdfDoc !== doc) return;
-      try {
-        const page = await doc.getPage(i);
-        const content = await page.getTextContent();
-        index.pages[i - 1] = content.items.map((item) => item.str).join(" ").replace(/\s+/g, " ");
-      } catch {
-        index.pages[i - 1] = "";
-      }
-      index.done = i;
-      if (i % 12 === 0 || i === doc.numPages) schedulePaletteRender();
-    }
-  })();
-  return index;
+  if (!pdfDoc || !currentBook || docText.id !== currentBook.id) return null;
+  buildDocText(docText);
+  paletteTextIndex = docText;
+  return docText;
 }
 function paletteHighlight(text, regex) {
   if (!regex) return escapeHtml(text);
@@ -1702,7 +2453,7 @@ async function applyPaletteSearch(raw, page = 0, occurrence = 0) {
 // ---- Atajos de teclado ----
 const SHORTCUT_GROUPS = [
   ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
-  ["Lectura", [["Regla de lectura", ["G"]], ["Mover la regla", ["↑", "↓"]], ["Desplazamiento automático", ["A"]], ["Pausar / velocidad (auto-scroll)", ["Espacio", "[", "]"]], ["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
+  ["Lectura", [["Regla de lectura", ["G"]], ["Mover la regla", ["↑", "↓"]], ["Desplazamiento automático", ["A"]], ["Pausar / velocidad (auto-scroll)", ["Espacio", "[", "]"]], ["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Vista dividida", ["D"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
   ["Notas y anotaciones", [["Nota en un punto de la página", ["N"]], ["Ventana de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
   ["Asistente IA", [["Abrir o cerrar el asistente", ["I"]], ["Enviar pregunta / nueva línea", ["Enter", "⇧ Enter"]], ["Detener la respuesta o cerrar", ["Esc"]]]],
   ["Estudio", [["Abrir tarjetas de estudio", ["E"]], ["Mostrar respuesta", ["Espacio"]], ["Calificar: otra vez · difícil · bien · fácil", ["1", "2", "3", "4"]]]],
@@ -1741,10 +2492,10 @@ let activeStickyId = null;
 let freshStickyId = null;
 const freshNoteIds = new Set();
 const noteTool = {
-  mode: localStorage.getItem("paper.note-tool") || "text",
-  ink: localStorage.getItem("paper.note-ink") || "black",
-  highlight: localStorage.getItem("paper.note-highlight") || "yellow",
-  width: localStorage.getItem("paper.note-width") || "medium",
+  mode: kv.getItem("paper.note-tool") || "text",
+  ink: kv.getItem("paper.note-ink") || "black",
+  highlight: kv.getItem("paper.note-highlight") || "yellow",
+  width: kv.getItem("paper.note-width") || "medium",
 };
 function stickyColorValue(color) {
   return annotationStyle(color || "yellow", 0.95);
@@ -1806,7 +2557,7 @@ function newNoteMark(page, fields = {}) {
     id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
     page,
     type: "sticky",
-    color: localStorage.getItem("paper.sticky-color") || "yellow",
+    color: kv.getItem("paper.sticky-color") || "yellow",
     x: null,
     y: null,
     note: "",
@@ -2150,7 +2901,7 @@ let rulerOn = false;
 let rulerRatio = 0.38;
 let rulerFrame = 0;
 function rulerHeight() {
-  return RULER_HEIGHTS[localStorage.getItem("paper.ruler-size")] || RULER_HEIGHTS.medium;
+  return RULER_HEIGHTS[kv.getItem("paper.ruler-size")] || RULER_HEIGHTS.medium;
 }
 function positionRuler() {
   rulerFrame = 0;
@@ -2174,7 +2925,7 @@ function setReadingRuler(on, quiet = false) {
   rulerOn = Boolean(on);
   $("readingRuler").hidden = !rulerOn;
   $("rulerBtn")?.setAttribute("aria-pressed", String(rulerOn));
-  localStorage.setItem("paper.ruler", rulerOn ? "1" : "0");
+  kv.setItem("paper.ruler", rulerOn ? "1" : "0");
   if (rulerOn) {
     positionRuler();
     if (!quiet) toast("Regla de lectura: mueve el puntero o usa ↑ ↓");
@@ -2205,7 +2956,7 @@ function moveRulerBy(direction) {
   scheduleRuler();
 }
 function setRulerSize(size) {
-  localStorage.setItem("paper.ruler-size", size);
+  kv.setItem("paper.ruler-size", size);
   document.querySelectorAll("[data-ruler-size]").forEach((button) => button.classList.toggle("active", button.dataset.rulerSize === size));
   scheduleRuler();
 }
@@ -2257,7 +3008,7 @@ function setAutoScroll(on) {
   autoScroll.carry = 0;
   cancelAnimationFrame(autoScroll.raf);
   if (autoScroll.on) {
-    autoScroll.level = Math.max(0, Math.min(AUTOSCROLL_SPEEDS.length - 1, Number(localStorage.getItem("paper.autoscroll-level") ?? 3)));
+    autoScroll.level = Math.max(0, Math.min(AUTOSCROLL_SPEEDS.length - 1, Number(kv.getItem("paper.autoscroll-level") ?? 3)));
     autoScroll.raf = requestAnimationFrame(autoScrollTick);
     toast("Auto-scroll: espacio pausa · [ ] velocidad");
   }
@@ -2265,7 +3016,7 @@ function setAutoScroll(on) {
 }
 function changeAutoScrollSpeed(delta) {
   autoScroll.level = Math.max(0, Math.min(AUTOSCROLL_SPEEDS.length - 1, autoScroll.level + delta));
-  localStorage.setItem("paper.autoscroll-level", String(autoScroll.level));
+  kv.setItem("paper.autoscroll-level", String(autoScroll.level));
   updateAutoScrollUi();
 }
 function toggleAutoScrollPause() {
@@ -2350,7 +3101,7 @@ function bindReadingTools() {
   window.addEventListener("resize", scheduleRuler, { passive: true });
   $("rulerBtn").onclick = () => setReadingRuler(!rulerOn);
   document.querySelectorAll("[data-ruler-size]").forEach((button) => (button.onclick = () => setRulerSize(button.dataset.rulerSize)));
-  setRulerSize(localStorage.getItem("paper.ruler-size") || "medium");
+  setRulerSize(kv.getItem("paper.ruler-size") || "medium");
   $("autoScrollBtn").onclick = () => setAutoScroll(!autoScroll.on);
   $("autoScrollToggle").onclick = toggleAutoScrollPause;
   $("autoScrollSlower").onclick = () => changeAutoScrollSpeed(-1);
@@ -2411,6 +3162,8 @@ const ICONS = {
   strike: '<path d="M16 4H9a3 3 0 0 0-2.8 4"/><path d="M14 12a4 4 0 0 1 0 8H6"/><path d="M4 12h16"/>',
   square: '<rect x="4" y="4" width="16" height="16" rx="2"/>',
   arrow: '<path d="M7 17 17 7"/><path d="M8 7h9v9"/>',
+  split: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/>',
+  database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   palette: '<circle cx="13.5" cy="6.5" r="1.3"/><circle cx="17.5" cy="10.5" r="1.3"/><circle cx="8.5" cy="7.5" r="1.3"/><circle cx="6.5" cy="12.5" r="1.3"/><path d="M12 2a10 10 0 0 0 0 20c.9 0 1.6-.7 1.6-1.6 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.6 1.6-1.6H16a6 6 0 0 0 6-6c0-4.9-4.5-8.6-10-8.6"/>',
 };
 function iconSvg(name) {
@@ -2515,12 +3268,12 @@ function pageNotesStore() {
   return currentBook ? getJSON(key(currentBook.id, "page-notes"), {}) : {};
 }
 function documentNote() {
-  return currentBook ? localStorage.getItem(key(currentBook.id, "doc-note")) || "" : "";
+  return currentBook ? kv.getItem(key(currentBook.id, "doc-note")) || "" : "";
 }
 function writeDocumentNote(text) {
   if (!currentBook) return;
-  if (text.trim()) localStorage.setItem(key(currentBook.id, "doc-note"), text.slice(0, 40000));
-  else localStorage.removeItem(key(currentBook.id, "doc-note"));
+  if (text.trim()) kv.setItem(key(currentBook.id, "doc-note"), text.slice(0, 40000));
+  else kv.removeItem(key(currentBook.id, "doc-note"));
 }
 function documentNoteInk() {
   return currentBook ? getJSON(key(currentBook.id, "doc-note-ink"), null) : null;
@@ -2534,14 +3287,14 @@ function migrateLegacyPageNotes() {
   const store = pageNotesStore();
   const entries = Object.entries(store).filter(([, entry]) => String(entry?.text || "").trim());
   if (!entries.length) {
-    if (Object.keys(store).length) localStorage.removeItem(key(currentBook.id, "page-notes"));
+    if (Object.keys(store).length) kv.removeItem(key(currentBook.id, "page-notes"));
     return 0;
   }
   const migrated = entries.map(([page, entry]) =>
     newNoteMark(Number(page), { note: String(entry.text).slice(0, 20000), createdAt: Number(entry.updatedAt) || Date.now() }),
   );
   commitAnnotations([...annotations(), ...migrated], false);
-  localStorage.removeItem(key(currentBook.id, "page-notes"));
+  kv.removeItem(key(currentBook.id, "page-notes"));
   return migrated.length;
 }
 function flushNotebook() {
@@ -2662,10 +3415,10 @@ function syncNotebookPage() {
 }
 function setNoteTool(patch) {
   Object.assign(noteTool, patch);
-  localStorage.setItem("paper.note-tool", noteTool.mode);
-  localStorage.setItem("paper.note-ink", noteTool.ink);
-  localStorage.setItem("paper.note-highlight", noteTool.highlight);
-  localStorage.setItem("paper.note-width", noteTool.width);
+  kv.setItem("paper.note-tool", noteTool.mode);
+  kv.setItem("paper.note-ink", noteTool.ink);
+  kv.setItem("paper.note-highlight", noteTool.highlight);
+  kv.setItem("paper.note-width", noteTool.width);
   renderNotesTools();
 }
 // Posición y tamaño de la ventana, como la del asistente.
@@ -2703,7 +3456,7 @@ function setNotesMinimized(minimized) {
   panel.classList.toggle("is-minimized", minimized);
   setIcon("notesMinimize", minimized ? "chevronUp" : "minus");
   $("notesMinimize").title = minimized ? "Restaurar" : "Minimizar";
-  localStorage.setItem("paper.notes-minimized", minimized ? "1" : "0");
+  kv.setItem("paper.notes-minimized", minimized ? "1" : "0");
   applyNotesWindowGeometry();
 }
 function openNotebook(tab, options = {}) {
@@ -2845,6 +3598,7 @@ function scheduleCard(card, grade) {
     next.interval = 0;
     next.ease = Math.max(1.3, next.ease - 0.2);
     next.due = Date.now() + 10 * 60_000;
+    next.reviewedAt = Date.now();
     return next;
   }
   if (next.reps === 0) next.interval = grade === 3 ? 4 : grade === 1 ? 0.5 : 1;
@@ -2853,6 +3607,7 @@ function scheduleCard(card, grade) {
   next.ease = Math.max(1.3, Math.min(3.2, next.ease + (grade === 1 ? -0.15 : grade === 3 ? 0.15 : 0)));
   next.reps++;
   next.due = Date.now() + next.interval * DAY_MS;
+  next.reviewedAt = Date.now();
   return next;
 }
 function formatInterval(days) {
@@ -2980,7 +3735,7 @@ async function completeLocalAi(prompt) {
       if (session !== base) session.destroy?.();
     }
   }
-  if (!localAiEngine && localStorage.getItem("paper.ai-webllm-consent") !== "1") throw new Error("Abre el asistente (I) y autoriza la descarga del modelo local para usar la IA.");
+  if (!localAiEngine && kv.getItem("paper.ai-webllm-consent") !== "1") throw new Error("Abre el asistente (I) y autoriza la descarga del modelo local para usar la IA.");
   const engine = await getWebLlmAi();
   const reply = await engine.chat.completions.create({
     messages: [{ role: "user", content: prompt }],
@@ -3079,7 +3834,7 @@ function bindNotebook() {
   setIcon("notesPinBtn", "pin", "En la página");
   $("notesNewBtn").title = "Nuevo apunte para esta página";
   $("notesPinBtn").title = "Pegar una nota en un punto de la página (N)";
-  setNotesMinimized(localStorage.getItem("paper.notes-minimized") === "1");
+  setNotesMinimized(kv.getItem("paper.notes-minimized") === "1");
   $("notebookBtn").onclick = toggleNotebook;
   $("closeNotebook").onclick = closeNotebook;
   $("notesMinimize").onclick = () => setNotesMinimized(!panel.classList.contains("is-minimized"));
@@ -3134,7 +3889,7 @@ function bindNotebook() {
     if (colorId) {
       const mark = annotations().find((item) => item.id === colorId);
       const next = STICKY_COLORS[(STICKY_COLORS.indexOf(mark?.color || "yellow") + 1) % STICKY_COLORS.length];
-      localStorage.setItem("paper.sticky-color", next);
+      kv.setItem("paper.sticky-color", next);
       suppressNotebookRender = true;
       try {
         updateAnnotation(colorId, { color: next });
@@ -3302,9 +4057,9 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   }
   renderTask = null;
   if (token !== renderToken || requestId !== pageRenderRequestId) return false;
-  localStorage.setItem(key(currentBook.id, "page"), String(currentPage));
-  localStorage.setItem(key(currentBook.id, "scale"), String(scale));
-  localStorage.setItem(key(currentBook.id, "rotation"), String(rotation));
+  kv.setItem(key(currentBook.id, "page"), String(currentPage));
+  kv.setItem(key(currentBook.id, "scale"), String(scale));
+  kv.setItem(key(currentBook.id, "rotation"), String(rotation));
   updateZoomLabel();
   updatePageChrome();
   if (anchor) restoreZoomAnchor(anchor);
@@ -3614,8 +4369,15 @@ async function renderLinkLayerInto(layer, page, viewport, token) {
       anchor.title = link.url;
     } else {
       anchor.href = "#";
-      anchor.title = "Ir a la sección enlazada";
+      anchor.setAttribute("aria-label", "Ir al destino del enlace");
+      // Vista previa del destino (cita, figura, sección) sin salir de la página.
+      anchor.addEventListener("pointerenter", (event) => {
+        if (event.pointerType === "touch") return;
+        requestPreview(anchor.getBoundingClientRect(), `dest:${JSON.stringify(link.dest)}`, () => destPreview(link.dest));
+      });
+      anchor.addEventListener("pointerleave", scheduleHidePreview);
       anchor.addEventListener("click", async (event) => {
+        hidePreview();
         event.preventDefault();
         try {
           const page = await resolveDestPage(link.dest);
@@ -3637,6 +4399,700 @@ function paintSearchHits() {
   document
     .querySelectorAll("#textLayer span")
     .forEach((span) => span.classList.toggle("search-hit", matcher.test(span.textContent)));
+}
+
+// ---- Vista previa al pasar el ratón ----
+// Enlaces internos, citas («[12]», «Smith et al., 2019») y referencias a
+// figuras o tablas muestran su destino en una ventanita, sin perder la página.
+const hoverPreview = { el: null, showTimer: 0, hideTimer: 0, key: "", token: 0 };
+const previewCanvasCache = new Map();
+function previewElement() {
+  if (hoverPreview.el) return hoverPreview.el;
+  const el = document.createElement("div");
+  el.className = "hover-preview";
+  el.hidden = true;
+  el.setAttribute("role", "tooltip");
+  el.innerHTML = `<header><span class="hp-label"></span><span class="hp-actions"><button class="hp-split" type="button" title="Abrir en vista dividida" aria-label="Abrir en vista dividida">${iconSvg("split")}</button><button class="hp-go" type="button">Ir <span></span></button></span></header><div class="hp-body"></div>`;
+  el.addEventListener("pointerenter", () => clearTimeout(hoverPreview.hideTimer));
+  el.addEventListener("pointerleave", scheduleHidePreview);
+  el.addEventListener("click", handleReferenceAction);
+  document.body.append(el);
+  hoverPreview.el = el;
+  return el;
+}
+function scheduleHidePreview() {
+  clearTimeout(hoverPreview.showTimer);
+  clearTimeout(hoverPreview.hideTimer);
+  hoverPreview.hideTimer = setTimeout(hidePreview, 240);
+}
+function hidePreview() {
+  clearTimeout(hoverPreview.showTimer);
+  hoverPreview.token++;
+  hoverPreview.key = "";
+  if (hoverPreview.el) hoverPreview.el.hidden = true;
+}
+function positionPreview(el, rect) {
+  const width = el.offsetWidth || 480,
+    height = el.offsetHeight || 280;
+  const left = Math.min(window.innerWidth - width - 10, Math.max(10, rect.left + rect.width / 2 - width / 2));
+  let top = rect.bottom + 8;
+  if (top + height > window.innerHeight - 10) top = Math.max(10, rect.top - height - 8);
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+// `loader` devuelve { label, page, node, go } o null si no hay nada que mostrar.
+function requestPreview(rect, key, loader) {
+  clearTimeout(hoverPreview.hideTimer);
+  if (hoverPreview.key === key && hoverPreview.el && !hoverPreview.el.hidden) return;
+  clearTimeout(hoverPreview.showTimer);
+  hoverPreview.showTimer = setTimeout(async () => {
+    const token = ++hoverPreview.token;
+    let content = null;
+    try {
+      content = await loader();
+    } catch (error) {
+      console.warn("No se pudo preparar la vista previa", error);
+    }
+    if (!content || token !== hoverPreview.token) return;
+    const el = previewElement();
+    el.querySelector(".hp-label").textContent = content.label;
+    el.querySelector(".hp-go span").textContent = content.page ? `p. ${content.page}` : "";
+    el.querySelector(".hp-go").onclick = () => {
+      hidePreview();
+      content.go?.();
+    };
+    const splitButton = el.querySelector(".hp-split");
+    splitButton.hidden = !content.page;
+    splitButton.onclick = () => {
+      hidePreview();
+      openSplitView({ page: content.page });
+    };
+    el.querySelector(".hp-body").replaceChildren(content.node);
+    el.hidden = false;
+    hoverPreview.key = key;
+    positionPreview(el, rect);
+  }, 260);
+}
+// Recorte de una página: `focusY` en coordenadas PDF; "above" deja el punto
+// abajo (figuras, cuyo pie va debajo), "top" lo deja arriba.
+async function pageCropNode(pageNumber, { focusY = null, align = "top", height = 230 } = {}) {
+  const page = await pdfDoc.getPage(pageNumber);
+  const base = page.getViewport({ scale: 1, rotation });
+  const viewport = page.getViewport({ scale: 460 / base.width, rotation });
+  const cacheKey = `${currentBook.id}:${pageNumber}:${rotation}`;
+  let canvas = previewCanvasCache.get(cacheKey);
+  if (!canvas) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas = document.createElement("canvas");
+    canvas.width = Math.floor(viewport.width * dpr);
+    canvas.height = Math.floor(viewport.height * dpr);
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: context, viewport, transform: [dpr, 0, 0, dpr, 0, 0] }).promise;
+    touchCache(previewCanvasCache, cacheKey, canvas, 16);
+  }
+  const visible = Math.min(height, viewport.height);
+  let top = 0;
+  if (Number.isFinite(focusY)) {
+    const [, y] = viewport.convertToViewportPoint(0, focusY);
+    top = align === "above" ? y - visible + 26 : y - 16;
+  }
+  top = Math.max(0, Math.min(viewport.height - visible, top));
+  const frame = document.createElement("div");
+  frame.className = "hp-page";
+  frame.style.height = `${visible}px`;
+  canvas.style.transform = `translateY(${-top}px)`;
+  frame.append(canvas);
+  return frame;
+}
+async function destPreview(dest) {
+  if (!pdfDoc) return null;
+  const explicit = typeof dest === "string" ? await pdfDoc.getDestination(dest) : dest;
+  const page = await resolveDestPage(explicit);
+  if (!page) return null;
+  const mode = explicit?.[1]?.name;
+  const top = mode === "XYZ" ? explicit[3] : mode === "FitH" || mode === "FitBH" ? explicit[2] : mode === "FitR" ? explicit[5] : null;
+  return {
+    label: `Destino del enlace · página ${page}`,
+    page,
+    node: await pageCropNode(page, { focusY: typeof top === "number" ? top : null, height: 210 }),
+    go: () => jumpToPage(page),
+  };
+}
+// Líneas de una página respetando las columnas (ver references.js).
+async function pageLines(doc, pageNumber) {
+  const page = await doc.getPage(pageNumber);
+  const content = await page.getTextContent();
+  const [x0, y0, x1] = page.view;
+  const items = content.items.map((item) => ({ str: item.str, x: item.transform[4] - x0, y: item.transform[5] - y0, w: item.width, h: item.height || Math.abs(item.transform[3]) }));
+  return buildLines(items, x1 - x0).map((line) => ({ ...line, y: line.y + y0 }));
+}
+const captionCache = new Map();
+async function findCaption(kind, number) {
+  const cacheKey = `${currentBook.id}:${kind}:${number}`;
+  if (captionCache.has(cacheKey)) return captionCache.get(cacheKey);
+  const pattern = captionPattern(kind, number);
+  const loose = new RegExp(pattern.source.replace("^\\s*", "(?:^|\\s)"), "i");
+  const indexed = currentDocPages();
+  // Con el índice de texto se mira solo en las páginas candidatas; sin él,
+  // en las cercanas a la actual.
+  const candidates = indexed
+    ? indexed.map((text, i) => (loose.test(text || "") ? i + 1 : 0)).filter(Boolean)
+    : Array.from({ length: Math.min(pdfDoc.numPages, 61) }, (_, i) => Math.max(1, currentPage - 30) + i).filter((p) => p <= pdfDoc.numPages);
+  let result = null;
+  for (const p of candidates) {
+    const line = (await pageLines(pdfDoc, p)).find((item) => pattern.test(item.text));
+    if (line) {
+      result = { page: p, y: line.y, size: line.size };
+      break;
+    }
+  }
+  touchCache(captionCache, cacheKey, result, 60);
+  return result;
+}
+async function citationPreview(citation) {
+  if (citation.kind === "figure" || citation.kind === "table") {
+    const hit = await findCaption(citation.kind, citation.number);
+    if (!hit) return null;
+    const figure = citation.kind === "figure";
+    return {
+      label: `${figure ? "Figura" : "Tabla"} ${citation.number} · página ${hit.page}`,
+      page: hit.page,
+      node: await pageCropNode(hit.page, { focusY: figure ? hit.y - hit.size * 0.3 : hit.y + hit.size, align: figure ? "above" : "top", height: 270 }),
+      go: () => jumpToPage(hit.page),
+    };
+  }
+  const entries = await ensureReferences();
+  const hits = findEntryForCitation(entries, citation);
+  if (!hits.length) return null;
+  const node = document.createElement("div");
+  node.className = "hp-refs";
+  node.innerHTML = hits.map((entry) => referenceCardHtml(entry, true)).join("");
+  return {
+    label: hits.length > 1 ? `${hits.length} referencias` : `Referencia${hits[0].label ? ` [${hits[0].label}]` : ""} · página ${hits[0].page}`,
+    page: hits[0].page,
+    node,
+    go: () => jumpToPage(hits[0].page),
+  };
+}
+let textHoverFrame = 0;
+function handleTextHover(span, x, y) {
+  const text = span.textContent || "";
+  if (text.length < 3) return;
+  let offset = null;
+  const caret = document.caretPositionFromPoint?.(x, y);
+  if (caret && span.contains(caret.offsetNode)) offset = caret.offset;
+  else {
+    const range = document.caretRangeFromPoint?.(x, y);
+    if (range && span.contains(range.startContainer)) offset = range.startOffset;
+  }
+  // Las citas suelen partirse entre líneas («(Devlin» / «et al., 2019)»): se
+  // analiza la línea junto con la anterior y la siguiente.
+  const sibling = (node, direction) => {
+    let next = direction < 0 ? node.previousElementSibling : node.nextElementSibling;
+    while (next && next.tagName !== "SPAN") next = direction < 0 ? next.previousElementSibling : next.nextElementSibling;
+    return next?.textContent || "";
+  };
+  const before = sibling(span, -1).slice(-80);
+  const context = `${before} ${text} ${sibling(span, 1).slice(0, 80)}`;
+  const citation = offset === null ? null : citationAt(context, offset + before.length + 1);
+  if (!citation) {
+    if (hoverPreview.key.startsWith("txt:")) scheduleHidePreview();
+    return;
+  }
+  requestPreview(span.getBoundingClientRect(), `txt:${citation.kind}:${citation.label}`, () => citationPreview(citation));
+}
+function bindHoverPreviews() {
+  $("viewer").addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch" || event.buttons || !pdfDoc || markerMode || eraserMode || reflowMode) return;
+    const span = event.target.closest?.(".textLayer span");
+    if (!span) {
+      if (hoverPreview.key.startsWith("txt:")) scheduleHidePreview();
+      return;
+    }
+    if (textHoverFrame) return;
+    const { clientX, clientY } = event;
+    textHoverFrame = requestAnimationFrame(() => {
+      textHoverFrame = 0;
+      handleTextHover(span, clientX, clientY);
+    });
+  }, { passive: true });
+  $("viewer").addEventListener("scroll", hidePreview, { passive: true });
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest?.(".hover-preview")) hidePreview();
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hidePreview();
+  });
+}
+
+// ---- Referencias bibliográficas y cita del documento ----
+let referencesCache = { id: "", entries: null, loading: null };
+function ensureReferences() {
+  if (!pdfDoc || !currentBook) return Promise.resolve([]);
+  if (referencesCache.id === currentBook.id && referencesCache.entries) return Promise.resolve(referencesCache.entries);
+  if (referencesCache.id === currentBook.id && referencesCache.loading) return referencesCache.loading;
+  const doc = pdfDoc,
+    id = currentBook.id;
+  const loading = (async () => {
+    const pages = [];
+    // La bibliografía está al final: se analizan como mucho las 40 últimas.
+    for (let p = Math.max(1, doc.numPages - 40); p <= doc.numPages; p++) pages.push({ page: p, lines: await pageLines(doc, p) });
+    const entries = extractReferences(pages);
+    if (referencesCache.id === id) referencesCache.entries = entries;
+    return entries;
+  })().catch((error) => {
+    console.warn("No se pudieron extraer las referencias", error);
+    return [];
+  });
+  referencesCache = { id, entries: null, loading };
+  return loading;
+}
+let documentInfoCache = { id: "", info: null };
+async function documentCitationInfo() {
+  if (!pdfDoc || !currentBook) return null;
+  if (documentInfoCache.id === currentBook.id && documentInfoCache.info) return documentInfoCache.info;
+  const id = currentBook.id;
+  const saved = getJSON(key(id, "citation"), null);
+  let metadata = null;
+  try {
+    metadata = await pdfDoc.getMetadata();
+  } catch {}
+  const pdfInfo = metadata?.info || {};
+  let xmp = "";
+  try {
+    xmp = JSON.stringify(metadata?.metadata?.getAll?.() || {});
+  } catch {}
+  const pages = currentDocPages();
+  const firstText = pages ? pages.slice(0, 2).join(" ") : await getPagePlainText(1).catch(() => "");
+  const doi = findDoi(`${pdfInfo.Subject || ""} ${xmp}`) || findDoi(firstText);
+  const arxiv = findArxiv(firstText) || findArxiv(xmp) || findArxiv(doi);
+  let title = String(pdfInfo.Title || "").trim();
+  if (title.length < 4 || /\.(pdf|docx?|tex)$|^untitled|^microsoft word/i.test(title)) {
+    // Sin título útil en los metadatos: la línea más grande de la portada.
+    const lines = await pageLines(pdfDoc, 1).catch(() => []);
+    const biggest = Math.max(0, ...lines.map((line) => line.size));
+    title = lines.filter((line) => line.size >= biggest - 0.5).slice(0, 3).map((line) => line.text).join(" ");
+  }
+  // Los generadores de PDF rellenan a veces el autor con un valor genérico.
+  const authorList = String(pdfInfo.Author || "")
+    .split(/\s*[;,]\s*|\s+and\s+/)
+    .map((name) => name.trim())
+    .filter((name) => name && !/^(anonymous|unknown|author|user|admin|owner|desconocido|usuario)$/i.test(name));
+  // Año: el del identificador arXiv (AAMM.nnnnn) o la fecha de creación del
+  // PDF. No se toma del texto: en la portada suelen aparecer años de citas.
+  const year = (arxiv ? `20${arxiv.slice(0, 2)}` : "") || (String(pdfInfo.CreationDate || "").match(/D:(\d{4})/) || [])[1] || "";
+  const info = {
+    title,
+    authorList,
+    surnames: authorList.map((name) => (name.includes(",") ? name.split(",")[0] : name.split(/\s+/).pop())),
+    year,
+    doi: doi || (arxiv ? `10.48550/arXiv.${arxiv}` : ""),
+    arxiv,
+    ...(saved || {}),
+  };
+  documentInfoCache = { id, info };
+  return info;
+}
+function referenceLinksHtml(meta) {
+  const query = encodeURIComponent((meta.title || meta.text || "").slice(0, 200));
+  return [
+    meta.doi && `<a href="https://doi.org/${encodeURI(meta.doi)}" target="_blank" rel="noopener noreferrer">DOI</a>`,
+    meta.arxiv && `<a href="https://arxiv.org/abs/${encodeURIComponent(meta.arxiv)}" target="_blank" rel="noopener noreferrer">arXiv</a>`,
+    !meta.doi && !meta.arxiv && meta.url && `<a href="${escapeHtml(meta.url)}" target="_blank" rel="noopener noreferrer">Web</a>`,
+    query && `<a href="https://scholar.google.com/scholar?q=${query}" target="_blank" rel="noopener noreferrer">Scholar</a>`,
+  ].filter(Boolean).join("");
+}
+function referenceCardHtml(entry, compact = false) {
+  return `<article class="ref-card${compact ? " is-compact" : ""}"><p class="ref-text">${entry.label ? `<b>[${escapeHtml(entry.label)}]</b> ` : ""}${escapeHtml(entry.text)}</p><div class="ref-links">${compact ? "" : `<button type="button" data-ref-action="go" data-ref-index="${entry.index}">p. ${entry.page}</button>`}${referenceLinksHtml(entry)}<button type="button" data-ref-action="copy" data-ref-index="${entry.index}">Copiar</button><button type="button" data-ref-action="bib" data-ref-index="${entry.index}">BibTeX</button></div></article>`;
+}
+async function copyToClipboard(text, message) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(message);
+  } catch {
+    toast("No se pudo copiar al portapapeles");
+  }
+}
+async function handleReferenceAction(event) {
+  const button = event.target.closest?.("[data-ref-action]");
+  if (!button) return;
+  const entries = await ensureReferences();
+  const entry = entries[Number(button.dataset.refIndex)];
+  if (!entry) return;
+  const action = button.dataset.refAction;
+  if (action === "go") jumpToPage(entry.page);
+  else if (action === "copy") copyToClipboard(entry.text, "Referencia copiada");
+  else if (action === "bib") copyToClipboard(toBibtex(entry, bibKey(entry, `ref${entry.label || entry.index + 1}`)), "BibTeX copiado");
+}
+async function renderReferencesPanel() {
+  const docBox = $("refsDoc"),
+    list = $("refsList");
+  if (!currentBook || !pdfDoc) {
+    docBox.innerHTML = '<p class="refs-empty">Abre un PDF para ver su cita y su bibliografía.</p>';
+    list.innerHTML = "";
+    $("refsCount").textContent = "";
+    return;
+  }
+  const id = currentBook.id;
+  docBox.innerHTML = '<p class="refs-empty">Analizando el documento…</p>';
+  const [info, entries] = await Promise.all([documentCitationInfo(), ensureReferences()]);
+  if (currentBook?.id !== id) return;
+  const who = info.authorList?.length ? info.authorList.join("; ") : "Autoría desconocida";
+  docBox.innerHTML = `<div class="refs-doc-card"><small>Este documento</small><strong>${escapeHtml(info.title || libraryDisplayName(currentBook.name))}</strong><span>${escapeHtml(who)}${info.year ? ` · ${escapeHtml(info.year)}` : ""}${info.journal ? ` · ${escapeHtml(info.journal)}` : ""}</span><div class="ref-links">${referenceLinksHtml(info)}</div><div class="refs-actions"><button class="btn" data-refs="cite">Copiar cita</button><button class="btn" data-refs="doc-bib">Copiar BibTeX</button>${info.doi && !info.enriched ? '<button class="btn" data-refs="enrich" title="Consulta doi.org: solo se envía el DOI">Completar con doi.org</button>' : ""}</div></div>`;
+  const query = normalizeText($("refsFilter").value.trim());
+  const visible = query ? entries.filter((entry) => normalizeText(entry.text).includes(query)) : entries;
+  $("refsCount").textContent = entries.length ? String(entries.length) : "";
+  $("refsTools").hidden = !entries.length;
+  list.innerHTML = entries.length
+    ? visible.length
+      ? visible.map((entry) => referenceCardHtml(entry)).join("")
+      : '<p class="refs-empty">Ninguna referencia coincide.</p>'
+    : '<p class="refs-empty">No se ha encontrado una sección de referencias en este PDF.</p>';
+}
+async function enrichDocumentCitation() {
+  const info = await documentCitationInfo();
+  if (!info?.doi) return;
+  showLoader(true, "Consultando doi.org…", "Solo se envía el DOI del documento");
+  try {
+    const response = await fetch(`https://doi.org/${encodeURI(info.doi)}`, { headers: { Accept: "application/vnd.citationstyles.csl+json" } });
+    if (!response.ok) throw new Error(`doi.org respondió ${response.status}`);
+    const meta = { ...metaFromCsl(await response.json()), arxiv: info.arxiv, enriched: true };
+    setJSON(key(currentBook.id, "citation"), meta);
+    documentInfoCache = { id: "", info: null };
+    toast("Datos de la cita completados");
+    renderReferencesPanel();
+  } catch (error) {
+    console.warn("No se pudo consultar doi.org", error);
+    toast("No se pudo consultar doi.org (¿sin conexión?)", 3000);
+  } finally {
+    showLoader(false);
+  }
+}
+async function exportReferences(format) {
+  const entries = await ensureReferences();
+  const info = await documentCitationInfo();
+  if (!entries.length && !info) return toast("No hay referencias que exportar");
+  const base = libraryDisplayName(currentBook.name).replace(/[\\/:*?"<>|]+/g, "-");
+  if (format === "dois") {
+    const dois = entries.map((entry) => entry.doi || (entry.arxiv ? `arXiv:${entry.arxiv}` : "")).filter(Boolean);
+    if (!dois.length) return toast("Ninguna referencia tiene DOI o arXiv");
+    return copyToClipboard(dois.join("\n"), `${dois.length} identificadores copiados: pégalos en Zotero con «Añadir por identificador»`);
+  }
+  const records = [info ? { ...info, text: "" } : null, ...entries].filter(Boolean);
+  if (format === "bib") {
+    const used = new Set();
+    const text = records.map((meta, i) => {
+      let k = bibKey(meta, `ref${meta.label || i}`);
+      while (used.has(k)) k += "a";
+      used.add(k);
+      return toBibtex(meta, k);
+    }).join("\n\n");
+    downloadText(`${base}-referencias.bib`, text, "application/x-bibtex");
+  } else {
+    downloadText(`${base}-referencias.ris`, records.map((meta) => toRis(meta)).join("\n\n"), "application/x-research-info-systems");
+  }
+  toast(`${records.length} referencias exportadas`);
+}
+function bindReferencesPanel() {
+  $("sidebarRefsTab").onclick = () => setSidebarPanel("refs");
+  $("refsFilterWrap").querySelector(".outline-filter-icon").innerHTML = iconSvg("search");
+  $("refsFilter").addEventListener("input", () => renderReferencesPanel());
+  $("sidebarRefsPanel").addEventListener("click", async (event) => {
+    if (event.target.closest("[data-ref-action]")) return handleReferenceAction(event);
+    const action = event.target.closest("[data-refs]")?.dataset.refs;
+    if (!action) return;
+    const info = await documentCitationInfo();
+    if (action === "cite") copyToClipboard(formatCitation(info), "Cita copiada");
+    else if (action === "doc-bib") copyToClipboard(toBibtex(info, bibKey(info, "documento")), "BibTeX del documento copiado");
+    else if (action === "enrich") enrichDocumentCitation();
+    else exportReferences(action);
+  });
+}
+
+// ---- Vista dividida ----
+// Un segundo lector independiente a la derecha: otro documento de la
+// biblioteca o el mismo en otra página (la bibliografía, una figura…).
+const split = { id: "", doc: null, own: false, zoom: 1, scale: 1, observer: null, rendered: new Set(), token: 0, frame: 0 };
+function splitOpen() {
+  return document.body.classList.contains("split-open");
+}
+function applySplitWidth() {
+  const saved = Number(kv.getItem("paper.split-width")) || Math.round(window.innerWidth * 0.42);
+  const main = document.querySelector(".main").getBoundingClientRect();
+  const width = Math.max(280, Math.min(main.width - 320, saved));
+  document.body.style.setProperty("--split-w", `${width}px`);
+}
+async function openSplitView({ id = currentBook?.id, page = currentPage } = {}) {
+  if (!currentBook || !pdfDoc) return toast("Abre un PDF primero");
+  if (window.innerWidth < 760) return toast("La vista dividida necesita una pantalla más ancha");
+  document.body.classList.add("split-open");
+  $("splitPane").hidden = false;
+  applySplitWidth();
+  scheduleLayoutRefit();
+  await loadSplitDocument(id || currentBook.id, page);
+}
+function closeSplitView() {
+  split.token++;
+  teardownSplitPages();
+  if (split.own) split.doc?.destroy?.();
+  Object.assign(split, { id: "", doc: null, own: false });
+  $("splitPane").hidden = true;
+  document.body.classList.remove("split-open");
+  scheduleLayoutRefit();
+}
+function toggleSplitView() {
+  splitOpen() ? closeSplitView() : openSplitView();
+}
+function teardownSplitPages() {
+  split.observer?.disconnect();
+  split.observer = null;
+  split.rendered = new Set();
+  $("splitPages").replaceChildren();
+}
+async function populateSplitSelect() {
+  const records = (await dbAll()).filter((record) => record.kind !== "markdown").sort((a, b) => libraryDisplayName(a.name).localeCompare(libraryDisplayName(b.name), "es", { numeric: true }));
+  $("splitDoc").innerHTML = records.map((record) => `<option value="${escapeHtml(record.id)}"${record.id === split.id ? " selected" : ""}>${escapeHtml(libraryDisplayName(record.name))}</option>`).join("");
+}
+async function loadSplitDocument(id, page = 1) {
+  const token = ++split.token;
+  let doc = null,
+    own = false;
+  if (id === currentBook?.id && pdfDoc) doc = pdfDoc;
+  else {
+    const record = await dbGet(id);
+    if (!record || record.kind === "markdown") return toast("La vista dividida solo admite PDFs");
+    doc = await pdfjsLib.getDocument({ data: new Uint8Array(await record.blob.arrayBuffer()) }).promise;
+    own = true;
+  }
+  if (token !== split.token) {
+    if (own) doc.destroy?.();
+    return;
+  }
+  if (split.own && split.doc && split.doc !== doc) split.doc.destroy?.();
+  Object.assign(split, { id, doc, own });
+  populateSplitSelect();
+  await buildSplitPages(page);
+}
+async function buildSplitPages(page = 1) {
+  const doc = split.doc;
+  if (!doc) return;
+  teardownSplitPages();
+  const first = await doc.getPage(1);
+  const base = first.getViewport({ scale: 1 });
+  // Margen interior más el hueco de la barra de desplazamiento vertical.
+  const available = Math.max(200, $("splitScroll").clientWidth - 42);
+  split.scale = Math.max(0.25, Math.min(4, (available / base.width) * split.zoom));
+  const width = base.width * split.scale,
+    height = base.height * split.scale;
+  const fragment = document.createDocumentFragment();
+  for (let i = 1; i <= doc.numPages; i++) {
+    const slot = document.createElement("div");
+    slot.className = "split-page";
+    slot.dataset.page = String(i);
+    slot.style.width = `${width}px`;
+    slot.style.height = `${height}px`;
+    slot.innerHTML = '<canvas></canvas><div class="textLayer"></div><div class="link-layer"></div>';
+    fragment.append(slot);
+  }
+  $("splitPages").append(fragment);
+  $("splitCount").textContent = `/ ${doc.numPages}`;
+  $("splitPage").max = doc.numPages;
+  split.observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) renderSplitSlot(entry.target);
+      else unloadSplitSlot(entry.target);
+    }
+  }, { root: $("splitScroll"), rootMargin: "300px 0px" });
+  $("splitPages").querySelectorAll(".split-page").forEach((slot) => split.observer.observe(slot));
+  splitScrollTo(page, false);
+}
+async function renderSplitSlot(slot) {
+  const pageNumber = Number(slot.dataset.page);
+  if (split.rendered.has(pageNumber) || !split.doc) return;
+  split.rendered.add(pageNumber);
+  const doc = split.doc;
+  try {
+    const page = await doc.getPage(pageNumber);
+    const viewport = page.getViewport({ scale: split.scale });
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const canvas = slot.querySelector("canvas");
+    canvas.width = Math.floor(viewport.width * dpr);
+    canvas.height = Math.floor(viewport.height * dpr);
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    slot.style.width = `${viewport.width}px`;
+    slot.style.height = `${viewport.height}px`;
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport, transform: [dpr, 0, 0, dpr, 0, 0] }).promise;
+    if (!split.rendered.has(pageNumber) || split.doc !== doc) return clearSplitSlot(slot);
+    const textLayer = slot.querySelector(".textLayer");
+    textLayer.replaceChildren();
+    textLayer.style.width = `${viewport.width}px`;
+    textLayer.style.height = `${viewport.height}px`;
+    textLayer.style.setProperty("--scale-factor", String(viewport.scale));
+    await new pdfjsLib.TextLayer({ textContentSource: await page.getTextContent(), container: textLayer, viewport }).render();
+    const links = (await page.getAnnotations({ intent: "display" })).filter((annotation) => annotation.subtype === "Link" && (annotation.url || annotation.dest));
+    const layer = slot.querySelector(".link-layer");
+    layer.replaceChildren(
+      ...links.map((link) => {
+        const [x1, y1, x2, y2] = viewport.convertToViewportRectangle(link.rect);
+        const anchor = document.createElement("a");
+        Object.assign(anchor.style, { left: `${Math.min(x1, x2)}px`, top: `${Math.min(y1, y2)}px`, width: `${Math.abs(x2 - x1)}px`, height: `${Math.abs(y2 - y1)}px` });
+        if (link.url) {
+          anchor.href = link.url;
+          anchor.target = "_blank";
+          anchor.rel = "noopener noreferrer";
+          anchor.className = "external";
+        } else {
+          anchor.href = "#";
+          anchor.addEventListener("click", async (event) => {
+            event.preventDefault();
+            try {
+              const target = typeof link.dest === "string" ? await doc.getDestination(link.dest) : link.dest;
+              const index = typeof target?.[0] === "number" ? target[0] : await doc.getPageIndex(target[0]);
+              splitScrollTo(index + 1);
+            } catch {}
+          });
+        }
+        return anchor;
+      }),
+    );
+  } catch (error) {
+    split.rendered.delete(pageNumber);
+    if (error?.name !== "RenderingCancelledException") console.warn("No se pudo dibujar la página en la vista dividida", error);
+  }
+}
+function unloadSplitSlot(slot) {
+  const pageNumber = Number(slot.dataset.page);
+  if (!split.rendered.has(pageNumber)) return;
+  split.rendered.delete(pageNumber);
+  clearSplitSlot(slot);
+}
+function clearSplitSlot(slot) {
+  const canvas = slot.querySelector("canvas");
+  canvas.width = 0;
+  canvas.height = 0;
+  slot.querySelector(".textLayer").replaceChildren();
+  slot.querySelector(".link-layer").replaceChildren();
+}
+function splitCurrentPage() {
+  const scroller = $("splitScroll");
+  const slots = $("splitPages").children;
+  if (!slots.length) return 1;
+  const probe = scroller.scrollTop + scroller.clientHeight * 0.35;
+  let lo = 0,
+    hi = slots.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (slots[mid].offsetTop + slots[mid].offsetHeight < probe) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo + 1;
+}
+function splitScrollTo(page, smooth = true) {
+  const slot = $("splitPages").children[Math.max(1, Math.min(page, $("splitPages").children.length)) - 1];
+  if (!slot) return;
+  $("splitScroll").scrollTo({ top: slot.offsetTop - 10, behavior: smooth ? "smooth" : "auto" });
+  $("splitPage").value = page;
+}
+function bindSplitView() {
+  setIcon("splitClose", "close");
+  setIcon("splitPrev", "chevronLeft");
+  setIcon("splitNext", "chevronRight");
+  setIcon("splitZoomOut", "minus");
+  setIcon("splitZoomIn", "plus");
+  $("splitClose").onclick = closeSplitView;
+  $("splitViewBtn").onclick = () => {
+    $("appearancePopover").classList.remove("open");
+    toggleSplitView();
+  };
+  $("splitDoc").onchange = (event) => loadSplitDocument(event.target.value, 1);
+  $("splitPrev").onclick = () => splitScrollTo(splitCurrentPage() - 1);
+  $("splitNext").onclick = () => splitScrollTo(splitCurrentPage() + 1);
+  $("splitPage").onchange = (event) => splitScrollTo(Number(event.target.value) || 1);
+  const rezoom = (factor) => {
+    const page = splitCurrentPage();
+    split.zoom = Math.max(0.4, Math.min(3, split.zoom * factor));
+    buildSplitPages(page);
+  };
+  $("splitZoomOut").onclick = () => rezoom(1 / 1.2);
+  $("splitZoomIn").onclick = () => rezoom(1.2);
+  $("splitScroll").addEventListener("scroll", () => {
+    if (split.frame) return;
+    split.frame = requestAnimationFrame(() => {
+      split.frame = 0;
+      if (document.activeElement !== $("splitPage")) $("splitPage").value = splitCurrentPage();
+    });
+  }, { passive: true });
+  // Arrastrar el borde izquierdo cambia el ancho del panel.
+  const resizer = $("splitResizer");
+  let drag = null;
+  resizer.addEventListener("pointerdown", (event) => {
+    drag = { id: event.pointerId };
+    resizer.setPointerCapture(event.pointerId);
+    document.body.classList.add("split-resizing");
+  });
+  resizer.addEventListener("pointermove", (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    const main = document.querySelector(".main").getBoundingClientRect();
+    const width = Math.max(280, Math.min(main.width - 320, main.right - event.clientX));
+    document.body.style.setProperty("--split-w", `${Math.round(width)}px`);
+  });
+  const finish = (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    drag = null;
+    document.body.classList.remove("split-resizing");
+    kv.setItem("paper.split-width", String(parseInt(getComputedStyle(document.body).getPropertyValue("--split-w"), 10) || 0));
+    scheduleLayoutRefit();
+    if (split.doc) buildSplitPages(splitCurrentPage());
+  };
+  resizer.addEventListener("pointerup", finish);
+  resizer.addEventListener("pointercancel", finish);
+  window.addEventListener("resize", () => {
+    if (!splitOpen()) return;
+    if (window.innerWidth < 760) closeSplitView();
+    else applySplitWidth();
+  }, { passive: true });
+}
+
+// ---- Abrir con Paper Reader y compartir ----
+// Como app instalada, Paper Reader aparece en «Abrir con» para PDFs y
+// Markdown (file_handlers) y como destino al compartir en el móvil
+// (share_target: el service worker guarda los archivos y redirige aquí).
+function bindLaunchQueue() {
+  if (!("launchQueue" in window)) return;
+  window.launchQueue.setConsumer(async (params) => {
+    if (!params?.files?.length) return;
+    const files = await Promise.all(params.files.map((handle) => handle.getFile().catch(() => null)));
+    if (!$("libraryPanel").hidden) closeLibrary();
+    await addFiles(files.filter(Boolean));
+  });
+}
+async function consumeSharedFiles() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("shared")) return;
+  history.replaceState(null, "", location.pathname);
+  if (!("caches" in window)) return;
+  try {
+    const cache = await caches.open("paper-share");
+    const files = [];
+    for (const request of await cache.keys()) {
+      const response = await cache.match(request);
+      if (response) {
+        const blob = await response.blob();
+        files.push(new File([blob], decodeURIComponent(response.headers.get("X-File-Name") || "documento.pdf"), { type: blob.type || "application/pdf" }));
+      }
+      await cache.delete(request);
+    }
+    if (files.length) await addFiles(files);
+    else toast("No llegó ningún PDF compartido");
+  } catch (error) {
+    console.error("No se pudieron recibir los archivos compartidos", error);
+    toast("No se pudieron recibir los archivos compartidos");
+  }
 }
 
 // ---- Modos de zoom ----
@@ -3671,7 +5127,7 @@ function computeFitScale(pageNumber = currentPage) {
   return computeZoomForMode("width", pageNumber);
 }
 function persistZoomMode() {
-  if (currentBook) localStorage.setItem(key(currentBook.id, "zoom-mode"), zoomMode);
+  if (currentBook) kv.setItem(key(currentBook.id, "zoom-mode"), zoomMode);
 }
 async function applyZoomMode(mode = zoomMode, { persist = true } = {}) {
   if (!pdfDoc) return;
@@ -3681,7 +5137,11 @@ async function applyZoomMode(mode = zoomMode, { persist = true } = {}) {
     updateZoomLabel();
     return;
   }
-  scale = await computeZoomForMode(mode);
+  const next = await computeZoomForMode(mode);
+  // Si el zoom no cambia (p. ej. el móvil solo ha ocultado la barra de
+  // direcciones) no se redibuja nada: redibujar movía la lectura.
+  if (next === scale) return updateZoomLabel();
+  scale = next;
   refreshCurrentView();
   updateZoomLabel();
 }
@@ -3744,8 +5204,8 @@ async function zoom(delta, anchor = null) {
 function changeReaderZoom(delta) {
   if (!pdfDoc) return;
   if (!reflowMode) return zoom(delta);
-  const next = Math.max(14, Math.min(36, Number(localStorage.getItem("paper.reflow-size") || 20) + Math.sign(delta)));
-  localStorage.setItem("paper.reflow-size", String(next));
+  const next = Math.max(14, Math.min(36, Number(kv.getItem("paper.reflow-size") || 20) + Math.sign(delta)));
+  kv.setItem("paper.reflow-size", String(next));
   applyReflowPreferences();
   $("zoomLabel").textContent = `${next}px`;
   $("zoomLabel").title = `Tamaño de lectura ${next}px`;
@@ -4985,7 +6445,7 @@ function buildInkPalette() {
       strip.style.setProperty("--ink-left", `${next.left}px`);
       strip.style.setProperty("--ink-top", `${next.top}px`);
       strip.classList.add("ink-positioned");
-      if (persist) localStorage.setItem("paper.ink-position", JSON.stringify(next));
+      if (persist) kv.setItem("paper.ink-position", JSON.stringify(next));
       positionInkColorCard();
     };
     const resetInkPosition = () => {
@@ -4993,7 +6453,7 @@ function buildInkPalette() {
       colorCard.classList.remove("ink-positioned");
       strip.style.removeProperty("--ink-left");
       strip.style.removeProperty("--ink-top");
-      localStorage.removeItem("paper.ink-position");
+      kv.removeItem("paper.ink-position");
     };
     dragHandle.addEventListener("pointerdown", (event) => {
       event.preventDefault();
@@ -5018,11 +6478,11 @@ function buildInkPalette() {
     dragHandle.addEventListener("pointercancel", finishInkDrag);
     dragHandle.addEventListener("dblclick", resetInkPosition);
     try {
-      const saved = JSON.parse(localStorage.getItem("paper.ink-position") || "null");
+      const saved = JSON.parse(kv.getItem("paper.ink-position") || "null");
       if (Number.isFinite(saved?.left) && Number.isFinite(saved?.top))
         requestAnimationFrame(() => setInkPosition(saved.left, saved.top));
     } catch {
-      localStorage.removeItem("paper.ink-position");
+      kv.removeItem("paper.ink-position");
     }
     window.addEventListener("resize", () => {
       if (!strip.classList.contains("ink-positioned")) return;
@@ -5386,7 +6846,7 @@ async function refreshAssistantCapability() {
   model.querySelector("span").textContent = "Comprobando la IA local…";
   const capability = await inspectAiCapability();
   assistantCapability = capability;
-  const consented = localStorage.getItem("paper.ai-webllm-consent") === "1";
+  const consented = kv.getItem("paper.ai-webllm-consent") === "1";
   const [state, text] =
     capability.kind === "builtin"
       ? capability.availability === "available"
@@ -5766,7 +7226,7 @@ async function streamLocalText({ prompt, maxTokens, signal, onToken }) {
     }
     return;
   }
-  if (!localAiEngine && localStorage.getItem("paper.ai-webllm-consent") !== "1") throw consentError(false);
+  if (!localAiEngine && kv.getItem("paper.ai-webllm-consent") !== "1") throw consentError(false);
   const engine = await getWebLlmAi();
   aiStatus("");
   const stream = await engine.chat.completions.create({
@@ -5814,7 +7274,7 @@ async function streamLocalVision({ prompt, image, signal, onToken }) {
       console.warn("La visión integrada falló; se intenta WebGPU", error);
     }
   }
-  if (!visionAiEngine && localStorage.getItem("paper.ai-vision-consent") !== "1") throw consentError(true);
+  if (!visionAiEngine && kv.getItem("paper.ai-vision-consent") !== "1") throw consentError(true);
   const engine = await getVisionAi();
   const stream = await engine.chat.completions.create({
     messages: [
@@ -6030,7 +7490,7 @@ function clearAssistantThread() {
   assistantThread = [];
   assistantImages.clear();
   const storageKey = assistantStorageKey();
-  if (storageKey) localStorage.removeItem(storageKey);
+  if (storageKey) kv.removeItem(storageKey);
   renderAssistant();
   $("assistantInput").focus();
 }
@@ -6099,7 +7559,7 @@ function bindAssistant() {
     if (data.assistantRetry) return retryAssistant(Number(data.assistantRetry));
     if (data.assistantConsent) {
       const message = assistantThread[Number(data.assistantConsent)];
-      localStorage.setItem(message.vision ? "paper.ai-vision-consent" : "paper.ai-webllm-consent", "1");
+      kv.setItem(message.vision ? "paper.ai-vision-consent" : "paper.ai-webllm-consent", "1");
       return retryAssistant(Number(data.assistantConsent));
     }
     if (data.assistantDismiss) {
@@ -6194,6 +7654,11 @@ async function ensureDocumentContextIndex(signal) {
     if (currentBook.kind === "markdown") return chunkAiText(markdownContent, 1);
     if (!pdfDoc) return [];
     const chunks = [];
+    const indexed = currentDocPages();
+    if (indexed) {
+      indexed.forEach((text, index) => chunks.push(...chunkAiText(text, index + 1)));
+      return chunks;
+    }
     const order = [currentPage, ...Array.from({ length: pdfDoc.numPages }, (_, index) => index + 1).filter((page) => page !== currentPage)];
     for (let index = 0; index < order.length; index++) {
       signal?.throwIfAborted?.();
@@ -6563,15 +8028,19 @@ async function search(query) {
   searchRegex = regex;
   searchMatches = [];
   searchIndex = -1;
-  showLoader(true, "Buscando…", `“${raw}”`);
+  const indexed = currentDocPages();
+  if (!indexed) showLoader(true, "Buscando…", `“${raw}”`);
   try {
     for (let i = 1; i <= pdfDoc.numPages; i++) {
       if (token !== searchToken) return;
-      const p = await getCachedPage(i);
-      const tc = await getCachedTextContent(p);
-      const text = tc.items.map((x) => x.str).join(" ");
+      let text = indexed?.[i - 1];
+      if (text == null) {
+        const p = await getCachedPage(i);
+        const tc = await getCachedTextContent(p);
+        text = tc.items.map((x) => x.str).join(" ");
+        $("loaderText").textContent = `Página ${i} de ${pdfDoc.numPages}`;
+      }
       searchMatches.push(...collectPageMatches(text, regex, i));
-      $("loaderText").textContent = `Página ${i} de ${pdfDoc.numPages}`;
     }
     if (!searchMatches.length) {
       renderSearchResults();
@@ -6602,26 +8071,39 @@ async function searchLibrary(raw) {
   searchRegex = regex;
   searchMatches = [];
   searchIndex = -1;
-  const records = (await dbAll()).filter((record) => record.kind !== "markdown" && record.blob);
+  const records = (await dbAll()).filter((record) => record.blob);
+  const cancelled = () => token !== searchToken || libToken !== librarySearchToken;
   showLoader(true, "Buscando en la biblioteca…", `“${raw}”`);
   try {
     for (let d = 0; d < records.length; d++) {
-      if (token !== searchToken || libToken !== librarySearchToken) return;
+      if (cancelled()) return;
       const record = records[d];
       $("loaderText").textContent = `${record.name} · ${d + 1}/${records.length}`;
       try {
-        const doc =
-          currentBook?.id === record.id && pdfDoc
-            ? pdfDoc
-            : await pdfjsLib.getDocument({ data: new Uint8Array(await record.blob.arrayBuffer()) }).promise;
-        for (let i = 1; i <= doc.numPages; i++) {
-          if (token !== searchToken || libToken !== librarySearchToken) return;
-          const page = await doc.getPage(i);
-          const content = await page.getTextContent();
-          const text = content.items.map((x) => x.str).join(" ");
-          searchMatches.push(...collectPageMatches(text, regex, i, { docId: record.id, docName: record.name }));
+        // Cada documento se analiza una sola vez; después se busca en su
+        // índice de texto guardado.
+        let pages = record.id === currentBook?.id ? currentDocPages() : null;
+        if (!pages) pages = (await getTextIndex(record.id))?.pages || null;
+        if (!pages && record.kind === "markdown") pages = [await record.blob.text()];
+        if (!pages) {
+          const doc =
+            currentBook?.id === record.id && pdfDoc
+              ? pdfDoc
+              : await pdfjsLib.getDocument({ data: new Uint8Array(await record.blob.arrayBuffer()) }).promise;
+          try {
+            pages = await extractDocumentText(doc, {
+              isCancelled: cancelled,
+              onProgress: (page, total) => {
+                if (page % 10 === 0 || page === total) $("loaderText").textContent = `Indexando ${record.name} · página ${page} de ${total}`;
+              },
+            });
+          } finally {
+            if (doc !== pdfDoc) doc.destroy?.();
+          }
+          if (!pages) return;
+          putTextIndex(record.id, pages).catch(() => {});
         }
-        if (doc !== pdfDoc) doc.destroy?.();
+        pages.forEach((text, i) => searchMatches.push(...collectPageMatches(text || "", regex, i + 1, { docId: record.id, docName: record.name })));
       } catch (error) {
         console.warn("No se pudo buscar en", record.name, error);
       }
@@ -6727,13 +8209,14 @@ function scheduleLayoutRefit() {
   layoutRefitTimer = setTimeout(refitZoom, 240);
 }
 function setSidebarPanel(panel) {
-  const notes = panel === "notes";
-  $("sidebarContentsPanel").hidden = notes;
-  $("sidebarNotesPanel").hidden = !notes;
-  $("sidebarContentsTab").classList.toggle("active", !notes);
-  $("sidebarNotesTab").classList.toggle("active", notes);
-  $("sidebarContentsTab").setAttribute("aria-selected", String(!notes));
-  $("sidebarNotesTab").setAttribute("aria-selected", String(notes));
+  const panels = { contents: ["sidebarContentsPanel", "sidebarContentsTab"], notes: ["sidebarNotesPanel", "sidebarNotesTab"], refs: ["sidebarRefsPanel", "sidebarRefsTab"] };
+  if (!panels[panel]) panel = "contents";
+  for (const [name, [panelId, tabId]] of Object.entries(panels)) {
+    $(panelId).hidden = name !== panel;
+    $(tabId).classList.toggle("active", name === panel);
+    $(tabId).setAttribute("aria-selected", String(name === panel));
+  }
+  if (panel === "refs") renderReferencesPanel();
 }
 $("fileInput").onchange = async (e) => {
   const files = [...(e.target.files || [])];
@@ -6888,7 +8371,7 @@ $("shortcutsPanel").addEventListener("pointerdown", (event) => {
 });
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  localStorage.setItem("paper.theme", theme);
+  kv.setItem("paper.theme", theme);
   $("themeSelect").value = theme;
   $("appearanceTheme").value = theme;
   document.querySelectorAll("[data-theme-choice]").forEach((button) => button.classList.toggle("active", button.dataset.themeChoice === theme));
@@ -6989,31 +8472,59 @@ $("focusBtn").onclick = toggleFocusMode;
 document.addEventListener("fullscreenchange", syncFullscreenState);
 document.addEventListener("webkitfullscreenchange", syncFullscreenState);
 
+// Tocar la página muestra u oculta la interfaz, en cualquier modo (página,
+// doble, continuo o lectura). Con el dedo también vale tocar sobre el texto
+// (un toque no selecciona); con el ratón, solo fuera del texto, para no
+// estorbar al seleccionar.
 let paperTap = null;
-$("canvasWrap").addEventListener("pointerdown", (event) => {
-  if (event.button !== 0 || document.body.classList.contains("ink-drawing-mode")) return;
-  paperTap = { id: event.pointerId, x: event.clientX, y: event.clientY };
+$("viewer").addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || document.body.classList.contains("ink-drawing-mode") || !currentBook) return;
+  paperTap = { id: event.pointerId, x: event.clientX, y: event.clientY, time: performance.now(), selection: window.getSelection()?.toString() || "" };
 });
-$("canvasWrap").addEventListener("pointercancel", () => { paperTap = null; });
-$("canvasWrap").addEventListener("pointerup", (event) => {
+$("viewer").addEventListener("pointercancel", () => { paperTap = null; });
+$("viewer").addEventListener("pointerup", (event) => {
   if (!paperTap || paperTap.id !== event.pointerId) return;
-  const moved = Math.hypot(event.clientX - paperTap.x, event.clientY - paperTap.y);
+  const tap = paperTap;
   paperTap = null;
-  if (
-    moved > 8 || markerMode || eraserMode ||
-    document.body.classList.contains("ink-drawing-mode") ||
-    event.target.closest(".textLayer span, a, button, input, textarea, select")
-  ) return;
-  const selection = window.getSelection();
-  if (selection && !selection.isCollapsed && selection.toString().trim()) return;
-  if (presentationMode) {
-    // En presentación, el clic avanza (mitad derecha) o retrocede (izquierda).
-    const rect = $("canvasWrap").getBoundingClientRect();
-    stepPage(event.clientX < rect.left + rect.width / 2 ? -1 : 1);
-    return;
-  }
-  setReaderChromeHidden(!document.body.classList.contains("reader-chrome-hidden"));
+  const moved = Math.hypot(event.clientX - tap.x, event.clientY - tap.y);
+  const touch = event.pointerType !== "mouse";
+  if (moved > (touch ? 12 : 8) || performance.now() - tap.time > 600 || markerMode || eraserMode || stickyPlacement) return;
+  if (document.body.classList.contains("ink-drawing-mode") || $("captureOverlay").classList.contains("show")) return;
+  if (event.target.closest("a, button, input, textarea, select, label, .sticky-pin, .hover-preview, .annotation-actions")) return;
+  if (!touch && event.target.closest(".textLayer span, #reflowReader p, #reflowReader li, #reflowReader h2, #reflowReader h3")) return;
+  if (!event.target.closest("#canvasWrap, #facingWrap, #continuousView, #reflowReader, #viewer")) return;
+  // Un toque que cierra una selección no alterna la interfaz.
+  if (tap.selection.trim()) return;
+  setTimeout(() => {
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+    if (presentationMode) {
+      // En presentación, el toque avanza (mitad derecha) o retrocede (izquierda).
+      const rect = $("viewer").getBoundingClientRect();
+      stepPage(event.clientX < rect.left + rect.width / 2 ? -1 : 1);
+      return;
+    }
+    setReaderChromeHidden(!document.body.classList.contains("reader-chrome-hidden"));
+  }, touch ? 60 : 0);
 });
+// Salida siempre visible del modo inmersivo: en móviles no hay tecla Esc y
+// en iPhone no existe la pantalla completa del navegador.
+function exitImmersive() {
+  if (presentationMode) return exitPresentation();
+  if (fullscreenElement() || document.body.classList.contains("focus-mode")) return toggleFocusMode();
+  setReaderChromeHidden(false);
+}
+(() => {
+  const button = document.createElement("button");
+  button.id = "immersiveExit";
+  button.className = "immersive-exit";
+  button.type = "button";
+  button.title = "Mostrar los controles (Esc)";
+  button.setAttribute("aria-label", "Salir del modo inmersivo y mostrar los controles");
+  button.innerHTML = iconSvg("minimize");
+  button.onclick = exitImmersive;
+  document.body.append(button);
+})();
 $("pageJump").onchange = (e) => {
   const page = Number(e.target.value);
   if (Number.isInteger(page) && pdfDoc) jumpToPage(page);
@@ -7066,7 +8577,7 @@ document.querySelectorAll("[data-reader-margin]").forEach(
       const margin = button.dataset.readerMargin;
       $("viewer").classList.remove("margin-compact", "margin-wide");
       if (margin !== "normal") $("viewer").classList.add(`margin-${margin}`);
-      localStorage.setItem("paper.reader-margin", margin);
+      kv.setItem("paper.reader-margin", margin);
       document
         .querySelectorAll("[data-reader-margin]")
         .forEach((item) => item.classList.toggle("active", item === button));
@@ -7089,14 +8600,14 @@ function restoreReflowAnchor(anchor) {
 function applyReflowPreferences() {
   const anchor = reflowReadingAnchor();
   const reader = $("reflowReader");
-  const size = Number(localStorage.getItem("paper.reflow-size") || 20);
-  const spacing = localStorage.getItem("paper.reflow-spacing") || "normal";
-  const font = localStorage.getItem("paper.reflow-font") || "sans";
-  const columns = localStorage.getItem("paper.reflow-columns") || "auto";
-  const width = localStorage.getItem("paper.reflow-width") || "normal";
-  const tracking = localStorage.getItem("paper.reflow-tracking") || "normal";
-  const alignment = localStorage.getItem("paper.reflow-alignment") || "left";
-  const theme = localStorage.getItem("paper.reflow-theme") || "paper";
+  const size = Number(kv.getItem("paper.reflow-size") || 20);
+  const spacing = kv.getItem("paper.reflow-spacing") || "normal";
+  const font = kv.getItem("paper.reflow-font") || "sans";
+  const columns = kv.getItem("paper.reflow-columns") || "auto";
+  const width = kv.getItem("paper.reflow-width") || "normal";
+  const tracking = kv.getItem("paper.reflow-tracking") || "normal";
+  const alignment = kv.getItem("paper.reflow-alignment") || "left";
+  const theme = kv.getItem("paper.reflow-theme") || "paper";
   reader.style.setProperty("--reflow-size", `${size}px`);
   reader.style.setProperty("--reflow-leading", spacing === "compact" ? "1.35" : spacing === "relaxed" ? "1.95" : "1.65");
   reader.style.setProperty("--reflow-width", ({ narrow: "680px", normal: "840px", wide: "1040px", fluid: "1280px" })[width] || "840px");
@@ -7127,7 +8638,7 @@ async function setReadingMode(mode) {
     // La lectura maquetada usa el motor de página única.
     if (viewMode === "continuous") teardownContinuous();
     viewMode = "single";
-    localStorage.setItem("paper.view-mode", "single");
+    kv.setItem("paper.view-mode", "single");
     document.querySelectorAll("[data-view-mode]").forEach((button) =>
       button.classList.toggle("active", button.dataset.viewMode === "single"),
     );
@@ -7135,7 +8646,7 @@ async function setReadingMode(mode) {
     $("continuousView").hidden = true;
     $("facingWrap").hidden = true;
   }
-  localStorage.setItem("paper.reading-mode", mode);
+  kv.setItem("paper.reading-mode", mode);
   document.body.classList.toggle("reflow-mode", reflowMode);
   if (!reflowMode) teardownReflowDocument();
   $("markerModeBtn").disabled = reflowMode;
@@ -7157,16 +8668,16 @@ function buildReflowControls() {
   if (!popover || $("reflowControls")) return;
   popover.insertAdjacentHTML("beforeend", `<div class="label">Modo</div><div class="tool-row reading-mode-switch" role="group" aria-label="Modo de visualización"><button class="btn" data-reading-mode="pdf">PDF original</button><button class="btn" data-reading-mode="reflow">Lectura</button></div><div class="reflow-controls" id="reflowControls" hidden><div class="reflow-control-head"><strong>Maquetación de lectura</strong><small>El texto se adapta sin modificar el PDF.</small></div><div class="label">Tipografía</div><select class="field" id="reflowFont" aria-label="Fuente de lectura"><option value="sans">Sistema</option><option value="serif">Serif editorial</option><option value="humanist">Humanista accesible</option><option value="mono">Monoespaciada</option></select><label class="reflow-slider"><span>Tamaño <output id="reflowSizeOutput">20px</output></span><input id="reflowSize" type="range" min="14" max="36" step="1" value="20"></label><div class="label">Interlineado</div><div class="tool-row"><button class="btn" data-reflow-spacing="compact">Compacto</button><button class="btn" data-reflow-spacing="normal">Normal</button><button class="btn" data-reflow-spacing="relaxed">Amplio</button></div><div class="label">Ancho de lectura</div><div class="tool-row reflow-four"><button class="btn" data-reflow-width="narrow">Estrecho</button><button class="btn" data-reflow-width="normal">Normal</button><button class="btn" data-reflow-width="wide">Amplio</button><button class="btn" data-reflow-width="fluid">Fluido</button></div><div class="label">Columnas</div><div class="tool-row"><button class="btn" data-reflow-columns="auto">Auto</button><button class="btn" data-reflow-columns="1">Una</button><button class="btn" data-reflow-columns="2">Dos</button></div><div class="label">Texto</div><div class="tool-row"><button class="btn" data-reflow-alignment="left">Izquierda</button><button class="btn" data-reflow-alignment="justify">Justificado</button><button class="btn" data-reflow-tracking="normal">Natural</button><button class="btn" data-reflow-tracking="open">Abierto</button></div><div class="label">Papel de lectura</div><div class="reflow-themes"><button data-reflow-theme="paper" aria-label="Blanco"></button><button data-reflow-theme="warm" aria-label="Cálido"></button><button data-reflow-theme="sepia" aria-label="Sepia"></button><button data-reflow-theme="gray" aria-label="Gris"></button><button data-reflow-theme="night" aria-label="Noche"></button></div><button class="btn reflow-reset" id="reflowReset">Restablecer lectura</button></div>`);
   document.querySelectorAll("[data-reading-mode]").forEach((button) => (button.onclick = () => setReadingMode(button.dataset.readingMode)));
-  $("reflowFont").onchange = (event) => { localStorage.setItem("paper.reflow-font", event.target.value); applyReflowPreferences(); };
-  $("reflowSize").oninput = (event) => { localStorage.setItem("paper.reflow-size", event.target.value); applyReflowPreferences(); };
-  document.querySelectorAll("[data-reflow-spacing]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-spacing", button.dataset.reflowSpacing); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-columns]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-columns", button.dataset.reflowColumns); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-width]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-width", button.dataset.reflowWidth); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-tracking]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-tracking", button.dataset.reflowTracking); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-alignment]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-alignment", button.dataset.reflowAlignment); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-theme]").forEach((button) => (button.onclick = () => { localStorage.setItem("paper.reflow-theme", button.dataset.reflowTheme); applyReflowPreferences(); }));
+  $("reflowFont").onchange = (event) => { kv.setItem("paper.reflow-font", event.target.value); applyReflowPreferences(); };
+  $("reflowSize").oninput = (event) => { kv.setItem("paper.reflow-size", event.target.value); applyReflowPreferences(); };
+  document.querySelectorAll("[data-reflow-spacing]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-spacing", button.dataset.reflowSpacing); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-columns]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-columns", button.dataset.reflowColumns); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-width]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-width", button.dataset.reflowWidth); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-tracking]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-tracking", button.dataset.reflowTracking); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-alignment]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-alignment", button.dataset.reflowAlignment); applyReflowPreferences(); }));
+  document.querySelectorAll("[data-reflow-theme]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-theme", button.dataset.reflowTheme); applyReflowPreferences(); }));
   $("reflowReset").onclick = () => {
-    ["size", "spacing", "font", "columns", "width", "tracking", "alignment", "theme"].forEach((name) => localStorage.removeItem(`paper.reflow-${name}`));
+    ["size", "spacing", "font", "columns", "width", "tracking", "alignment", "theme"].forEach((name) => kv.removeItem(`paper.reflow-${name}`));
     applyReflowPreferences();
     toast("Preferencias de lectura restablecidas");
   };
@@ -7175,7 +8686,7 @@ function pageColorStorageKey() {
   return currentBook ? key(currentBook.id, `page-color-${currentPage}`) : "paper.page-color";
 }
 function updatePageColor() {
-  pageColor = localStorage.getItem(pageColorStorageKey()) || "paper";
+  pageColor = kv.getItem(pageColorStorageKey()) || "paper";
   const wrap = $("canvasWrap");
   wrap.classList.remove("page-color-warm", "page-color-sepia", "page-color-gray", "page-color-night");
   if (pageColor !== "paper") wrap.classList.add(`page-color-${pageColor}`);
@@ -7183,7 +8694,7 @@ function updatePageColor() {
 }
 function setPageColor(color) {
   pageColor = color;
-  localStorage.setItem(pageColorStorageKey(), color);
+  kv.setItem(pageColorStorageKey(), color);
   updatePageColor();
 }
 function buildPageColorControls() {
@@ -7240,7 +8751,7 @@ function configureFooterIsland() {
   (footer.querySelector(".right") || footer).append(collapse);
   const setMinimized = (minimized) => {
     footer.classList.toggle("footer-minimized", minimized);
-    localStorage.setItem("paper.footer-minimized", String(minimized));
+    kv.setItem("paper.footer-minimized", String(minimized));
     setIcon(collapse, minimized ? "chevronUp" : "chevronDown");
     collapse.title = minimized ? "Expandir navegador de páginas" : "Contraer navegador de páginas";
     collapse.setAttribute("aria-label", collapse.title);
@@ -7252,7 +8763,7 @@ function configureFooterIsland() {
   footer.addEventListener("click", () => {
     if (footer.classList.contains("footer-minimized")) setMinimized(false);
   });
-  setMinimized(localStorage.getItem("paper.footer-minimized") === "true");
+  setMinimized(kv.getItem("paper.footer-minimized") === "true");
 }
 document.querySelectorAll("[data-color]").forEach(
   (b) =>
@@ -7363,12 +8874,12 @@ $("noteText").onkeydown = (e) => {
 function setUiScale(value) {
   const n = Math.max(0.85, Math.min(1.25, value));
   document.documentElement.style.setProperty("--ui-scale", n);
-  localStorage.setItem("paper.ui-scale", n);
+  kv.setItem("paper.ui-scale", n);
 }
 $("uiSmaller").onclick = () =>
-  setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1) - 0.05);
+  setUiScale(Number(kv.getItem("paper.ui-scale") || 1) - 0.05);
 $("uiLarger").onclick = () =>
-  setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1) + 0.05);
+  setUiScale(Number(kv.getItem("paper.ui-scale") || 1) + 0.05);
 document.addEventListener("selectionchange", () =>
   requestAnimationFrame(() => {
     paintLiveHighlight();
@@ -7417,7 +8928,7 @@ window.addEventListener("keydown", (e) => {
     openPalette(window.getSelection()?.toString().trim().slice(0, 80) || "");
     return;
   }
-  if (!$("palette").hidden || !$("shortcutsPanel").hidden || !$("studyPanel").hidden) {
+  if (!$("palette").hidden || !$("shortcutsPanel").hidden || !$("studyPanel").hidden || !$("dataPanel").hidden) {
     if (e.key === "Escape") {
       closePalette();
       closeShortcuts();
@@ -7509,6 +9020,10 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     toggleNotebook();
   }
+  if ((e.key === "d" || e.key === "D") && pdfDoc) {
+    e.preventDefault();
+    toggleSplitView();
+  }
   if ((e.key === "i" || e.key === "I") && currentBook) {
     e.preventDefault();
     toggleAssistant();
@@ -7556,7 +9071,22 @@ function touchMidpoint(touches) {
     y: (touches[0].clientY + touches[1].clientY) / 2,
   };
 }
-let sx = null;
+// Gestos táctiles: pellizco para el zoom (en cualquier modo de página) y
+// deslizar en horizontal para pasar página, solo en página única o doble y
+// cuando el gesto es claramente horizontal y la página no se puede desplazar
+// de lado (si no, deslizar sirve para moverse por una página ampliada).
+let swipeStart = null;
+function pinchTarget() {
+  return viewMode === "continuous" ? $("continuousView") : $("canvasWrap");
+}
+function resetPinchPreview() {
+  for (const element of [$("canvasWrap"), $("continuousView")]) {
+    element.style.transform = "";
+    element.style.transformOrigin = "";
+    element.classList.remove("pinch-preview");
+  }
+  document.body.classList.remove("pdf-pinching");
+}
 document.addEventListener(
   "touchstart",
   (e) => {
@@ -7564,22 +9094,26 @@ document.addEventListener(
     if (e.touches.length === 2 && pdfDoc && !reflowMode && e.target.closest("#viewer")) {
       e.preventDefault();
       const midpoint = touchMidpoint(e.touches);
+      const target = pinchTarget();
       pinchGesture = {
         distance: Math.max(1, touchDistance(e.touches)),
         startScale: scale,
         nextScale: scale,
-        anchor: zoomAnchor(midpoint.x, midpoint.y),
+        anchor: viewMode === "continuous" ? null : zoomAnchor(midpoint.x, midpoint.y),
+        target,
       };
-      sx = null;
-      const wrap = $("canvasWrap"), rect = wrap.getBoundingClientRect();
-      wrap.style.transformOrigin = `${midpoint.x - rect.left}px ${midpoint.y - rect.top}px`;
-      wrap.classList.add("pinch-preview");
+      swipeStart = null;
+      const rect = target.getBoundingClientRect();
+      target.style.transformOrigin = `${midpoint.x - rect.left}px ${midpoint.y - rect.top}px`;
+      target.classList.add("pinch-preview");
       document.body.classList.add("pdf-pinching");
       return;
     }
-    sx = e.touches.length === 1 && !document.body.classList.contains("ink-drawing-mode")
-      ? e.changedTouches[0].clientX
-      : null;
+    const touch = e.touches[0];
+    swipeStart =
+      e.touches.length === 1 && e.target.closest("#viewer") && !document.body.classList.contains("ink-drawing-mode")
+        ? { x: touch.clientX, y: touch.clientY, time: performance.now(), scrollLeft: $("viewer").scrollLeft }
+        : null;
   },
   { passive: false },
 );
@@ -7588,7 +9122,7 @@ document.addEventListener("touchmove", (e) => {
   e.preventDefault();
   const ratio = touchDistance(e.touches) / pinchGesture.distance;
   pinchGesture.nextScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, pinchGesture.startScale * ratio));
-  $("canvasWrap").style.transform = `scale(${pinchGesture.nextScale / pinchGesture.startScale})`;
+  pinchGesture.target.style.transform = `scale(${pinchGesture.nextScale / pinchGesture.startScale})`;
   $("zoomLabel").textContent = `${Math.round(pinchGesture.nextScale * 100)}%`;
 }, { passive: false });
 document.addEventListener(
@@ -7598,37 +9132,44 @@ document.addEventListener(
       e.preventDefault();
       const gesture = pinchGesture;
       pinchGesture = null;
-      const wrap = $("canvasWrap");
-      wrap.style.transform = "";
-      wrap.style.transformOrigin = "";
-      wrap.classList.remove("pinch-preview");
-      document.body.classList.remove("pdf-pinching");
-      sx = null;
+      resetPinchPreview();
+      swipeStart = null;
       setZoom(gesture.nextScale, gesture.anchor);
       return;
     }
-    if (sx == null || !pdfDoc) return;
-    const dx = e.changedTouches[0].clientX - sx;
-    if (Math.abs(dx) > 110) {
-      dx < 0 ? renderPage(currentPage + 1) : renderPage(currentPage - 1);
-    }
-    sx = null;
+    const start = swipeStart;
+    swipeStart = null;
+    if (!start || !pdfDoc || reflowMode || viewMode === "continuous") return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - start.x,
+      dy = touch.clientY - start.y;
+    const viewer = $("viewer");
+    const canPanSideways = viewer.scrollWidth > viewer.clientWidth + 4;
+    const pannedSideways = Math.abs(viewer.scrollLeft - start.scrollLeft) > 2;
+    const selection = window.getSelection();
+    if (Math.abs(dx) < 90 || Math.abs(dx) < Math.abs(dy) * 2 || performance.now() - start.time > 900) return;
+    if (canPanSideways || pannedSideways) return;
+    if (selection && !selection.isCollapsed) return;
+    stepPage(dx < 0 ? 1 : -1);
   },
   { passive: false },
 );
 document.addEventListener("touchcancel", () => {
   pinchGesture = null;
-  sx = null;
-  $("canvasWrap").style.transform = "";
-  $("canvasWrap").style.transformOrigin = "";
-  $("canvasWrap").classList.remove("pinch-preview");
-  document.body.classList.remove("pdf-pinching");
+  swipeStart = null;
+  resetPinchPreview();
 });
 let resizeTimer = null;
+let lastViewportSize = { width: window.innerWidth, height: window.innerHeight };
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    refitZoom();
+    const width = window.innerWidth,
+      height = window.innerHeight;
+    const widthChanged = Math.abs(width - lastViewportSize.width) > 1;
+    const heightChanged = Math.abs(height - lastViewportSize.height) > 140;
+    lastViewportSize = { width, height };
+    if (widthChanged || heightChanged) refitZoom();
   }, 140);
 });
 for (const eventName of ["pointerdown", "wheel", "keydown"]) {
@@ -7640,13 +9181,19 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("blur", () => flushReadingSession(true));
 window.addEventListener("focus", markReadingActivity);
-window.addEventListener("pagehide", () => flushReadingSession(true));
+window.addEventListener("pagehide", () => {
+  flushReadingSession(true);
+  kv.flush().catch(() => {});
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") kv.flush().catch(() => {});
+});
 readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000);
 
 (async function init() {
-  if (localStorage.getItem("paper.design-version") !== "4") {
-    localStorage.setItem("paper.design-version", "4");
-    localStorage.setItem("paper.theme", "light");
+  if (kv.getItem("paper.design-version") !== "4") {
+    kv.setItem("paper.design-version", "4");
+    kv.setItem("paper.theme", "light");
   }
   document.documentElement.classList.add("ui4");
   applyInterfaceIcons();
@@ -7657,23 +9204,32 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
   updateFocusButton();
   buildInkPalette();
   bindAssistant();
+  bindDataPanel();
+  bindHoverPreviews();
+  bindReferencesPanel();
+  bindSplitView();
   configureFooterIsland();
   configureResponsiveUi();
-  setTheme(localStorage.getItem("paper.theme") || "light");
-  setUiScale(Number(localStorage.getItem("paper.ui-scale") || 1));
+  setTheme(kv.getItem("paper.theme") || "light");
+  setUiScale(Number(kv.getItem("paper.ui-scale") || 1));
   document.querySelector('[data-color="yellow"]').classList.add("active");
   setInkTool("highlight");
-  await setReadingMode(localStorage.getItem("paper.reading-mode") || "pdf");
-  const margin = localStorage.getItem("paper.reader-margin") || "normal";
+  await setReadingMode(kv.getItem("paper.reading-mode") || "pdf");
+  const margin = kv.getItem("paper.reader-margin") || "normal";
   $("viewer").classList.toggle("margin-compact", margin === "compact");
   $("viewer").classList.toggle("margin-wide", margin === "wide");
   document
     .querySelector(`[data-reader-margin="${margin}"]`)
     ?.classList.add("active");
   await openDb();
+  await migrateLegacyDocumentIds();
+  bindLaunchQueue();
   await renderLibrary();
   const books = (await dbAll()).sort((a, b) => b.openedAt - a.openedAt);
+  if (books.length) requestPersistentStorage();
   if (books[0]) openStored(books[0].id);
+  startBackgroundSync();
+  consumeSharedFiles();
   if ("serviceWorker" in navigator)
     navigator.serviceWorker.register("/sw.js").catch(() => {});
 })();
