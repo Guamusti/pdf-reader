@@ -1009,7 +1009,26 @@ function startBackgroundSync() {
 
 // ---- Biblioteca -------------------------------------------------------------
 let libraryFilter = kv.getItem("paper.library-filter") || "all";
-let libraryCoverUrls = [];
+// Portadas: una URL por documento que se reutiliza entre redibujados (antes
+// se creaban nuevas en cada uno y la cuadrícula entera se sustituía).
+const libraryCoverCache = new Map();
+function libraryCoverUrl(book) {
+  if (!(book.cover instanceof Blob)) return "";
+  const cached = libraryCoverCache.get(book.id);
+  if (cached && cached.size === book.cover.size && cached.type === book.cover.type) return cached.url;
+  if (cached) URL.revokeObjectURL(cached.url);
+  const url = URL.createObjectURL(book.cover);
+  libraryCoverCache.set(book.id, { url, size: book.cover.size, type: book.cover.type });
+  return url;
+}
+// Solo se toca el DOM si el contenido cambia: un redibujado entre el toque y
+// el final del toque hacía que el clic se perdiera o cayera en otra tarjeta.
+const renderedHtml = new WeakMap();
+function setHtml(element, html) {
+  if (renderedHtml.get(element) === html) return;
+  renderedHtml.set(element, html);
+  element.innerHTML = html;
+}
 let libraryCoverQueue = Promise.resolve();
 const libraryCoverPending = new Set();
 function libraryDisplayName(name) {
@@ -1028,7 +1047,10 @@ function relativeTime(timestamp) {
   return new Date(timestamp).toLocaleDateString("es", { day: "numeric", month: "short", year: new Date(timestamp).getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
 }
 function libraryStatus(book, stats) {
-  if (stats.progress >= 100) return "done";
+  // Estar en la última página solo cuenta como terminado si hay algo más que
+  // leer antes o si se ha leído un rato (un Markdown o un PDF de una página
+  // salían «Terminados» nada más abrirlos).
+  if (stats.progress >= 100 && (Number(book.pages) > 1 || Number(stats.totalMs || 0) >= 60_000)) return "done";
   if (stats.page <= 1 && Number(stats.totalMs || 0) < 5000) return "new";
   return "reading";
 }
@@ -1060,8 +1082,7 @@ async function ensureBookCover(rec, doc = null) {
       if (!fresh.pages) fresh.pages = source.numPages;
       await dbPut(fresh);
       if (currentBook?.id === rec.id) currentBook.cover = cover;
-      const url = URL.createObjectURL(cover);
-      libraryCoverUrls.push(url);
+      const url = libraryCoverUrl({ id: rec.id, cover });
       document.querySelectorAll(`[data-cover-for="${CSS.escape(encodeURIComponent(rec.id))}"]`).forEach((holder) => {
         holder.classList.add("has-image");
         holder.querySelector("img")?.remove();
@@ -1086,14 +1107,14 @@ function libraryCoverHtml(book, url, large = false) {
 async function renderLibrary() {
   flushReadingSession(false);
   const books = await dbAll();
-  libraryCoverUrls.forEach((url) => URL.revokeObjectURL(url));
-  libraryCoverUrls = [];
-  const coverUrl = (book) => {
-    if (!(book.cover instanceof Blob)) return "";
-    const url = URL.createObjectURL(book.cover);
-    libraryCoverUrls.push(url);
-    return url;
-  };
+  const present = new Set(books.map((book) => book.id));
+  for (const [id, entry] of libraryCoverCache) {
+    if (!present.has(id)) {
+      URL.revokeObjectURL(entry.url);
+      libraryCoverCache.delete(id);
+    }
+  }
+  const coverUrl = libraryCoverUrl;
   const query = ($("librarySearch")?.value || "").trim().toLocaleLowerCase();
   const sort = $("librarySort")?.value || kv.getItem("paper.library-sort") || "recent";
   const view = kv.getItem("paper.library-view") || "grid";
@@ -1126,10 +1147,10 @@ async function renderLibrary() {
   if (resume) {
     const stats = estimates.get(resume.id);
     continueBox.hidden = false;
-    continueBox.innerHTML = `<button class="lib-hero" data-id="${encodeURIComponent(resume.id)}">${libraryCoverHtml(resume, coverUrl(resume), true)}<span class="lib-hero-copy"><small>${currentBook?.id === resume.id ? "Abierto ahora" : `Continuar leyendo · ${relativeTime(resume.openedAt)}`}</small><strong title="${escapeHtml(resume.name)}">${escapeHtml(libraryDisplayName(resume.name))}</strong><span>Página ${stats.page} de ${resume.pages || "—"} · ${stats.progress}% · ≈ ${formatReadingDuration(stats.remainingMs, true)} para terminar</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i><em class="lib-hero-cta">${currentBook?.id === resume.id ? "Volver a la lectura" : "Continuar"} ${iconSvg("chevronRight")}</em></span></button>`;
+    setHtml(continueBox, `<button class="lib-hero" data-id="${encodeURIComponent(resume.id)}">${libraryCoverHtml(resume, coverUrl(resume), true)}<span class="lib-hero-copy"><small>${currentBook?.id === resume.id ? "Abierto ahora" : `Continuar leyendo · ${relativeTime(resume.openedAt)}`}</small><strong title="${escapeHtml(resume.name)}">${escapeHtml(libraryDisplayName(resume.name))}</strong><span>Página ${stats.page} de ${resume.pages || "—"} · ${stats.progress}% · ≈ ${formatReadingDuration(stats.remainingMs, true)} para terminar</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i><em class="lib-hero-cta">${currentBook?.id === resume.id ? "Volver a la lectura" : "Continuar"} ${iconSvg("chevronRight")}</em></span></button>`);
   } else {
     continueBox.hidden = true;
-    continueBox.innerHTML = "";
+    setHtml(continueBox, "");
   }
   const filters = [
     ["all", "Todos"],
@@ -1138,15 +1159,15 @@ async function renderLibrary() {
     ["done", "Terminados"],
     ...(counts.markdown ? [["markdown", "Markdown"]] : []),
   ];
-  $("libraryFilters").innerHTML = books.length
+  setHtml($("libraryFilters"), books.length
     ? filters.map(([id, label]) => `<button type="button" role="radio" data-library-filter="${id}" aria-checked="${libraryFilter === id}" ${id !== "all" && !counts[id] ? "disabled" : ""}>${label}<span>${counts[id]}</span></button>`).join("")
-    : "";
+    : "");
   document.querySelectorAll("[data-library-view]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.libraryView === view)));
   $("librarySort").value = sort;
   $("libraryPanel").classList.toggle("is-empty", !books.length);
   const grid = $("library");
   grid.dataset.view = view;
-  grid.innerHTML = visibleBooks.length
+  setHtml(grid, visibleBooks.length
     ? visibleBooks
         .map((book) => {
           const stats = estimates.get(book.id);
@@ -1159,7 +1180,7 @@ async function renderLibrary() {
         .join("")
     : books.length
       ? `<div class="lib-empty"><strong>Nada por aquí</strong><p>${query ? `Ningún documento coincide con «${escapeHtml(query)}».` : "No hay documentos con este filtro."}</p></div>`
-      : `<div class="lib-empty is-first"><span>${iconSvg("library")}</span><strong>Tu biblioteca está vacía</strong><p>Añade un PDF o un Markdown para empezar. Se guardan solo en este dispositivo.</p><label class="lib-add" for="fileInput">${iconSvg("plus")}<span>Añadir documento</span></label></div>`;
+      : `<div class="lib-empty is-first"><span>${iconSvg("library")}</span><strong>Tu biblioteca está vacía</strong><p>Añade un PDF o un Markdown para empezar. Se guardan solo en este dispositivo.</p><label class="lib-add" for="fileInput">${iconSvg("plus")}<span>Añadir documento</span></label></div>`);
   books.filter((book) => book.kind !== "markdown" && !book.cover).forEach((book) => ensureBookCover(book));
 }
 function openLibrary() {
@@ -1204,7 +1225,7 @@ function bindLibrary() {
     if (open) {
       const id = decodeURIComponent(open.dataset.id);
       closeLibrary();
-      if (currentBook?.id !== id) openStored(id);
+      openDocument(id);
       return;
     }
     const filter = event.target.closest("[data-library-filter]");
@@ -1320,12 +1341,17 @@ function markdownToHtml(source) {
   closeList();
   return html.join("") || "<p>Documento Markdown vacío.</p>";
 }
-async function openMarkdownStored(rec) {
+async function openMarkdownStored(rec, superseded = () => false) {
   flushReadingSession(true);
   flushNotebook();
   setStickyPlacement(false);
   if (activeStickyId) closeStickyEditor();
-  markdownContent = await rec.blob.text();
+  const text = await rec.blob.text();
+  rec.openedAt = Date.now();
+  rec.pages = 1;
+  if (!superseded()) await dbPut(rec);
+  if (superseded()) return;
+  markdownContent = text;
   resetRenderEngine();
   teardownContinuous();
   viewMode = "single";
@@ -1342,9 +1368,6 @@ async function openMarkdownStored(rec) {
   document.body.classList.add("reflow-mode");
   $("markerModeBtn").disabled = true;
   $("eraserModeBtn").disabled = true;
-  rec.openedAt = Date.now();
-  rec.pages = 1;
-  await dbPut(rec);
   const markdownStats = getReadingStats(rec.id);
   markdownStats.pageChars[1] = markdownContent.replace(/[#*_`>\-]/g, "").length;
   saveReadingStats(rec.id, markdownStats);
@@ -1359,10 +1382,13 @@ async function openMarkdownStored(rec) {
   $("pageStatus").hidden = false;
   $("pageTotal").textContent = "";
   $("pageJump").hidden = true;
+  $("toolbarPage").value = 1;
   $("toolbarPage").disabled = true;
+  $("toolbarPageCount").textContent = "/ —";
   $("toolbarPrev").disabled = true;
   $("toolbarNext").disabled = true;
   $("pageScrubber").disabled = true;
+  $("progressBar").style.width = "0";
   $("reflowControls").hidden = false;
   document.querySelectorAll("[data-reading-mode]").forEach((button) =>
     button.classList.toggle("active", button.dataset.readingMode === "reflow"),
@@ -1376,10 +1402,20 @@ async function openMarkdownStored(rec) {
 }
 // Si se abre otro documento mientras este aún se prepara, la apertura antigua
 // se abandona en vez de pintar sus marcadores o su índice sobre el nuevo.
+// `requestedDocId` es siempre el último documento pedido (aunque aún cargue).
 let openStoredToken = 0;
+let requestedDocId = "";
+// Abrir desde la biblioteca, la paleta o un resultado: pulsar el documento
+// que ya está abierto no hace nada, salvo que haya otro cargándose (antes se
+// ignoraba el toque y acababa abriéndose el otro).
+function openDocument(id) {
+  if (id && id === requestedDocId && currentBook?.id === id) return Promise.resolve();
+  return openStored(id);
+}
 async function openStored(id) {
   const openToken = ++openStoredToken;
   const superseded = () => openToken !== openStoredToken;
+  requestedDocId = id;
   showLoader(true);
   try {
     if (currentBook?.id !== id) flushReadingSession(true);
@@ -1389,9 +1425,10 @@ async function openStored(id) {
     if (activeStickyId) closeStickyEditor();
     if (currentBook?.id !== id) setAutoScroll(false);
     const rec = await dbGet(id);
+    if (superseded()) return;
     if (!rec) throw new Error("Documento no encontrado");
     if (rec.kind === "markdown") {
-      await openMarkdownStored(rec);
+      await openMarkdownStored(rec, superseded);
       return;
     }
     markdownContent = "";
@@ -1406,14 +1443,16 @@ async function openStored(id) {
     resetRenderEngine();
     const bytes = new Uint8Array(await rec.blob.arrayBuffer());
     const loadedDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+    rec.pages = loadedDoc.numPages;
+    rec.openedAt = Date.now();
+    if (!superseded()) await dbPut(rec);
     if (superseded()) {
       loadedDoc.destroy?.();
       return;
     }
+    // A partir de aquí no hay esperas hasta el primer render: el documento
+    // nuevo y su estado se asignan juntos.
     pdfDoc = loadedDoc;
-    rec.pages = pdfDoc.numPages;
-    rec.openedAt = Date.now();
-    await dbPut(rec);
     currentBook = rec;
     if (!rec.cover) ensureBookCover(rec, pdfDoc);
     loadCurrentDocText(rec, pdfDoc);
@@ -1457,6 +1496,7 @@ async function openStored(id) {
     zoomMode = kv.getItem(key(id, "zoom-mode")) || "auto";
     if (zoomMode === "custom" && !(storedScale > 0)) zoomMode = "auto";
     if (zoomMode !== "custom") scale = await computeZoomForMode(zoomMode);
+    if (superseded()) return;
     $("docTitle").textContent = rec.name;
     $("docMeta").textContent =
       `${pdfDoc.numPages} páginas · guardado localmente`;
@@ -1480,7 +1520,10 @@ async function openStored(id) {
     markReadingActivity();
   } catch (e) {
     console.error(e);
-    if (!superseded()) toast("No se pudo abrir el PDF");
+    if (!superseded()) {
+      requestedDocId = currentBook?.id || "";
+      toast("No se pudo abrir el PDF");
+    }
   } finally {
     if (!superseded()) showLoader(false);
   }
@@ -2332,7 +2375,7 @@ function buildPaletteItems(query) {
       icon: record.kind === "markdown" ? "MD" : "PDF",
       title: record.name,
       subtitle: record.pages ? `${record.pages} páginas` : "Documento local",
-      run: () => openStored(record.id),
+      run: () => openDocument(record.id),
     }));
   push(raw ? "Biblioteca" : "Recientes", libraryHits);
   return items;
@@ -8132,9 +8175,10 @@ async function openSearchMatch(index) {
   refreshReflowSections();
   searchIndex = index;
   const match = searchMatches[index];
-  if (match.docId && match.docId !== currentBook?.id) {
+  if (match.docId && (match.docId !== currentBook?.id || requestedDocId !== match.docId)) {
     preserveSearchOnOpen = true;
     await openStored(match.docId);
+    if (currentBook?.id !== match.docId) return;
     searchRegex = buildSearchRegex(searchRawQuery);
     searchQuery = searchRawQuery.toLowerCase();
   }
