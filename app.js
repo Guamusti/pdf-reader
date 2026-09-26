@@ -81,8 +81,7 @@ let pdfDoc = null,
   selectedAnnotationId = null,
   reflowMode = false,
   captureStart = null,
-  aiImage = "",
-  aiImagePage = 0,
+  captureAppend = false,
   localAiEngine = null,
   localAiLoading = null,
   localAiWorker = null,
@@ -1842,6 +1841,7 @@ async function renderContinuousSlot(slot) {
       sizeTarget: slot,
     });
     if (viewMode !== "continuous") return;
+    if (captureAreas().some((area) => area.page === pageNumber)) renderAreaMarks();
     // Si la página salió de la vista mientras se dibujaba, se libera ya: si no,
     // un desplazamiento rápido dejaba cientos de lienzos ocupando memoria.
     if (!continuousRendered.has(pageNumber)) clearContinuousSlot(slot);
@@ -2260,6 +2260,7 @@ function paletteActions() {
     { icon: "◆", title: "Nueva tarjeta de estudio", keys: "flashcard crear pregunta", when: hasDoc, run: () => renderStudyEditor() },
     { icon: "✦", title: "Generar tarjetas de esta página con IA", keys: "flashcards ia estudiar automatico", when: hasPdf, run: generateCardsWithAi },
     { icon: "✦", title: "Asistente IA: abrir o cerrar", keys: "asistente ia chat pregunta preguntar documento", shortcut: ["I"], when: hasDoc, run: () => toggleAssistant() },
+    { icon: "✂", title: "Recortar una zona para la IA (fórmula, tabla, figura…)", keys: "recortar area zona formula ecuacion captura imagen simbolos", shortcut: ["X"], when: hasPdf, run: () => openCapture() },
     { icon: "✦", title: "Resumir esta página con IA", keys: "resumen sintesis puntos clave", when: hasDoc, run: () => runAssistantAction("summary", { kind: "page" }) },
     { icon: "✦", title: "Resumir todo el documento con IA", keys: "resumen general sintesis documento completo", when: hasDoc, run: () => runAssistantAction("summary", { kind: "document" }) },
     { icon: "✦", title: "Explicar la selección con IA", keys: "explicar simplificar entender", when: hasDoc, run: () => runAssistantAction("explain", captureReaderSelection() ? { kind: "selection" } : { kind: "page" }) },
@@ -2498,7 +2499,7 @@ const SHORTCUT_GROUPS = [
   ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
   ["Lectura", [["Regla de lectura", ["G"]], ["Mover la regla", ["↑", "↓"]], ["Desplazamiento automático", ["A"]], ["Pausar / velocidad (auto-scroll)", ["Espacio", "[", "]"]], ["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Vista dividida", ["D"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
   ["Notas y anotaciones", [["Nota en un punto de la página", ["N"]], ["Ventana de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
-  ["Asistente IA", [["Abrir o cerrar el asistente", ["I"]], ["Enviar pregunta / nueva línea", ["Enter", "⇧ Enter"]], ["Detener la respuesta o cerrar", ["Esc"]]]],
+  ["Asistente IA", [["Abrir o cerrar el asistente", ["I"]], ["Recortar una zona (se pueden añadir varias)", ["X"]], ["Enviar pregunta / nueva línea", ["Enter", "⇧ Enter"]], ["Detener la respuesta o cerrar", ["Esc"]]]],
   ["Estudio", [["Abrir tarjetas de estudio", ["E"]], ["Mostrar respuesta", ["Espacio"]], ["Calificar: otra vez · difícil · bien · fácil", ["1", "2", "3", "4"]]]],
   ["General", [["Atajos de teclado", ["?"]], ["Cerrar paneles", ["Esc"]]]],
 ];
@@ -6051,6 +6052,7 @@ function openAnnotationEditor(id, anchorRect = null) {
 function renderAnnotations() {
   const layer = $("annotationLayer");
   layer.innerHTML = "";
+  renderAreaMarks();
   if (!currentBook) return;
   for (const mark of annotations().filter((a) => a.page === currentPage)) {
     if (mark.type === "sticky") continue;
@@ -6681,13 +6683,19 @@ function closeCapture() {
   $("captureOverlay").setAttribute("aria-hidden", "true");
   $("captureBox").hidden = true;
 }
-async function openCapture() {
+// `append`: el recorte se suma a las áreas ya adjuntas en vez de sustituirlas.
+async function openCapture({ append = false } = {}) {
   if (!pdfDoc) return toast("Abre un PDF primero");
   if (reflowMode) await setReadingMode("pdf");
   closeCapture();
+  closePromptMenu();
+  hideAnnotationActions();
+  captureAppend = append && captureAreas().length > 0;
+  $("captureOverlay").querySelector(".capture-guide").textContent = captureAppend
+    ? `Arrastra sobre otra zona para añadirla (área ${captureAreas().length + 1}) · Esc para cancelar`
+    : "Arrastra sobre una fórmula, tabla o párrafo para recortarlo · Esc para cancelar";
   $("captureOverlay").classList.add("show");
   $("captureOverlay").setAttribute("aria-hidden", "false");
-  toast("Arrastra sobre una zona del PDF para recortarla");
 }
 function updateCaptureBox(a, b) {
   const box = $("captureBox"),
@@ -6701,31 +6709,277 @@ function updateCaptureBox(a, b) {
   box.style.height = `${height}px`;
   box.hidden = false;
 }
+// ---- Áreas recortadas para la IA ---------------------------------------------
+// Un área es una zona de una página: su imagen, el texto de la capa de texto que
+// queda dentro y su posición relativa (0–1) para marcarla sobre la página.
+const MAX_CAPTURE_AREAS = 4;
+// Páginas dibujadas ahora mismo, en cualquier diseño: página, doble página o
+// scroll continuo.
+function capturePageTargets() {
+  const targets = [];
+  if (!$("canvasWrap").hidden) targets.push({ host: $("canvasWrap"), canvas: $("pdfCanvas"), textLayer: $("textLayer"), page: currentPage });
+  if (!$("facingWrap").hidden) targets.push({ host: $("facingWrap"), canvas: $("facingCanvas"), textLayer: $("facingTextLayer"), page: currentPage + 1 });
+  if (!$("continuousView").hidden)
+    for (const slot of $("continuousView").querySelectorAll(".cont-page")) {
+      const canvas = slot.querySelector("canvas");
+      if (canvas?.width) targets.push({ host: slot, canvas, textLayer: slot.querySelector(".textLayer"), page: Number(slot.dataset.page) });
+    }
+  return targets;
+}
+function areaHost(page) {
+  if (!$("continuousView").hidden) return $("continuousView").querySelector(`.cont-page[data-page="${page}"]`);
+  if (page === currentPage && !$("canvasWrap").hidden) return $("canvasWrap");
+  if (page === currentPage + 1 && !$("facingWrap").hidden) return $("facingWrap");
+  return null;
+}
+// Texto de la capa de texto cuyo centro cae dentro del recorte, respetando los
+// saltos de línea aproximados.
+function textInsideRect(layer, clip) {
+  if (!layer) return "";
+  let text = "";
+  let lastTop = null;
+  for (const span of layer.querySelectorAll("span")) {
+    const box = span.getBoundingClientRect();
+    if (!box.width || !span.textContent) continue;
+    const cx = box.left + box.width / 2,
+      cy = box.top + box.height / 2;
+    if (cx < clip.left || cx > clip.right || cy < clip.top || cy > clip.bottom) continue;
+    if (lastTop !== null) text += box.top - lastTop > box.height * 0.6 ? "\n" : " ";
+    text += span.textContent;
+    lastTop = box.top;
+  }
+  return text.replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n").trim().slice(0, 3000);
+}
 function cropPdfCapture(a, b) {
-  const pageBox = $("canvasWrap").getBoundingClientRect(),
-    left = Math.max(pageBox.left, Math.min(a.x, b.x)),
-    top = Math.max(pageBox.top, Math.min(a.y, b.y)),
-    right = Math.min(pageBox.right, Math.max(a.x, b.x)),
-    bottom = Math.min(pageBox.bottom, Math.max(a.y, b.y));
-  if (right - left < 20 || bottom - top < 20)
-    return toast("Selecciona una zona más grande");
-  const source = $("pdfCanvas"),
-    sx = ((left - pageBox.left) * source.width) / pageBox.width,
-    sy = ((top - pageBox.top) * source.height) / pageBox.height,
-    sw = ((right - left) * source.width) / pageBox.width,
-    sh = ((bottom - top) * source.height) / pageBox.height,
+  const sel = { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y), right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) };
+  // La página que más se solapa con el rectángulo dibujado.
+  let target = null;
+  let best = 0;
+  for (const candidate of capturePageTargets()) {
+    const box = candidate.canvas.getBoundingClientRect();
+    const overlap = Math.max(0, Math.min(box.right, sel.right) - Math.max(box.left, sel.left)) * Math.max(0, Math.min(box.bottom, sel.bottom) - Math.max(box.top, sel.top));
+    if (overlap > best) {
+      best = overlap;
+      target = { ...candidate, box };
+    }
+  }
+  if (!target) return toast("Arrastra sobre una página del PDF");
+  const pageBox = target.box,
+    clip = {
+      left: Math.max(pageBox.left, sel.left),
+      top: Math.max(pageBox.top, sel.top),
+      right: Math.min(pageBox.right, sel.right),
+      bottom: Math.min(pageBox.bottom, sel.bottom),
+    };
+  if (clip.right - clip.left < 20 || clip.bottom - clip.top < 20) return toast("Selecciona una zona más grande");
+  const source = target.canvas,
+    sx = ((clip.left - pageBox.left) * source.width) / pageBox.width,
+    sy = ((clip.top - pageBox.top) * source.height) / pageBox.height,
+    sw = ((clip.right - clip.left) * source.width) / pageBox.width,
+    sh = ((clip.bottom - clip.top) * source.height) / pageBox.height,
     out = document.createElement("canvas"),
     captureScale = Math.min(1, 1600 / Math.max(sw, sh));
   out.width = Math.max(1, Math.round(sw * captureScale));
   out.height = Math.max(1, Math.round(sh * captureScale));
-  out
-    .getContext("2d")
-    .drawImage(source, sx, sy, sw, sh, 0, 0, out.width, out.height);
-  aiImage = out.toDataURL("image/jpeg", 0.9);
-  aiImagePage = currentPage;
+  const context = out.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, out.width, out.height);
+  context.drawImage(source, sx, sy, sw, sh, 0, 0, out.width, out.height);
+  const area = {
+    id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+    page: target.page,
+    image: out.toDataURL("image/jpeg", 0.9),
+    text: textInsideRect(target.textLayer, clip),
+    rect: {
+      x: (clip.left - pageBox.left) / pageBox.width,
+      y: (clip.top - pageBox.top) / pageBox.height,
+      w: (clip.right - clip.left) / pageBox.width,
+      h: (clip.bottom - clip.top) / pageBox.height,
+    },
+  };
+  const append = captureAppend;
   closeCapture();
-  setAssistantButton(true);
-  openAssistant({ context: { kind: "image", page: aiImagePage, image: aiImage } });
+  captureAppend = false;
+  const areas = append ? [...captureAreas(), area].slice(-MAX_CAPTURE_AREAS) : [area];
+  setAssistantContext({ kind: "image", areas });
+  const anchor = areaHost(area.page)?.querySelector(`.area-mark[data-area="${area.id}"]`)?.getBoundingClientRect();
+  openPromptMenu({ kind: "image", areas }, anchor || { left: clip.left, right: clip.right, top: clip.top, bottom: clip.bottom, width: clip.right - clip.left, height: clip.bottom - clip.top });
+}
+function captureAreas() {
+  return assistantContext.kind === "image" ? assistantContext.areas || [] : [];
+}
+function removeCaptureArea(id) {
+  const areas = captureAreas().filter((area) => area.id !== id);
+  setAssistantContext(areas.length ? { kind: "image", areas } : { kind: "page" });
+}
+// Recuadros numerados sobre las zonas adjuntas, para ver qué recibe la IA.
+function renderAreaMarks() {
+  document.querySelectorAll(".area-mark").forEach((node) => node.remove());
+  captureAreas().forEach((area, index) => {
+    const host = areaHost(area.page);
+    if (!host) return;
+    const mark = document.createElement("div");
+    mark.className = "area-mark";
+    mark.dataset.area = area.id;
+    mark.style.left = `${area.rect.x * 100}%`;
+    mark.style.top = `${area.rect.y * 100}%`;
+    mark.style.width = `${area.rect.w * 100}%`;
+    mark.style.height = `${area.rect.h * 100}%`;
+    mark.innerHTML = `<span>${index + 1}</span>`;
+    host.append(mark);
+  });
+}
+// Varias áreas se envían al modelo visual como una sola imagen, apiladas y
+// numeradas: funciona igual con la IA del navegador y con el modelo WebGPU.
+async function composeAreaImage(areas) {
+  if (areas.length === 1) return areas[0].image;
+  const images = await Promise.all(
+    areas.map(
+      (area) =>
+        new Promise((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = reject;
+          image.src = area.image;
+        }),
+    ),
+  );
+  const label = 34,
+    gap = 14,
+    width = Math.min(1600, Math.max(...images.map((image) => image.naturalWidth)));
+  const heights = images.map((image) => Math.round(image.naturalHeight * Math.min(1, width / image.naturalWidth)));
+  let height = heights.reduce((sum, value) => sum + value + label + gap, 0);
+  const scale = Math.min(1, 2400 / height);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  const ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, width, height);
+  let y = 0;
+  images.forEach((image, index) => {
+    ctx.fillStyle = "#1f2937";
+    ctx.fillRect(0, y, width, label);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 20px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`Área ${index + 1} · página ${areas[index].page}`, 12, y + label / 2);
+    y += label;
+    const w = Math.min(width, image.naturalWidth);
+    ctx.drawImage(image, 0, y, w, heights[index]);
+    y += heights[index] + gap;
+  });
+  return canvas.toDataURL("image/jpeg", 0.88);
+}
+function areasText(areas) {
+  return areas
+    .map((area, index) => (area.text ? (areas.length > 1 ? `[Área ${index + 1} · p. ${area.page}]\n${area.text}` : area.text) : ""))
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+// ---- Menú flotante de prompts ------------------------------------------------
+// Aparece junto a un recorte (o desde el menú de selección) con preguntas
+// preparadas según el tipo de documento.
+const PROMPT_PRESETS = {
+  paper: { label: "Artículo científico", actions: ["stepwise", "symbols", "importance", "assumptions"] },
+  general: { label: "General", actions: ["explain", "summary", "terms", "translate"] },
+};
+let promptMenuContext = null;
+function promptPreset() {
+  const value = kv.getItem("paper.prompt-preset");
+  return PROMPT_PRESETS[value] ? value : "paper";
+}
+function promptMenuHtml(context) {
+  const preset = promptPreset();
+  const count = context.kind === "image" ? context.areas.length : 0;
+  const footer =
+    context.kind === "image"
+      ? `${count} ${count === 1 ? "área adjunta" : "áreas adjuntas"}`
+      : `Selección · ${countWords(context.text)} palabras · p. ${context.page}`;
+  return `<header class="pm-head">${iconSvg("sparkles")}<select class="pm-preset" data-prompt-preset aria-label="Tipo de documento">${Object.entries(PROMPT_PRESETS)
+    .map(([id, value]) => `<option value="${id}" ${id === preset ? "selected" : ""}>${value.label}</option>`)
+    .join("")}</select></header><div class="pm-list" role="menu">${PROMPT_PRESETS[preset].actions
+    .map((action) => `<button type="button" role="menuitem" data-prompt-action="${action}">${escapeHtml(ASSISTANT_ACTIONS[action].menu)}</button>`)
+    .join("")}</div><div class="pm-sep"></div><div class="pm-list" role="menu">${
+    context.kind === "image" && count < MAX_CAPTURE_AREAS ? `<button type="button" role="menuitem" data-prompt-add>${iconSvg("plus")}<span>Añadir otra área</span></button>` : ""
+  }<button type="button" role="menuitem" data-prompt-ask>${iconSvg("send")}<span>Preguntar otra cosa…</span></button></div><footer class="pm-foot">${escapeHtml(footer)}</footer>`;
+}
+function openPromptMenu(context, anchor, { below = false } = {}) {
+  let menu = $("promptMenu");
+  if (!menu) {
+    menu = document.createElement("div");
+    menu.id = "promptMenu";
+    menu.className = "prompt-menu";
+    menu.setAttribute("role", "dialog");
+    menu.setAttribute("aria-label", "Preguntar a la IA");
+    document.body.append(menu);
+    bindPromptMenu(menu);
+  }
+  promptMenuContext = context;
+  menu.innerHTML = promptMenuHtml(context);
+  menu.hidden = false;
+  const width = menu.offsetWidth,
+    height = menu.offsetHeight;
+  // A la derecha de la zona; si no cabe, a la izquierda; si tampoco, debajo.
+  let left = anchor.right + 10;
+  let top = anchor.top;
+  if (below) {
+    left = Math.min(window.innerWidth - width - 8, anchor.left);
+    top = anchor.bottom + height + 18 < window.innerHeight ? anchor.bottom + 8 : anchor.top - height - 8;
+  } else if (left + width > window.innerWidth - 8) {
+    left = anchor.left - width - 10;
+    if (left < 8) {
+      left = Math.min(window.innerWidth - width - 8, Math.max(8, anchor.left));
+      top = anchor.bottom + height + 18 < window.innerHeight ? anchor.bottom + 10 : anchor.top - height - 10;
+    }
+  }
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, top))}px`;
+  menu.querySelector("[data-prompt-action]")?.focus({ preventScroll: true });
+}
+function closePromptMenu() {
+  const menu = $("promptMenu");
+  if (menu) menu.hidden = true;
+  promptMenuContext = null;
+}
+function bindPromptMenu(menu) {
+  menu.addEventListener("change", (event) => {
+    if (!event.target.matches("[data-prompt-preset]")) return;
+    kv.setItem("paper.prompt-preset", event.target.value);
+    menu.innerHTML = promptMenuHtml(promptMenuContext);
+    renderAssistantDock();
+  });
+  menu.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    const context = promptMenuContext;
+    if (!button || !context) return;
+    closePromptMenu();
+    if (button.dataset.promptAction) return runAssistantAction(button.dataset.promptAction, context);
+    if (button.dataset.promptAdd !== undefined) return openCapture({ append: true });
+    if (button.dataset.promptAsk !== undefined) openAssistant({ context });
+  });
+  menu.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closePromptMenu();
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const items = [...menu.querySelectorAll("button")];
+    const index = items.indexOf(document.activeElement);
+    items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+  });
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!menu.hidden && !menu.contains(event.target)) closePromptMenu();
+    },
+    true,
+  );
+  $("viewer").addEventListener("scroll", () => !menu.hidden && closePromptMenu(), { passive: true });
 }
 
 const BUILTIN_AI_OPTIONS = {
@@ -6766,20 +7020,26 @@ function aiStatus(message) {
 // recorte), acciones que se ejecutan al pulsarlas y límites de longitud por
 // acción: un resumen nunca puede salir más largo que el texto que resume.
 const ASSISTANT_ACTIONS = {
-  summary: { label: "Resumir", done: "Resumen" },
-  explain: { label: "Explicar", done: "Explicación" },
+  summary: { label: "Resumir", done: "Resumen", menu: "Resúmelo" },
+  explain: { label: "Explicar", done: "Explicación", menu: "Explícalo de forma sencilla" },
   keypoints: { label: "Ideas clave", done: "Ideas clave" },
-  terms: { label: "Términos", done: "Términos" },
+  terms: { label: "Términos", done: "Términos", menu: "Define los términos clave" },
   questions: { label: "Preguntas", done: "Preguntas de estudio" },
-  translate: { label: "Traducir", done: "Traducción" },
+  translate: { label: "Traducir", done: "Traducción", menu: "Tradúcelo" },
+  stepwise: { label: "Paso a paso", done: "Explicación paso a paso", menu: "Explícalo con claridad y paso a paso" },
+  symbols: { label: "Símbolos", done: "Definición y papel de cada símbolo", menu: "Define los símbolos y describe su papel" },
+  importance: { label: "Importancia", done: "Papel en el argumento", menu: "¿Por qué es importante en el argumento del documento?" },
+  assumptions: { label: "Supuestos", done: "Supuestos y consecuencias", menu: "¿En qué supuestos se basa y qué consecuencias tiene?" },
   describe: { label: "Describir", done: "Descripción" },
   transcribe: { label: "Transcribir", done: "Transcripción" },
   ask: { label: "Pregunta", done: "Respuesta" },
 };
 const ASSISTANT_TEXT_ACTIONS = ["summary", "explain", "keypoints", "terms", "questions", "translate"];
 const ASSISTANT_IMAGE_ACTIONS = ["describe", "explain", "transcribe"];
+// Acciones que necesitan ver el resto de la página para situar el fragmento.
+const ASSISTANT_CONTEXT_ACTIONS = new Set(["ask", "stepwise", "symbols", "importance", "assumptions"]);
 const ASSISTANT_SYSTEM =
-  "Eres el asistente de lectura de Paper Reader. Respondes siempre en español (salvo que se pida traducir a otro idioma), con precisión y sin relleno. Usa solo la información del TEXTO proporcionado; si algo no aparece en él, dilo claramente. No repitas el texto original ni estas instrucciones, y no empieces con frases como «Claro» o «El texto habla de».";
+  "Eres el asistente de lectura de Paper Reader. Respondes siempre en español (salvo que se pida traducir a otro idioma), con precisión y sin relleno. Usa solo la información del TEXTO proporcionado; si algo no aparece en él, dilo claramente. Escribe las fórmulas y los símbolos matemáticos en LaTeX, entre $…$ dentro de una frase o entre $$…$$ en su propia línea. No repitas el texto original ni estas instrucciones, y no empieces con frases como «Claro» o «El texto habla de».";
 const READER_TEXT_SURFACES = "#textLayer, #facingTextLayer, #continuousView .textLayer, #reflowReader";
 let assistantThread = [];
 let assistantContext = { kind: "page" };
@@ -6852,12 +7112,14 @@ function assistantLoadDocument() {
   lastReaderSelection = null;
   assistantThread = currentBook ? getJSON(assistantStorageKey(), []).filter((message) => message?.role && (message.content || message.error)) : [];
   assistantContext = { kind: "page" };
+  closePromptMenu();
+  renderAreaMarks();
   if (!$("assistantPanel")?.hidden) renderAssistant();
 }
 function assistantContextLabel(context) {
   if (!context) return "";
   if (context.kind === "selection") return `Selección · p. ${context.page}`;
-  if (context.kind === "image") return `Recorte · p. ${context.page}`;
+  if (context.kind === "image") return context.count > 1 ? `${context.count} recortes · p. ${context.pages || context.page}` : `Recorte · p. ${context.page}`;
   if (context.kind === "document") return "Todo el documento";
   return currentBook?.kind === "markdown" ? "Documento" : `Página ${context.page || currentPage}`;
 }
@@ -6870,9 +7132,11 @@ function setAssistantContext(context) {
     }
     assistantContext = { kind: "selection", text: selection.text, page: selection.page || currentPage };
   } else if (context.kind === "image") {
-    if (!context.image) return false;
-    assistantContext = { kind: "image", image: context.image, page: context.page || currentPage };
+    const areas = context.areas || captureAreas();
+    if (!areas.length) return false;
+    assistantContext = { kind: "image", areas, page: areas[0].page };
   } else assistantContext = { kind: context.kind === "document" ? "document" : "page" };
+  renderAreaMarks();
   renderAssistantDock();
   return true;
 }
@@ -6951,7 +7215,7 @@ function openAssistant(options = {}) {
   } else if (wasHidden) {
     const selection = captureReaderSelection(8000);
     if (selection) assistantContext = { kind: "selection", ...selection };
-    else if (assistantContext.kind === "selection" || assistantContext.kind === "image") assistantContext = { kind: "page" };
+    else if (assistantContext.kind === "selection") assistantContext = { kind: "page" };
   }
   panel.hidden = false;
   if (panel.classList.contains("is-minimized")) setAssistantMinimized(false);
@@ -6979,7 +7243,54 @@ function syncAssistantPage() {
   renderAssistantDock();
 }
 // -- Render -------------------------------------------------------------------
+// ---- Fórmulas en las respuestas (KaTeX, cargado solo cuando hace falta) ----
+const KATEX_BASE = "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/";
+let katexLoading = null;
+function loadKatex() {
+  if (globalThis.katex) return Promise.resolve(globalThis.katex);
+  katexLoading ||= new Promise((resolve, reject) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = `${KATEX_BASE}katex.min.css`;
+    document.head.append(link);
+    const script = document.createElement("script");
+    script.src = `${KATEX_BASE}katex.min.js`;
+    script.onload = () => {
+      resolve(globalThis.katex);
+      renderAssistantThread();
+    };
+    script.onerror = () => reject(new Error("No se pudo cargar KaTeX"));
+    document.head.append(script);
+  }).catch((error) => {
+    console.warn(error);
+    return null;
+  });
+  return katexLoading;
+}
+function renderTex(tex, display) {
+  if (globalThis.katex) {
+    try {
+      return globalThis.katex.renderToString(tex, { displayMode: display, throwOnError: false, strict: "ignore", output: "htmlAndMathml" });
+    } catch {}
+  } else loadKatex();
+  // Hasta que KaTeX llega (o sin conexión) se muestra el código LaTeX.
+  return `<code class="as-tex${display ? " is-display" : ""}">${escapeHtml(tex)}</code>`;
+}
+// Aparta las fórmulas ($…$, $$…$$, \(…\), \[…\]) antes de aplicar el formato
+// de texto, para que `*` o `_` dentro de ellas no se tomen como Markdown.
+function extractMath(text) {
+  const math = [];
+  const put = (tex, display) => `\u0000${math.push({ tex: tex.trim(), display }) - 1}\u0000`;
+  const source = String(text || "")
+    .replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => put(tex, true))
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, tex) => put(tex, true))
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, tex) => put(tex, false))
+    .replace(/\$(?!\s)([^$\n]+?)(?<!\s)\$(?!\d)/g, (_, tex) => put(tex, false));
+  return { source, math };
+}
 function formatAiAnswer(text) {
+  const { source, math } = extractMath(text);
+  text = source;
   const inline = (value) =>
     escapeHtml(value)
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
@@ -7027,14 +7338,17 @@ function formatAiAnswer(text) {
     html += `<p>${inline(line)}</p>`;
   }
   closeList();
-  return html;
+  return math.length ? html.replace(/\u0000(\d+)\u0000/g, (_, index) => renderTex(math[index].tex, math[index].display)) : html;
 }
 function renderAssistant() {
   renderAssistantThread();
   renderAssistantDock();
 }
 function assistantActionsFor(context) {
-  return context.kind === "image" ? ASSISTANT_IMAGE_ACTIONS : ASSISTANT_TEXT_ACTIONS;
+  const paper = promptPreset() === "paper";
+  if (context.kind === "image") return paper ? [...PROMPT_PRESETS.paper.actions, "transcribe"] : ASSISTANT_IMAGE_ACTIONS;
+  if (context.kind === "selection" && paper) return [...PROMPT_PRESETS.paper.actions, "summary", "translate"];
+  return ASSISTANT_TEXT_ACTIONS;
 }
 function renderAssistantDock() {
   const panel = $("assistantPanel");
@@ -7046,13 +7360,20 @@ function renderAssistantDock() {
     { kind: "selection", label: "Selección", disabled: !selection },
     { kind: "page", label: isMarkdown ? "Documento" : `Página ${currentPage}` },
     ...(isMarkdown ? [] : [{ kind: "document", label: "Todo el PDF" }]),
-    ...(context.kind === "image" ? [{ kind: "image", label: "Recorte" }] : []),
+    ...(context.kind === "image" ? [{ kind: "image", label: context.areas.length > 1 ? `Recortes (${context.areas.length})` : "Recorte" }] : []),
   ];
   const quote =
     context.kind === "selection"
       ? `<div class="as-quote"><span>“${escapeHtml(context.text.length > 220 ? `${context.text.slice(0, 220)}…` : context.text)}”</span><small>${countWords(context.text)} palabras · p. ${context.page}</small><button type="button" class="as-quote-clear" data-assistant-clear title="Quitar la selección" aria-label="Quitar la selección">${iconSvg("close")}</button></div>`
       : context.kind === "image"
-        ? `<div class="as-quote as-quote-image"><img src="${context.image}" alt="Recorte del PDF"><small>Recorte de la página ${context.page}</small><button type="button" class="as-quote-clear" data-assistant-clear title="Quitar el recorte" aria-label="Quitar el recorte">${iconSvg("close")}</button></div>`
+        ? `<div class="as-quote as-quote-image"><div class="as-areas">${context.areas
+            .map(
+              (area, index) =>
+                `<figure><img src="${area.image}" alt="Área ${index + 1} del PDF"><figcaption>${index + 1} · p. ${area.page}</figcaption><button type="button" class="as-area-remove" data-area-remove="${escapeHtml(area.id)}" title="Quitar esta área" aria-label="Quitar el área ${index + 1}">${iconSvg("close")}</button></figure>`,
+            )
+            .join("")}${
+            context.areas.length < MAX_CAPTURE_AREAS ? `<button type="button" class="as-area-add" data-area-add title="Añadir otra área" aria-label="Añadir otra área">${iconSvg("plus")}</button>` : ""
+          }</div><small>${context.areas.length} ${context.areas.length === 1 ? "área adjunta" : "áreas adjuntas"}</small><button type="button" class="as-quote-clear" data-assistant-clear title="Quitar los recortes" aria-label="Quitar los recortes">${iconSvg("close")}</button></div>`
         : "";
   $("assistantContext").innerHTML = `<div class="as-scope" role="radiogroup" aria-label="Sobre qué preguntar">${scopes
     .map((scope) => `<button type="button" role="radio" data-assistant-scope="${scope.kind}" aria-checked="${scope.kind === context.kind}" ${scope.disabled ? "disabled title=\"Selecciona texto en el documento\"" : ""}>${scope.label}</button>`)
@@ -7147,13 +7468,14 @@ function sampleDocumentChunks(chunks, budget = 8000) {
   return [...new Set(picked)].map((chunk) => ({ ...chunk, content: chunk.content.slice(0, perChunk) }));
 }
 async function assistantSourceText(context, action, question, signal) {
-  if (context.kind === "selection") {
+  if (context.kind === "selection" || context.kind === "image") {
     let extra = "";
-    if (action === "ask") {
+    if (ASSISTANT_CONTEXT_ACTIONS.has(action)) {
       const page = (await assistantPageText(context.page).catch(() => "")).replace(/\s+/g, " ");
-      if (page.length > context.text.length + 40) extra = page.slice(0, 1800);
+      if (page.length > context.text.length + 40) extra = page.slice(0, action === "importance" || action === "assumptions" ? 3000 : 1800);
     }
-    return { text: context.text, extra, pages: [context.page], label: `selección de la página ${context.page}` };
+    const label = context.kind === "image" ? `texto extraído del recorte de la página ${context.pages || context.page}; la notación matemática puede estar incompleta` : `selección de la página ${context.page}`;
+    return { text: context.text, extra, pages: String(context.pages || context.page).split(", ").map(Number), label };
   }
   if (context.kind === "page") {
     const page = currentBook?.kind === "markdown" ? 1 : context.page;
@@ -7208,6 +7530,22 @@ function assistantPlan(action, words, source, question) {
     case "translate":
       limit = clampNumber(words * 1.5 + 20, 30, 1400);
       task = "Traduce el TEXTO al español. Si ya está en español, tradúcelo al inglés. Devuelve solo la traducción, conservando párrafos y listas, sin comentarios.";
+      break;
+    case "stepwise":
+      limit = 300;
+      task = `Explica el TEXTO con claridad y paso a paso: divide la explicación en pasos numerados («1. …»), justifica cada uno y termina con una frase de síntesis. Máximo ${limit} palabras.${cite}`;
+      break;
+    case "symbols":
+      limit = 260;
+      task = `Define cada símbolo o notación que aparece en el TEXTO y describe su papel. Una línea por símbolo con el formato «- $símbolo$: qué es · papel que cumple». Termina con una frase sobre qué expresa el conjunto. Máximo ${limit} palabras.`;
+      break;
+    case "importance":
+      limit = 210;
+      task = `Explica por qué el TEXTO es importante en el argumento del documento: qué papel cumple (definición, teorema, resultado principal, paso de una demostración…), en qué se apoya y qué permite hacer después. Usa el CONTEXTO ADICIONAL para situarlo. Máximo ${limit} palabras.${cite}`;
+      break;
+    case "assumptions":
+      limit = 260;
+      task = `Identifica en qué supuestos o hipótesis se basa el TEXTO (explícitos o implícitos) y qué consecuencias tiene. Usa dos apartados con los títulos «### Supuestos» y «### Consecuencias», con viñetas. Máximo ${limit} palabras.${cite}`;
       break;
     default:
       limit = /detall|extens|profund|todo|complet/i.test(question) ? 380 : 190;
@@ -7290,7 +7628,7 @@ async function streamLocalText({ prompt, maxTokens, signal, onToken }) {
     if (delta) onToken(delta);
   }
 }
-async function streamLocalVision({ prompt, image, signal, onToken }) {
+async function streamLocalVision({ prompt, image, signal, onToken, maxTokens = 500 }) {
   const vision = await inspectVisionCapability();
   if (!vision.ok) throw new Error(vision.reason);
   if (vision.kind === "builtin") {
@@ -7325,7 +7663,7 @@ async function streamLocalVision({ prompt, image, signal, onToken }) {
       { role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: image } }] },
     ],
     temperature: 0.2,
-    max_tokens: 500,
+    max_tokens: maxTokens,
     stream: true,
   });
   for await (const chunk of stream) {
@@ -7337,11 +7675,42 @@ async function streamLocalVision({ prompt, image, signal, onToken }) {
     if (delta) onToken(delta);
   }
 }
+// Instrucción para el modelo visual. El texto de la capa de texto del PDF se
+// añade como apoyo: ayuda a leer bien los símbolos que la imagen deja dudosos.
+function visionPrompt(action, question, context, pageText = "") {
+  const count = context.count || 1;
+  const intro =
+    count > 1
+      ? `La imagen contiene ${count} recortes numerados de un documento (Área 1 a Área ${count}); tenlos en cuenta todos y di a qué área te refieres.`
+      : "La imagen es un recorte de un documento (una fórmula, tabla, figura o párrafo).";
+  const math = " Escribe las fórmulas y los símbolos en LaTeX entre $…$.";
+  const tasks = {
+    describe: "Describe con precisión lo que muestra: tipo de contenido (gráfico, tabla, diagrama, fórmula, texto…), elementos principales y lo que comunica. Máximo 160 palabras.",
+    explain: "Explica qué significa su contenido y por qué es relevante, con lenguaje sencillo. Máximo 180 palabras." + math,
+    transcribe: "Transcribe fielmente el texto visible, respetando líneas y listas; las fórmulas, en LaTeX entre $…$ o $$…$$. No añadas comentarios.",
+    stepwise: "Explícalo con claridad y paso a paso: pasos numerados, cada uno con su justificación, y una frase final de síntesis. Máximo 260 palabras." + math,
+    symbols: "Define cada símbolo o notación que aparece y describe su papel. Una línea por símbolo con el formato «- $símbolo$: qué es · papel que cumple». Termina con una frase sobre qué expresa el conjunto. Máximo 240 palabras.",
+    importance: "Explica por qué es importante en el argumento del documento: qué papel cumple (definición, teorema, fórmula clave, paso de una demostración…), en qué se apoya y qué permite deducir después. Máximo 200 palabras." + math,
+    assumptions: "Indica en qué supuestos o hipótesis se basa, explícitos o implícitos, y qué consecuencias tiene. Usa dos apartados con los títulos «### Supuestos» y «### Consecuencias» y viñetas. Máximo 240 palabras." + math,
+    ask: `Responde a esta pregunta de forma concreta (máximo 200 palabras): ${question}` + math,
+  };
+  return [
+    intro,
+    tasks[action] || tasks.describe,
+    context.text ? `Texto extraído del PDF en esa zona (la notación puede faltar o salir desordenada; úsalo solo como apoyo):\n"""\n${context.text.slice(0, 1500)}\n"""` : "",
+    pageText ? `Contexto de la página (para situar el recorte en el argumento):\n"""\n${pageText}\n"""` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
 // -- Envío --------------------------------------------------------------------
 function assistantRequestFromContext(action, question) {
   const context = assistantContext;
   if (context.kind === "selection") return { action, question, context: { kind: "selection", text: context.text, page: context.page } };
-  if (context.kind === "image") return { action, question, context: { kind: "image", page: context.page } };
+  if (context.kind === "image") {
+    const pages = [...new Set(context.areas.map((area) => area.page))];
+    return { action, question, areas: context.areas, context: { kind: "image", page: pages[0], pages: pages.join(", "), count: context.areas.length, text: areasText(context.areas) } };
+  }
   if (context.kind === "document") return { action, question, context: { kind: "document" } };
   return { action, question, context: { kind: "page", page: currentBook?.kind === "markdown" ? 1 : currentPage } };
 }
@@ -7356,10 +7725,15 @@ async function sendAssistant({ action = "ask", question = "", request = null } =
   question = (request.question || "").trim();
   if (action === "ask" && !question) return;
   const context = request.context;
-  const image = context.kind === "image" ? request.image || assistantContext.image || "" : "";
-  if (context.kind === "image" && !image) return toast("El recorte ya no está disponible; vuelve a recortar la zona");
+  let image = "";
+  if (context.kind === "image") {
+    try {
+      image = request.image || (request.areas?.length ? await composeAreaImage(request.areas) : "");
+    } catch {}
+    if (!image) return toast("El recorte ya no está disponible; vuelve a recortar la zona");
+  }
   const quote = context.kind === "selection" ? (context.text.length > 180 ? `${context.text.slice(0, 180)}…` : context.text) : "";
-  assistantThread.push({ role: "user", action, content: action === "ask" ? question : ASSISTANT_ACTIONS[action].label, context: { kind: context.kind, page: context.page, quote }, createdAt: Date.now() });
+  assistantThread.push({ role: "user", action, content: action === "ask" ? question : ASSISTANT_ACTIONS[action].label, context: { kind: context.kind, page: context.page, pages: context.pages, count: context.count, quote }, createdAt: Date.now() });
   const message = { id: crypto.randomUUID?.() || `${Date.now()}`, role: "assistant", action, content: "", pending: true, phase: "Preparando…", sources: [], request: { action, question, context }, createdAt: Date.now() };
   if (image) assistantImages.set(message.id, image);
   assistantThread.push(message);
@@ -7376,20 +7750,22 @@ async function sendAssistant({ action = "ask", question = "", request = null } =
   let inputWords = 0;
   try {
     let plan;
-    if (context.kind === "image") {
-      const prompts = {
-        describe: "Describe con precisión lo que muestra esta imagen de un documento: tipo de contenido (gráfico, tabla, diagrama, fórmula, texto…), elementos principales y lo que comunica. Máximo 160 palabras.",
-        explain: "Explica qué significa el contenido de esta imagen de un documento y por qué es relevante, con lenguaje sencillo. Máximo 180 palabras.",
-        transcribe: "Transcribe fielmente el texto visible en la imagen, respetando líneas y listas. No añadas comentarios.",
-        ask: `Responde a esta pregunta sobre la imagen de forma concreta (máximo 180 palabras): ${question}`,
-      };
-      plan = { hardLimit: action === "transcribe" ? 900 : 230 };
-      message.sources = [context.page];
-      phase("Analizando el recorte…");
+    // Sin modelo visual, un recorte con texto extraíble se trabaja como texto.
+    let useVision = context.kind === "image";
+    if (useVision && countWords(context.text) >= 4) {
+      const vision = await inspectVisionCapability().catch(() => ({ ok: false }));
+      if (!vision.ok) useVision = false;
+    }
+    if (useVision) {
+      const pageText = ASSISTANT_CONTEXT_ACTIONS.has(action) ? (await assistantPageText(context.page).catch(() => "")).replace(/\s+/g, " ").slice(0, 1200) : "";
+      plan = { hardLimit: action === "transcribe" ? 900 : ["stepwise", "symbols", "assumptions"].includes(action) ? 330 : 260 };
+      message.sources = String(context.pages || context.page).split(", ").map(Number);
+      phase(context.count > 1 ? "Analizando los recortes…" : "Analizando el recorte…");
       await streamLocalVision({
-        prompt: prompts[action] || prompts.describe,
+        prompt: visionPrompt(action, question, context, pageText),
         image,
         signal,
+        maxTokens: action === "transcribe" ? 1200 : 700,
         onToken: (delta) => {
           message.content += delta;
           renderAssistantMessage(index);
@@ -7418,7 +7794,7 @@ async function sendAssistant({ action = "ask", question = "", request = null } =
       const prompt = [
         `INSTRUCCIÓN: ${plan.task}`,
         `TEXTO (${source.label}):\n"""\n${source.text}\n"""`,
-        source.extra ? `CONTEXTO ADICIONAL (resto de la página; úsalo solo si hace falta para entender la selección):\n"""\n${source.extra}\n"""` : "",
+        source.extra ? `CONTEXTO ADICIONAL (resto de la página; úsalo solo si hace falta para entender el fragmento):\n"""\n${source.extra}\n"""` : "",
         history ? `CONVERSACIÓN PREVIA:\n${history}` : "",
         action === "ask" ? `PREGUNTA: ${question}` : "",
         "RESPUESTA:",
@@ -7591,10 +7967,11 @@ function bindAssistant() {
       return $("assistantInput").focus({ preventScroll: true });
     }
     if (data.assistantClear !== undefined) return setAssistantContext({ kind: "page" });
-    if (data.assistantCrop !== undefined) {
+    if (data.assistantCrop !== undefined || data.areaAdd !== undefined) {
       closeAssistant();
-      return openCapture();
+      return openCapture({ append: data.areaAdd !== undefined });
     }
+    if (data.areaRemove) return removeCaptureArea(data.areaRemove);
     if (data.assistantAction) return sendAssistant({ action: data.assistantAction });
     if (data.assistantCopy) return copyAssistantMessage(Number(data.assistantCopy));
     if (data.assistantNote) return saveAssistantToNotes(Number(data.assistantNote));
@@ -7657,8 +8034,10 @@ function bindAssistant() {
     if (!button) return;
     const selection = captureReaderSelection();
     if (!selection) return toast("Selecciona un fragmento primero");
+    const anchor = actions.getBoundingClientRect();
     hideAnnotationActions();
     const context = { kind: "selection", ...selection };
+    if (button.dataset.selectionAi === "menu") return openPromptMenu(context, anchor, { below: true });
     if (button.dataset.selectionAi === "ask") openAssistant({ context });
     else runAssistantAction(button.dataset.selectionAi, context);
   });
@@ -8960,6 +9339,10 @@ window.addEventListener("keydown", (e) => {
     closeCapture();
     return;
   }
+  if (e.key === "Escape" && $("promptMenu") && !$("promptMenu").hidden) {
+    closePromptMenu();
+    return;
+  }
   const commandKey = e.ctrlKey || e.metaKey;
   // Paleta de comandos: disponible incluso escribiendo en un campo.
   if (commandKey && !e.altKey && e.key.toLowerCase() === "k") {
@@ -9067,6 +9450,10 @@ window.addEventListener("keydown", (e) => {
   if ((e.key === "d" || e.key === "D") && pdfDoc) {
     e.preventDefault();
     toggleSplitView();
+  }
+  if ((e.key === "x" || e.key === "X") && pdfDoc) {
+    e.preventDefault();
+    openCapture();
   }
   if ((e.key === "i" || e.key === "I") && currentBook) {
     e.preventDefault();

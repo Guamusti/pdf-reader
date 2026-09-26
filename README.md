@@ -61,6 +61,13 @@ Incluye:
 - **Abrir con Paper Reader**: instalada, aparece en «Abrir con» para PDF y Markdown y como destino al compartir en el móvil.
 - **Móvil**: el scroll continuo ya no vuelve a la primera página al ampliar, girar u ocultarse la barra de direcciones; las páginas ampliadas no se deforman; deslizar solo pasa página cuando el gesto es claramente horizontal; tocar la página muestra u oculta los controles en cualquier modo y hay un botón fijo para salir del modo inmersivo.
 
+### Novedades v7
+
+- **Recorte en cualquier vista** (`X`): selecciona una fórmula, tabla o párrafo arrastrando sobre la página, también en doble página y en scroll continuo. La zona queda marcada con un recuadro numerado mientras está adjunta.
+- **Menú de preguntas junto al recorte**: preguntas preparadas para artículos científicos (explicar paso a paso, definir los símbolos y su papel, por qué es importante en el argumento, en qué supuestos se basa y qué consecuencias tiene), «Añadir otra área» y «Preguntar otra cosa…». Se puede cambiar a un juego general (explicar, resumir, términos, traducir). El mismo menú está en «Más ▾» al seleccionar texto.
+- **Varias áreas a la vez** (hasta 4): el asistente muestra «N áreas adjuntas» con miniaturas que se pueden quitar o ampliar. El modelo visual las recibe numeradas junto con el texto que el PDF tiene en esa zona; si el navegador no tiene IA con visión, se trabaja con ese texto.
+- **Fórmulas bien escritas**: las respuestas muestran el LaTeX (`$…$`, `$$…$$`) con KaTeX, que se carga solo cuando aparece una fórmula.
+
 ### Pruebas
 
 ```bash

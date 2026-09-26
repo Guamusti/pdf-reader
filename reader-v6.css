@@ -105,3 +105,37 @@ body.reader-chrome-hidden .split-pane { top: 0; }
 .split-resizer:hover, body.split-resizing .split-resizer { background: color-mix(in srgb, #5b7cf0 35%, transparent); }
 body.split-resizing { user-select: none; cursor: col-resize; }
 @media (max-width: 759px) { .split-pane { display: none !important; } body.split-open .viewer { margin-right: 0; } }
+
+/* ---- v7: recortes para la IA y menú de preguntas ---- */
+.area-mark { position: absolute; z-index: 6; border: 2px dashed #3b7cff; border-radius: 4px; background: rgba(59, 124, 255, .08); pointer-events: none; }
+.area-mark span { position: absolute; top: 3px; left: 3px; min-width: 20px; height: 20px; padding: 0 5px; display: grid; place-items: center; border-radius: 99px; background: #3b7cff; color: #fff; font: 700 11px/1 -apple-system, BlinkMacSystemFont, sans-serif; box-shadow: 0 1px 4px rgba(0, 0, 0, .25); }
+
+.prompt-menu { position: fixed; z-index: 115; width: min(320px, calc(100vw - 16px)); padding: 6px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-solid); color: var(--text); box-shadow: var(--shadow); font-size: 13.5px; }
+.prompt-menu[hidden] { display: none; }
+.pm-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 6px; color: var(--accent); }
+.pm-head .ui-icon { width: 16px; height: 16px; flex: none; }
+.pm-preset { flex: 1; min-width: 0; padding: 4px 6px; border: 0; border-radius: 7px; background: transparent; color: var(--text); font: inherit; font-weight: 650; cursor: pointer; }
+.pm-preset:hover, .pm-preset:focus-visible { background: var(--soft); outline: none; }
+.pm-list { display: grid; gap: 1px; }
+.pm-list button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font: inherit; text-align: left; line-height: 1.35; cursor: pointer; }
+.pm-list button:hover, .pm-list button:focus-visible { background: var(--accent-soft, var(--soft)); outline: none; }
+.pm-list .ui-icon { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.pm-sep { height: 1px; margin: 5px 6px; background: var(--line); }
+.pm-foot { padding: 6px 10px 3px; color: var(--muted); font-size: 11.5px; }
+
+.as-quote-image { flex-direction: column; align-items: stretch; gap: 4px; }
+.as-areas { display: flex; flex-wrap: wrap; gap: 8px; }
+.as-areas figure { position: relative; margin: 0; }
+.as-areas img { display: block; width: 110px; height: 56px; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; background: #fff; }
+.as-areas figcaption { margin-top: 2px; color: var(--muted); font-size: 10.5px; font-style: normal; }
+.as-area-remove { position: absolute; top: -7px; right: -7px; width: 20px; height: 20px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 99px; background: var(--surface-solid); color: var(--muted); cursor: pointer; }
+.as-area-remove:hover { color: var(--text); }
+.as-area-remove .ui-icon { width: 11px; height: 11px; }
+.as-area-add { width: 46px; height: 56px; display: grid; place-items: center; border: 1px dashed var(--line); border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.as-area-add:hover { border-color: var(--accent); color: var(--accent); }
+.as-area-add .ui-icon { width: 16px; height: 16px; }
+
+.as-answer .katex { font-size: 1.05em; }
+.as-answer .katex-display { margin: 6px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+.as-answer code.as-tex { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.as-answer code.as-tex.is-display { display: block; padding: 6px 8px; margin: 6px 0; white-space: pre-wrap; }
