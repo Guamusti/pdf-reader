@@ -244,3 +244,26 @@ body.reader-chrome-hidden .return-chip, body.footer-is-minimized .return-chip { 
 .board-link-mark button:hover { background: #3b7cff; color: #fff; opacity: 1; }
 .source-flash { position: absolute; z-index: 7; border-radius: 4px; background: rgba(255, 213, 74, .45); box-shadow: 0 0 0 3px rgba(255, 190, 0, .8); pointer-events: none; animation: source-flash 1.8s ease forwards; mix-blend-mode: multiply; }
 @keyframes source-flash { 0%, 20% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ---- v9: motor de IA ---- */
+#assistantModel { cursor: pointer; border-radius: 6px; }
+#assistantModel:hover span { text-decoration: underline; text-underline-offset: 2px; }
+.as-settings { position: absolute; z-index: 5; inset: 64px 0 0 0; overflow: auto; padding: 12px 14px 18px; background: var(--surface-solid); border-top: 1px solid var(--line); border-radius: 0 0 16px 16px; }
+.as-settings[hidden] { display: none; }
+.as-settings header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.as-settings header strong { font-size: 15px; }
+.as-set-note { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.as-profiles { display: grid; gap: 6px; }
+.as-profiles button { display: grid; gap: 3px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 12px; background: transparent; color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.as-profiles button span { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.as-profiles button b { font-size: 13.5px; }
+.as-profiles button small { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.as-profiles button em { color: var(--muted); font-size: 12px; font-style: normal; line-height: 1.4; }
+.as-profiles button[aria-checked="true"] { border-color: var(--accent); background: var(--accent-soft, var(--soft)); box-shadow: inset 0 0 0 1px var(--accent); }
+.as-server { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.as-server label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.as-server .field { min-height: 34px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); color: var(--text); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.as-server-test { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.as-server details { font-size: 12.5px; line-height: 1.5; }
+.as-server summary { cursor: pointer; font-weight: 600; }
+.as-server code { padding: 1px 4px; border-radius: 4px; background: var(--soft); font-size: 11.5px; overflow-wrap: anywhere; }

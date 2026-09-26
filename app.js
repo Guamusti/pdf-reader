@@ -583,7 +583,7 @@ function formatBytes(bytes) {
 // Un único archivo .paperbackup con la biblioteca (opcionalmente sin los PDFs),
 // todas las notas, anotaciones, tarjetas y ajustes. Puede cifrarse con una
 // contraseña. Restaurar combina: no borra nada de lo que ya tengas.
-const DEVICE_ONLY_KEYS = /^paper\.(notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|sync-[\w-]+|__[\w-]+)$/;
+const DEVICE_ONLY_KEYS = /^paper\.(notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|ai-profile|ai-server|ai-webllm-consent|ai-vision-consent|sync-[\w-]+|__[\w-]+)$/;
 async function exportFullBackup({ includeFiles = true, passphrase = "" } = {}) {
   if (!db) return toast("El almacenamiento local no está disponible");
   await kv.flush().catch(() => {});
@@ -3794,7 +3794,7 @@ async function completeLocalAi(prompt) {
       if (session !== base) session.destroy?.();
     }
   }
-  if (!localAiEngine && kv.getItem("paper.ai-webllm-consent") !== "1") throw new Error("Abre el asistente (I) y autoriza la descarga del modelo local para usar la IA.");
+  if (!localAiEngine && aiProfile() !== "server" && !webllmConsented()) throw new Error("Abre el asistente (I) y autoriza la descarga del modelo local para usar la IA.");
   const engine = await getWebLlmAi();
   const reply = await engine.chat.completions.create({
     messages: [{ role: "user", content: prompt }],
@@ -8129,7 +8129,8 @@ async function refreshAssistantCapability() {
   model.querySelector("span").textContent = "Comprobando la IA local…";
   const capability = await inspectAiCapability();
   assistantCapability = capability;
-  const consented = kv.getItem("paper.ai-webllm-consent") === "1";
+  const consented = webllmConsented();
+  const profile = AI_PROFILES[webllmProfileKey()];
   const [state, text] =
     capability.kind === "builtin"
       ? capability.availability === "available"
@@ -8137,12 +8138,14 @@ async function refreshAssistantCapability() {
         : ["download", "IA del navegador · se preparará al usarla"]
       : capability.kind === "webllm"
         ? localAiEngine
-          ? ["ready", "Modelo local · listo"]
-          : ["download", consented ? "Modelo local · se cargará al usarlo" : "Modelo local · requiere descarga (≈900 MB)"]
-        : ["off", "IA local no disponible"];
+          ? ["ready", `${profile.label} · listo`]
+          : ["download", consented ? `${profile.label} · se cargará al usarlo` : `${profile.label} · requiere descarga (${profile.size})`]
+        : capability.kind === "server"
+          ? ["ready", `Tu ordenador · ${aiServerConfig().model || "elige un modelo"}`]
+          : ["off", "IA local no disponible"];
   model.dataset.state = state;
-  model.querySelector("span").textContent = text;
-  model.title = capability.kind === "none" ? capability.reason : "Todo se procesa en este dispositivo; el documento no se envía a ningún servidor.";
+  model.querySelector("span").textContent = `${text} ▾`;
+  model.title = capability.kind === "none" ? `${capability.reason} Pulsa para elegir otro motor.` : "Motor de IA (pulsa para cambiarlo). Todo es gratuito y se procesa en tu dispositivo.";
   if (!assistantThread.length) renderAssistantThread();
 }
 function applyAssistantGeometry() {
@@ -8387,7 +8390,7 @@ function assistantMessageHtml(message, index) {
     return `<article class="as-msg as-bot as-consent" data-index="${index}"><div class="as-card"><strong>${message.vision ? "Descargar el modelo visual" : "Descargar el modelo de IA local"}</strong><p>${
       message.vision
         ? "Tu navegador no trae IA con visión. Para analizar recortes se descarga una vez un modelo de unos 4 GB que funciona con tu GPU."
-        : "Tu navegador no trae IA integrada. Para usar el asistente se descarga una vez un modelo de unos 900 MB que funciona con tu GPU (WebGPU)."
+        : `Para usar el asistente se descarga una vez el modelo «${AI_PROFILES[webllmProfileKey()].label}» (unos ${AI_PROFILES[webllmProfileKey()].size}), que funciona con tu GPU (WebGPU). Puedes elegir otro más ligero o más capaz en el motor de IA (pulsa el indicador bajo «Asistente»).`
     } Queda guardado en este dispositivo y el documento nunca se envía a ningún servidor.</p><div class="as-card-actions"><button type="button" class="btn primary" data-assistant-consent="${index}">Descargar y continuar</button><button type="button" class="btn" data-assistant-dismiss="${index}">Ahora no</button></div></div></article>`;
   }
   if (message.error) {
@@ -8564,6 +8567,19 @@ function consentError(vision = false) {
 async function streamLocalText({ prompt, maxTokens, signal, onToken }) {
   const capability = await inspectAiCapability();
   if (capability.kind === "none") throw new Error(capability.reason);
+  onToken = withoutThinking(onToken);
+  if (capability.kind === "server") {
+    return streamServerChat({
+      model: aiServerConfig().model,
+      messages: [
+        { role: "system", content: ASSISTANT_SYSTEM },
+        { role: "user", content: prompt },
+      ],
+      maxTokens,
+      signal,
+      onToken,
+    });
+  }
   if (capability.kind === "builtin") {
     const base = await getBuiltInAi();
     if (!base) throw new Error("La IA integrada no está disponible.");
@@ -8583,7 +8599,7 @@ async function streamLocalText({ prompt, maxTokens, signal, onToken }) {
     }
     return;
   }
-  if (!localAiEngine && kv.getItem("paper.ai-webllm-consent") !== "1") throw consentError(false);
+  if (!localAiEngine && !webllmConsented()) throw consentError(false);
   const engine = await getWebLlmAi();
   aiStatus("");
   const stream = await engine.chat.completions.create({
@@ -8594,6 +8610,8 @@ async function streamLocalText({ prompt, maxTokens, signal, onToken }) {
     temperature: 0.2,
     max_tokens: maxTokens,
     stream: true,
+    // Qwen3 razona en voz alta antes de responder; aquí solo interesa la respuesta.
+    extra_body: { enable_thinking: false },
   });
   for await (const chunk of stream) {
     if (signal.aborted) {
@@ -8607,6 +8625,18 @@ async function streamLocalText({ prompt, maxTokens, signal, onToken }) {
 async function streamLocalVision({ prompt, image, signal, onToken, maxTokens = 500 }) {
   const vision = await inspectVisionCapability();
   if (!vision.ok) throw new Error(vision.reason);
+  if (vision.kind === "server") {
+    return streamServerChat({
+      model: aiServerConfig().visionModel,
+      messages: [
+        { role: "system", content: "Eres un asistente de lectura visual riguroso. Responde siempre en español y distingue lo visible de tus inferencias." },
+        { role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: image } }] },
+      ],
+      maxTokens,
+      signal,
+      onToken: withoutThinking(onToken),
+    });
+  }
   if (vision.kind === "builtin") {
     try {
       const base = await getBuiltInVisionAi();
@@ -8908,6 +8938,10 @@ function autosizeAssistantInput() {
 }
 function bindAssistant() {
   const panel = $("assistantPanel");
+  $("assistantModel").setAttribute("role", "button");
+  $("assistantModel").tabIndex = 0;
+  $("assistantModel").addEventListener("click", () => toggleAiSettings());
+  $("assistantModel").addEventListener("keydown", (event) => (event.key === "Enter" || event.key === " ") && (event.preventDefault(), toggleAiSettings()));
   setIcon("assistantNew", "trash");
   setIcon("assistantMinimize", "minus");
   setIcon("assistantClose", "close");
@@ -8955,7 +8989,8 @@ function bindAssistant() {
     if (data.assistantRetry) return retryAssistant(Number(data.assistantRetry));
     if (data.assistantConsent) {
       const message = assistantThread[Number(data.assistantConsent)];
-      kv.setItem(message.vision ? "paper.ai-vision-consent" : "paper.ai-webllm-consent", "1");
+      if (message.vision) kv.setItem("paper.ai-vision-consent", "1");
+      else setWebllmConsent();
       return retryAssistant(Number(data.assistantConsent));
     }
     if (data.assistantDismiss) {
@@ -8969,7 +9004,7 @@ function bindAssistant() {
   let drag = null;
   const handle = $("assistantDragHandle");
   handle.addEventListener("pointerdown", (event) => {
-    if (event.target.closest("button") || window.innerWidth <= 700) return;
+    if (event.target.closest("button, #assistantModel") || window.innerWidth <= 700) return;
     const box = panel.getBoundingClientRect();
     drag = { id: event.pointerId, dx: event.clientX - box.left, dy: event.clientY - box.top };
     handle.setPointerCapture(event.pointerId);
@@ -9090,8 +9125,211 @@ function rankAiChunks(chunks, query) {
     return { ...chunk, score };
   }).sort((a, b) => b.score - a.score || Math.abs(a.page - currentPage) - Math.abs(b.page - currentPage));
 }
+// ---- Motor de IA: perfiles gratuitos ----
+// Todos corren en el dispositivo: modelos de WebLLM de distinto tamaño (el
+// navegador los descarga una vez) o un servidor propio (Ollama, LM Studio) en
+// el ordenador del usuario. Ninguno tiene coste de API.
+const AI_PROFILES = {
+  auto: { label: "Automático", hint: "La IA integrada de Chrome o Edge si existe; si no, el modelo ligero.", size: "0,9 GB", mb: 900, models: ["Llama-3.2-1B-Instruct-q4f16_1-MLC"] },
+  light: { label: "Ligero", hint: "Rápido y pequeño: resúmenes y dudas sencillas. Casi cualquier equipo.", size: "0,9 GB", mb: 900, models: ["Llama-3.2-1B-Instruct-q4f16_1-MLC"] },
+  balanced: { label: "Equilibrado", hint: "Qwen 3.5 de 2B: razona mucho mejor y escribe buen español. Portátiles recientes.", size: "2,2 GB", mb: 2300, models: ["Qwen3.5-2B-q4f16_1-MLC", "Qwen3-1.7B-q4f16_1-MLC", "Qwen2.5-1.5B-Instruct-q4f16_1-MLC"] },
+  advanced: { label: "Avanzado", hint: "Qwen 3.5 de 4B: para matemáticas y artículos técnicos. GPU con unos 4 GB.", size: "3,9 GB", mb: 3900, models: ["Qwen3.5-4B-q4f16_1-MLC", "Qwen3-4B-q4f16_1-MLC", "Phi-4-mini-instruct-q4f16_1-MLC"] },
+  max: { label: "Máximo", hint: "Qwen 3.5 de 9B: lo más capaz que funciona dentro del navegador. GPU con 8 GB.", size: "6,4 GB", mb: 6500, models: ["Qwen3.5-9B-q4f16_1-MLC", "Qwen3-8B-q4f16_1-MLC", "Qwen2.5-7B-Instruct-q4f16_1-MLC"] },
+  server: { label: "Tu ordenador (Ollama / LM Studio)", hint: "Modelos grandes y con visión que ya tengas instalados. Gratis y privado.", size: "", mb: 0, models: [] },
+};
+function aiProfile() {
+  const value = kv.getItem("paper.ai-profile");
+  return AI_PROFILES[value] ? value : "auto";
+}
+// Perfil de WebLLM efectivo («auto» usa el ligero cuando no hay IA integrada).
+function webllmProfileKey() {
+  const profile = aiProfile();
+  return profile === "auto" || profile === "server" ? "light" : profile;
+}
+function aiServerConfig() {
+  return { url: "http://localhost:11434", model: "", visionModel: "", ...getJSON("paper.ai-server", {}) };
+}
+// El permiso de descarga es por modelo: aceptar 0,9 GB no autoriza 6 GB.
+function webllmConsented() {
+  const value = kv.getItem("paper.ai-webllm-consent");
+  const key = webllmProfileKey();
+  return value === key || (value === "1" && key === "light");
+}
+function setWebllmConsent() {
+  kv.setItem("paper.ai-webllm-consent", webllmProfileKey());
+}
+// Cambiar de motor descarga el modelo cargado para liberar la GPU.
+async function setAiProfile(profile) {
+  if (!AI_PROFILES[profile] || profile === aiProfile()) return;
+  kv.setItem("paper.ai-profile", profile);
+  assistantAbort?.abort();
+  try {
+    await localAiEngine?.unload?.();
+  } catch {}
+  localAiWorker?.terminate();
+  localAiEngine = null;
+  localAiWorker = null;
+  assistantCapability = null;
+  renderAiSettings();
+  refreshAssistantCapability();
+}
+// Oculta el razonamiento <think>…</think> de los modelos que lo emiten.
+function withoutThinking(onToken) {
+  const open = "<think>",
+    close = "</think>";
+  let inside = false;
+  let pending = "";
+  return (delta) => {
+    pending += delta;
+    let out = "";
+    while (pending) {
+      if (inside) {
+        const end = pending.indexOf(close);
+        if (end < 0) {
+          pending = pending.slice(-close.length);
+          break;
+        }
+        pending = pending.slice(end + close.length);
+        inside = false;
+        continue;
+      }
+      const start = pending.indexOf(open);
+      if (start >= 0) {
+        out += pending.slice(0, start);
+        pending = pending.slice(start + open.length);
+        inside = true;
+        continue;
+      }
+      // Se guarda un posible «<thi» a medias hasta el siguiente fragmento.
+      let keep = 0;
+      for (let k = Math.min(open.length - 1, pending.length); k > 0; k--)
+        if (open.startsWith(pending.slice(-k))) {
+          keep = k;
+          break;
+        }
+      out += pending.slice(0, pending.length - keep);
+      pending = pending.slice(pending.length - keep);
+      break;
+    }
+    if (out) onToken(out);
+  };
+}
+function serverError(message) {
+  return Object.assign(new Error(message), { name: "ServerAIError" });
+}
+// Chat en streaming con un servidor compatible con la API de OpenAI (Ollama,
+// LM Studio, llama.cpp…) que corre en el ordenador del usuario.
+async function streamServerChat({ model, messages, maxTokens, signal, onToken }) {
+  const { url } = aiServerConfig();
+  if (!model) throw serverError("Elige el modelo de tu servidor en el motor de IA (pulsa el indicador bajo «Asistente»).");
+  let response;
+  try {
+    response = await fetch(`${url.replace(/\/+$/, "")}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages, stream: true, temperature: 0.2, max_tokens: maxTokens }),
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw serverError(`No se pudo conectar con ${url}. Comprueba que Ollama o LM Studio está abierto y que admite conexiones desde esta web (en Ollama, arráncalo con OLLAMA_ORIGINS=${location.origin}).`);
+  }
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw serverError(response.status === 404 ? `El servidor no tiene el modelo «${model}». Descárgalo (en Ollama: ollama pull ${model}) o elige otro.` : `El servidor de IA respondió con un error ${response.status}. ${detail.slice(0, 160)}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+    for (const line of lines) {
+      const data = line.replace(/^data:\s*/, "").trim();
+      if (!data || data === "[DONE]" || !line.startsWith("data:")) continue;
+      try {
+        const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+        if (delta) onToken(delta);
+      } catch {}
+    }
+  }
+}
+async function listServerModels() {
+  const { url } = aiServerConfig();
+  const response = await fetch(`${url.replace(/\/+$/, "")}/v1/models`);
+  if (!response.ok) throw new Error(String(response.status));
+  return ((await response.json()).data || []).map((model) => model.id).filter(Boolean);
+}
+// Panel para elegir el motor, dentro del asistente.
+function renderAiSettings() {
+  const box = $("assistantSettings");
+  if (!box || box.hidden) return;
+  const current = aiProfile();
+  const server = aiServerConfig();
+  box.innerHTML = `<header><strong>Motor de IA</strong><button type="button" class="btn icon" data-ai-settings-close aria-label="Cerrar">${iconSvg("close")}</button></header>
+  <p class="as-set-note">Todas las opciones son gratuitas y funcionan en tu dispositivo: el documento no sale de él. Los modelos se descargan una sola vez.</p>
+  <div class="as-profiles" role="radiogroup" aria-label="Motor de IA">${Object.entries(AI_PROFILES)
+    .map(
+      ([id, profile]) =>
+        `<button type="button" role="radio" aria-checked="${id === current}" data-ai-profile="${id}"><span><b>${escapeHtml(profile.label)}</b>${profile.size && id !== "auto" ? `<small>${profile.size}</small>` : ""}</span><em>${escapeHtml(profile.hint)}</em></button>`,
+    )
+    .join("")}</div>
+  ${
+    current === "server"
+      ? `<div class="as-server"><label>Dirección<input class="field" data-ai-server="url" value="${escapeHtml(server.url)}" placeholder="http://localhost:11434" spellcheck="false"></label>
+  <label>Modelo de texto<input class="field" data-ai-server="model" list="aiServerModels" value="${escapeHtml(server.model)}" placeholder="qwen2.5:7b" spellcheck="false"></label>
+  <label>Modelo visual para recortes (opcional)<input class="field" data-ai-server="visionModel" list="aiServerModels" value="${escapeHtml(server.visionModel)}" placeholder="qwen2.5vl:7b" spellcheck="false"></label>
+  <datalist id="aiServerModels"></datalist>
+  <div class="as-server-test"><button type="button" class="btn" data-ai-server-test>Probar conexión</button><span data-ai-server-status></span></div>
+  <details><summary>Cómo prepararlo (5 minutos)</summary><ol><li>Instala <b>Ollama</b> (ollama.com) o <b>LM Studio</b>.</li><li>Descarga un modelo: <code>ollama pull qwen2.5:7b</code>; para fórmulas y figuras, uno visual: <code>ollama pull qwen2.5vl:7b</code>.</li><li>Permite esta web: cierra Ollama y arráncalo con <code>OLLAMA_ORIGINS=${escapeHtml(location.origin)} ollama serve</code>. En LM Studio, activa el servidor y «CORS» (dirección <code>http://localhost:1234</code>).</li></ol></details></div>`
+      : ""
+  }`;
+}
+function toggleAiSettings(force) {
+  let box = $("assistantSettings");
+  if (!box) {
+    box = document.createElement("section");
+    box.id = "assistantSettings";
+    box.className = "as-settings";
+    box.hidden = true;
+    $("assistantPanel").append(box);
+    box.addEventListener("click", async (event) => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      if (button.dataset.aiSettingsClose !== undefined) return toggleAiSettings(false);
+      if (button.dataset.aiProfile) return setAiProfile(button.dataset.aiProfile);
+      if (button.dataset.aiServerTest !== undefined) {
+        const status = box.querySelector("[data-ai-server-status]");
+        status.textContent = "Conectando…";
+        try {
+          const models = await listServerModels();
+          box.querySelector("#aiServerModels").innerHTML = models.map((id) => `<option value="${escapeHtml(id)}">`).join("");
+          status.textContent = models.length ? `Conectado · ${models.length} modelo${models.length === 1 ? "" : "s"}: ${models.slice(0, 4).join(", ")}${models.length > 4 ? "…" : ""}` : "Conectado, pero no hay modelos descargados.";
+        } catch {
+          status.textContent = `Sin conexión con ${aiServerConfig().url}. Revisa que esté abierto y permita esta web (ver abajo).`;
+        }
+      }
+    });
+    box.addEventListener("change", (event) => {
+      const field = event.target.dataset.aiServer;
+      if (!field) return;
+      setJSON("paper.ai-server", { ...aiServerConfig(), [field]: event.target.value.trim() });
+      refreshAssistantCapability();
+    });
+  }
+  box.hidden = force === undefined ? !box.hidden : !force;
+  renderAiSettings();
+}
 async function inspectAiCapability() {
-  if (globalThis.LanguageModel?.availability) {
+  const profile = aiProfile();
+  if (profile === "server") {
+    return aiServerConfig().url ? { kind: "server" } : { kind: "none", reason: "Indica la dirección de tu servidor de IA (Ollama o LM Studio)." };
+  }
+  // Con un modelo elegido a mano se usa ese, aunque el navegador traiga el suyo.
+  if (profile === "auto" && globalThis.LanguageModel?.availability) {
     try {
       const availability =
         await globalThis.LanguageModel.availability(BUILTIN_AI_OPTIONS);
@@ -9119,11 +9357,11 @@ async function inspectAiCapability() {
       };
     const storage = await navigator.storage?.estimate?.();
     const free = Math.max(0, (storage?.quota || 0) - (storage?.usage || 0));
-    if (free && free < 1_100_000_000)
+    const needed = AI_PROFILES[webllmProfileKey()];
+    if (free && !localAiEngine && free < needed.mb * 1_200_000)
       return {
         kind: "none",
-        reason:
-          "No hay espacio local suficiente para el modelo (necesita aproximadamente 1 GB).",
+        reason: `No hay espacio local suficiente para el modelo «${needed.label}» (necesita unos ${needed.size}). Elige uno más ligero.`,
       };
     return { kind: "webllm" };
   } catch {
@@ -9134,6 +9372,7 @@ async function inspectAiCapability() {
   }
 }
 async function inspectVisionCapability() {
+  if (aiProfile() === "server" && aiServerConfig().visionModel) return { ok: true, kind: "server" };
   if (globalThis.LanguageModel?.availability) {
     try {
       const availability = await globalThis.LanguageModel.availability(
@@ -9183,6 +9422,7 @@ async function inspectVisionCapability() {
   }
 }
 function friendlyAiError(error, vision = false) {
+  if (error?.name === "ServerAIError") return error.message;
   const message = String(
     error?.message || (typeof error === "string" ? error : ""),
   ).trim();
@@ -9268,6 +9508,8 @@ function chooseWebLlmModel(webllm, vision = false) {
       throw new DOMException("La versión local del motor no publica un modelo visual compatible. Prueba la IA integrada de Chrome o Edge.", "NotSupportedError");
     return preferred.id;
   }
+  const wanted = AI_PROFILES[webllmProfileKey()].models.find((id) => entries.some((entry) => entry.id === id));
+  if (wanted) return wanted;
   const preferred = entries.find((entry) => entry.id === "Llama-3.2-1B-Instruct-q4f16_1-MLC")
     || entries.find((entry) => /(?:1B|2B|3B).*Instruct.*q4f16_1/i.test(entry.id) && !visionModels.includes(entry))
     || entries.find((entry) => /Instruct.*q4/i.test(entry.id) && !visionModels.includes(entry));
