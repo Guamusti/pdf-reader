@@ -82,6 +82,7 @@ let pdfDoc = null,
   reflowMode = false,
   captureStart = null,
   captureAppend = false,
+  captureToBoard = false,
   localAiEngine = null,
   localAiLoading = null,
   localAiWorker = null,
@@ -1360,6 +1361,7 @@ async function openMarkdownStored(rec, superseded = () => false) {
   pdfDoc = null;
   currentBook = rec;
   assistantLoadDocument();
+  boardLoadDocument();
   resetAnnotationHistory();
   migrateLegacyPageNotes();
   currentPage = 1;
@@ -1456,6 +1458,7 @@ async function openStored(id) {
     if (!rec.cover) ensureBookCover(rec, pdfDoc);
     loadCurrentDocText(rec, pdfDoc);
     assistantLoadDocument();
+    boardLoadDocument();
     resetAnnotationHistory();
     migrateLegacyPageNotes();
     teardownReflowDocument();
@@ -2260,6 +2263,7 @@ function paletteActions() {
     { icon: "◆", title: "Nueva tarjeta de estudio", keys: "flashcard crear pregunta", when: hasDoc, run: () => renderStudyEditor() },
     { icon: "✦", title: "Generar tarjetas de esta página con IA", keys: "flashcards ia estudiar automatico", when: hasPdf, run: generateCardsWithAi },
     { icon: "✦", title: "Asistente IA: abrir o cerrar", keys: "asistente ia chat pregunta preguntar documento", shortcut: ["I"], when: hasDoc, run: () => toggleAssistant() },
+    { icon: "✎", title: "Pizarra: escribir a mano junto al documento", keys: "pizarra tablero apuntes mano lapiz dibujar ejercicios whiteboard", shortcut: ["W"], when: hasDoc, run: toggleBoard },
     { icon: "✂", title: "Recortar una zona para la IA (fórmula, tabla, figura…)", keys: "recortar area zona formula ecuacion captura imagen simbolos", shortcut: ["X"], when: hasPdf, run: () => openCapture() },
     { icon: "✦", title: "Resumir esta página con IA", keys: "resumen sintesis puntos clave", when: hasDoc, run: () => runAssistantAction("summary", { kind: "page" }) },
     { icon: "✦", title: "Resumir todo el documento con IA", keys: "resumen general sintesis documento completo", when: hasDoc, run: () => runAssistantAction("summary", { kind: "document" }) },
@@ -2498,7 +2502,7 @@ async function applyPaletteSearch(raw, page = 0, occurrence = 0) {
 const SHORTCUT_GROUPS = [
   ["Navegación", [["Página siguiente / anterior", ["→", "←"]], ["Primera / última página", ["Inicio", "Fin"]], ["Vista anterior / siguiente", ["Alt", "←/→"]], ["Buscar o ir a…", ["Ctrl", "K"]], ["Buscar en el documento", ["Ctrl", "F"]], ["Coincidencia siguiente / anterior", ["Enter", "⇧ Enter"]]]],
   ["Lectura", [["Regla de lectura", ["G"]], ["Mover la regla", ["↑", "↓"]], ["Desplazamiento automático", ["A"]], ["Pausar / velocidad (auto-scroll)", ["Espacio", "[", "]"]], ["Modo enfoque", ["F"]], ["Presentación", ["P"]], ["Vista dividida", ["D"]], ["Modo lectura adaptable", ["L"]], ["Acercar / alejar", ["+", "−"]], ["Girar página", ["R"]], ["Marcar página", ["B"]]]],
-  ["Notas y anotaciones", [["Nota en un punto de la página", ["N"]], ["Ventana de notas", ["C"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
+  ["Notas y anotaciones", [["Nota en un punto de la página", ["N"]], ["Ventana de notas", ["C"]], ["Pizarra a mano junto al documento", ["W"]], ["Editar anotaciones", ["S"]], ["Deshacer", ["Ctrl", "Z"]], ["Rehacer", ["Ctrl", "⇧", "Z"]]]],
   ["Asistente IA", [["Abrir o cerrar el asistente", ["I"]], ["Recortar una zona (se pueden añadir varias)", ["X"]], ["Enviar pregunta / nueva línea", ["Enter", "⇧ Enter"]], ["Detener la respuesta o cerrar", ["Esc"]]]],
   ["Estudio", [["Abrir tarjetas de estudio", ["E"]], ["Mostrar respuesta", ["Espacio"]], ["Calificar: otra vez · difícil · bien · fácil", ["1", "2", "3", "4"]]]],
   ["General", [["Atajos de teclado", ["?"]], ["Cerrar paneles", ["Esc"]]]],
@@ -3189,6 +3193,10 @@ const ICONS = {
   minus: '<path d="M5 12h14"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
+  board: '<rect x="3" y="3.5" width="18" height="13" rx="2"/><path d="M7 20.5 9.5 16.5M17 20.5l-2.5-4M7 12.5c1.5-3 3-3 4 0s2.5 3 4-1"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z"/>',
+  download: '<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
   send: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   fitWidth: '<path d="M3 5v14M21 5v14"/><path d="m7 12 3-3M7 12l3 3M7 12h10m0 0-3-3m3 3-3 3"/>',
@@ -4873,6 +4881,7 @@ function applySplitWidth() {
 async function openSplitView({ id = currentBook?.id, page = currentPage } = {}) {
   if (!currentBook || !pdfDoc) return toast("Abre un PDF primero");
   if (window.innerWidth < 760) return toast("La vista dividida necesita una pantalla más ancha");
+  if (boardOpen()) closeBoard();
   document.body.classList.add("split-open");
   $("splitPane").hidden = false;
   applySplitWidth();
@@ -5071,8 +5080,19 @@ function bindSplitView() {
       if (document.activeElement !== $("splitPage")) $("splitPage").value = splitCurrentPage();
     });
   }, { passive: true });
-  // Arrastrar el borde izquierdo cambia el ancho del panel.
-  const resizer = $("splitResizer");
+  bindPaneResizer($("splitResizer"), () => {
+    if (split.doc) buildSplitPages(splitCurrentPage());
+  });
+  window.addEventListener("resize", () => {
+    if (!splitOpen()) return;
+    if (window.innerWidth < 760) closeSplitView();
+    else applySplitWidth();
+  }, { passive: true });
+}
+
+// Arrastrar el borde izquierdo de un panel lateral (vista dividida o pizarra)
+// cambia su ancho; ambos comparten el mismo ancho guardado.
+function bindPaneResizer(resizer, onDone) {
   let drag = null;
   resizer.addEventListener("pointerdown", (event) => {
     drag = { id: event.pointerId };
@@ -5091,15 +5111,537 @@ function bindSplitView() {
     document.body.classList.remove("split-resizing");
     kv.setItem("paper.split-width", String(parseInt(getComputedStyle(document.body).getPropertyValue("--split-w"), 10) || 0));
     scheduleLayoutRefit();
-    if (split.doc) buildSplitPages(splitCurrentPage());
+    onDone?.();
   };
   resizer.addEventListener("pointerup", finish);
   resizer.addEventListener("pointercancel", finish);
-  window.addEventListener("resize", () => {
-    if (!splitOpen()) return;
-    if (window.innerWidth < 760) closeSplitView();
-    else applySplitWidth();
-  }, { passive: true });
+}
+
+// ---- Pizarra ----
+// Panel junto al documento para escribir a mano (una pizarra por documento).
+// Como en las notas, las coordenadas se guardan divididas por el ancho y `h` es
+// alto/ancho. El lienzo solo cubre la zona visible y se redibuja al desplazarse,
+// así la pizarra puede crecer hacia abajo sin gastar memoria de más.
+const BOARD_COLORS = {
+  dark: { yellow: "#ffd54a", white: "#f3f4f6", cyan: "#5cc8ff", pink: "#ff7eb3", green: "#7ddc8c" },
+  light: { yellow: "#b77900", white: "#1f2328", cyan: "#1f6fd1", pink: "#cc2f6c", green: "#1f8a4c" },
+};
+const BOARD_BACKGROUNDS = { dark: "#16181d", light: "#fbfaf6" };
+const BOARD_GRIDS = { none: "Liso", dots: "Puntos", lines: "Rayado", grid: "Cuadrícula" };
+const BOARD_WIDTHS = { fine: 1.5, medium: 2.6, thick: 4.6 };
+const board = { data: null, undo: [], redo: [], stroke: null, pan: null, drag: null, frame: 0, selected: null, penSeen: false, images: new Map(), bounds: new WeakMap() };
+const boardTool = { mode: "pen", color: "yellow", width: "medium", ...getJSON("paper.board-tool", {}) };
+function boardOpen() {
+  return document.body.classList.contains("board-open");
+}
+function emptyBoard() {
+  return { v: 1, bg: "dark", grid: "dots", h: 1.4, strokes: [], items: [] };
+}
+function boardStorageKey() {
+  return currentBook ? key(currentBook.id, "board") : "";
+}
+function loadBoardData() {
+  const stored = currentBook ? getJSON(boardStorageKey(), null) : null;
+  const data = { ...emptyBoard(), ...(stored && typeof stored === "object" ? stored : {}) };
+  data.strokes = Array.isArray(data.strokes) ? data.strokes.filter((stroke) => Array.isArray(stroke?.p) && stroke.p.length) : [];
+  data.items = Array.isArray(data.items) ? data.items.filter((item) => item?.type === "image" && typeof item.src === "string") : [];
+  if (!BOARD_BACKGROUNDS[data.bg]) data.bg = "dark";
+  if (!BOARD_GRIDS[data.grid]) data.grid = "dots";
+  board.data = data;
+  board.undo = [];
+  board.redo = [];
+  board.selected = null;
+}
+function saveBoard() {
+  if (!board.data || !currentBook) return;
+  setJSON(boardStorageKey(), board.data);
+  const status = $("boardStatus");
+  if (status) status.textContent = "Guardado";
+}
+function pushBoardUndo(snapshot = JSON.stringify(board.data)) {
+  board.undo.push(snapshot);
+  if (board.undo.length > 60) board.undo.shift();
+  board.redo = [];
+  renderBoardTools();
+}
+// Aplica un cambio con deshacer, lo guarda y redibuja.
+function commitBoard(change) {
+  pushBoardUndo();
+  change(board.data);
+  saveBoard();
+  refreshBoardHeight();
+  paintBoard();
+}
+function undoBoard(redo = false) {
+  const from = redo ? board.redo : board.undo;
+  const to = redo ? board.undo : board.redo;
+  if (!from.length) return toast(redo ? "Nada que rehacer" : "Nada que deshacer en la pizarra");
+  to.push(JSON.stringify(board.data));
+  board.data = JSON.parse(from.pop());
+  board.selected = null;
+  saveBoard();
+  refreshBoardHeight();
+  paintBoard();
+  renderBoardTools();
+}
+// Parte más baja con contenido, en unidades de ancho.
+function boardContentBottom() {
+  let bottom = 0;
+  for (const stroke of board.data?.strokes || []) bottom = Math.max(bottom, strokeBounds(stroke)[1]);
+  for (const item of board.data?.items || []) bottom = Math.max(bottom, item.y + item.h);
+  return bottom;
+}
+function strokeBounds(stroke) {
+  let bounds = board.bounds.get(stroke);
+  if (!bounds) {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const point of stroke.p) {
+      min = Math.min(min, point[1]);
+      max = Math.max(max, point[1]);
+    }
+    bounds = [min, max];
+    board.bounds.set(stroke, bounds);
+  }
+  return bounds;
+}
+// La pizarra siempre deja al menos media pantalla libre bajo lo escrito.
+function refreshBoardHeight() {
+  const scroll = $("boardScroll");
+  if (!board.data || !scroll) return;
+  const width = Math.max(1, scroll.clientWidth);
+  const view = scroll.clientHeight / width;
+  board.data.h = Math.max(board.data.h || 0, view, boardContentBottom() + view * 0.6);
+  $("boardSpacer").style.height = `${Math.max(0, Math.round(board.data.h * width - scroll.clientHeight))}px`;
+}
+function boardImage(src) {
+  let image = board.images.get(src);
+  if (!image) {
+    image = new Image();
+    image.onload = () => schedulePaintBoard();
+    image.src = src;
+    board.images.set(src, image);
+  }
+  return image;
+}
+function drawBoardGrid(ctx, width, height, top, data) {
+  if (data.grid === "none") return;
+  const step = width / 22;
+  ctx.save();
+  ctx.fillStyle = ctx.strokeStyle = data.bg === "dark" ? "rgba(255,255,255,.13)" : "rgba(40,50,70,.14)";
+  ctx.lineWidth = 1;
+  const first = Math.ceil(top / step) * step - top;
+  if (data.grid === "dots") {
+    for (let y = first; y < height; y += step) for (let x = step / 2; x < width; x += step) ctx.fillRect(x - 1, y - 1, 2, 2);
+  } else {
+    ctx.beginPath();
+    for (let y = first; y < height; y += step) {
+      ctx.moveTo(0, Math.round(y) + 0.5);
+      ctx.lineTo(width, Math.round(y) + 0.5);
+    }
+    if (data.grid === "grid") for (let x = step / 2; x < width; x += step) {
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, height);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawBoardContent(ctx, data, width, top, height, { live = null, selected = null } = {}) {
+  const palette = BOARD_COLORS[data.bg];
+  ctx.save();
+  ctx.translate(0, -top);
+  for (const item of data.items) {
+    const image = boardImage(item.src);
+    if (image.complete && image.naturalWidth) {
+      // Los recortes se funden con el fondo: sobre oscuro se invierten (tinta
+      // clara) y el papel blanco deja ver la cuadrícula en ambos fondos.
+      ctx.save();
+      ctx.filter = data.bg === "dark" ? "invert(1) hue-rotate(180deg) brightness(.92)" : "none";
+      ctx.globalCompositeOperation = data.bg === "dark" ? "lighten" : "multiply";
+      ctx.drawImage(image, item.x * width, item.y * width, item.w * width, item.h * width);
+      ctx.restore();
+    }
+    if (item.id === selected) {
+      ctx.save();
+      ctx.strokeStyle = "#3b7cff";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(item.x * width - 3, item.y * width - 3, item.w * width + 6, item.h * width + 6);
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#3b7cff";
+      ctx.fillRect((item.x + item.w) * width - 6, (item.y + item.h) * width - 6, 12, 12);
+      ctx.restore();
+    }
+  }
+  const from = top / width,
+    to = (top + height) / width;
+  for (const stroke of live ? [...data.strokes, live] : data.strokes) {
+    const [min, max] = stroke === live ? [-Infinity, Infinity] : strokeBounds(stroke);
+    if (max < from - 0.05 || min > to + 0.05) continue;
+    drawInkStroke(ctx, { ...stroke, c: palette[stroke.c] || stroke.c }, width);
+  }
+  ctx.restore();
+}
+function schedulePaintBoard() {
+  if (!board.frame) board.frame = requestAnimationFrame(paintBoard);
+}
+function paintBoard() {
+  cancelAnimationFrame(board.frame);
+  board.frame = 0;
+  const data = board.data;
+  const scroll = $("boardScroll");
+  if (!data || !boardOpen() || !scroll) return;
+  const canvas = $("boardCanvas");
+  const width = scroll.clientWidth,
+    height = scroll.clientHeight,
+    dpr = Math.min(window.devicePixelRatio || 1, 3);
+  if (!width || !height) return;
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = BOARD_BACKGROUNDS[data.bg];
+  ctx.fillRect(0, 0, width, height);
+  drawBoardGrid(ctx, width, height, scroll.scrollTop, data);
+  drawBoardContent(ctx, data, width, scroll.scrollTop, height, { live: board.stroke, selected: board.selected });
+  $("boardPane").dataset.bg = data.bg;
+  $("boardEmpty").hidden = Boolean(data.strokes.length || data.items.length || board.stroke);
+}
+function renderBoardTools() {
+  const tools = $("boardTools");
+  if (!tools || !board.data) return;
+  const palette = BOARD_COLORS[board.data.bg];
+  const button = (attrs, icon, title, pressed = null) =>
+    `<button type="button" class="btn icon" ${attrs} title="${title}" aria-label="${title}"${pressed === null ? "" : ` aria-pressed="${pressed}"`}>${iconSvg(icon)}</button>`;
+  tools.innerHTML = `<div class="bd-group">${button('data-board-mode="pen"', "pen", "Lápiz", boardTool.mode === "pen")}${button('data-board-mode="eraser"', "eraser", "Goma (borra trazos enteros)", boardTool.mode === "eraser")}${button(
+    'data-board-mode="move"',
+    "cursor",
+    "Mover y ajustar imágenes",
+    boardTool.mode === "move",
+  )}</div><div class="bd-group bd-colors">${Object.keys(palette)
+    .map((name) => `<button type="button" class="bd-swatch" data-board-color="${name}" style="--swatch:${palette[name]}" aria-pressed="${boardTool.color === name}" title="Color" aria-label="Color ${name}"></button>`)
+    .join("")}</div><div class="bd-group">${Object.keys(BOARD_WIDTHS)
+    .map((name) => `<button type="button" class="bd-width" data-board-width="${name}" aria-pressed="${boardTool.width === name}" title="Grosor" aria-label="Grosor ${name}"><i style="--size:${BOARD_WIDTHS[name] * 1.6 + 1}px"></i></button>`)
+    .join("")}</div><div class="bd-group">${button("data-board-undo", "back", "Deshacer (Ctrl+Z)")}${button("data-board-redo", "forward", "Rehacer (Ctrl+Shift+Z)")}${
+    board.selected ? button("data-board-delete", "trash", "Quitar la imagen seleccionada (Supr)") : ""
+  }</div><div class="bd-group">${button("data-board-crop", "crop", "Recortar una zona del PDF y pegarla aquí")}<select class="bd-select" data-board-grid aria-label="Fondo">${Object.entries(BOARD_GRIDS)
+    .map(([id, label]) => `<option value="${id}" ${board.data.grid === id ? "selected" : ""}>${label}</option>`)
+    .join("")}</select>${button("data-board-bg", board.data.bg === "dark" ? "sun" : "moon", board.data.bg === "dark" ? "Fondo claro" : "Fondo oscuro")}${button("data-board-export", "download", "Guardar como imagen PNG")}${button(
+    "data-board-clear",
+    "trash",
+    "Borrar la pizarra",
+  )}</div><span class="bd-status" id="boardStatus"></span>${button("data-board-close", "close", "Cerrar la pizarra (W)")}`;
+  tools.querySelector("[data-board-undo]").disabled = !board.undo.length;
+  tools.querySelector("[data-board-redo]").disabled = !board.redo.length;
+  $("boardCanvas").dataset.mode = boardTool.mode;
+}
+function setBoardTool(patch) {
+  Object.assign(boardTool, patch);
+  setJSON("paper.board-tool", boardTool);
+  if (patch.mode && patch.mode !== "move") board.selected = null;
+  renderBoardTools();
+  paintBoard();
+}
+function openBoard() {
+  if (!currentBook) return toast("Abre un documento primero");
+  if (splitOpen()) closeSplitView();
+  document.body.classList.add("board-open");
+  $("boardPane").hidden = false;
+  $("boardBtn")?.setAttribute("aria-pressed", "true");
+  applySplitWidth();
+  scheduleLayoutRefit();
+  if (!board.data) loadBoardData();
+  renderBoardTools();
+  refreshBoardHeight();
+  paintBoard();
+}
+function closeBoard() {
+  document.body.classList.remove("board-open");
+  $("boardPane").hidden = true;
+  $("boardBtn")?.setAttribute("aria-pressed", "false");
+  board.stroke = null;
+  board.selected = null;
+  scheduleLayoutRefit();
+}
+function toggleBoard() {
+  boardOpen() ? closeBoard() : openBoard();
+}
+function boardLoadDocument() {
+  board.data = null;
+  board.images.clear();
+  if (!boardOpen()) return;
+  if (!currentBook) return closeBoard();
+  loadBoardData();
+  $("boardScroll").scrollTop = 0;
+  renderBoardTools();
+  refreshBoardHeight();
+  paintBoard();
+}
+// Pega una imagen (un recorte del PDF o una imagen del portapapeles) en la
+// parte visible de la pizarra, debajo de lo que ya haya en pantalla.
+async function insertBoardImages(sources) {
+  if (!sources.length) return;
+  if (!boardOpen()) openBoard();
+  const scroll = $("boardScroll");
+  const width = scroll.clientWidth;
+  const loaded = await Promise.all(
+    sources.map(
+      (src) =>
+        new Promise((resolve) => {
+          const image = new Image();
+          image.onload = () => resolve({ src, image });
+          image.onerror = () => resolve(null);
+          image.src = src;
+        }),
+    ),
+  );
+  let y = scroll.scrollTop / width + 0.04;
+  const items = [];
+  for (const entry of loaded.filter(Boolean)) {
+    board.images.set(entry.src, entry.image);
+    const w = Math.min(0.9, Math.max(0.45, entry.image.naturalWidth / width));
+    const h = (w * entry.image.naturalHeight) / entry.image.naturalWidth;
+    items.push({ id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, type: "image", src: entry.src, x: 0.05, y, w, h });
+    y += h + 0.03;
+  }
+  if (!items.length) return toast("No se pudo pegar la imagen");
+  commitBoard((data) => data.items.push(...items));
+  board.selected = items.at(-1).id;
+  setBoardTool({ mode: "move" });
+  toast(items.length > 1 ? `${items.length} recortes pegados en la pizarra` : "Recorte pegado en la pizarra");
+}
+async function exportBoardPng() {
+  const data = board.data;
+  if (!data || !(data.strokes.length || data.items.length)) return toast("La pizarra está vacía");
+  const width = 1400;
+  const height = Math.min(20000, Math.round((boardContentBottom() + 0.06) * width));
+  await Promise.all(
+    data.items.map((item) => {
+      const image = boardImage(item.src);
+      return image.complete ? null : new Promise((resolve) => image.addEventListener("load", resolve, { once: true }));
+    }),
+  );
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = BOARD_BACKGROUNDS[data.bg];
+  ctx.fillRect(0, 0, width, height);
+  drawBoardGrid(ctx, width, height, 0, data);
+  drawBoardContent(ctx, data, width, 0, height);
+  canvas.toBlob((blob) => {
+    if (!blob) return toast("No se pudo crear la imagen");
+    downloadBlob(`${(currentBook?.name || "documento").replace(/\.(pdf|md|markdown)$/i, "")}-pizarra.png`, blob);
+  }, "image/png");
+}
+function boardItemAt(point) {
+  for (let index = board.data.items.length - 1; index >= 0; index--) {
+    const item = board.data.items[index];
+    if (point[0] >= item.x && point[0] <= item.x + item.w && point[1] >= item.y && point[1] <= item.y + item.h) return item;
+  }
+  return null;
+}
+function bindBoard() {
+  const pane = $("boardPane"),
+    scroll = $("boardScroll"),
+    canvas = $("boardCanvas");
+  const pointFrom = (event) => {
+    const box = canvas.getBoundingClientRect();
+    const width = scroll.clientWidth;
+    const pressure = event.pointerType === "pen" && event.pressure > 0 ? Math.round(event.pressure * 100) / 100 : 0;
+    return [Math.round(((event.clientX - box.left) / width) * 10000) / 10000, Math.round(((event.clientY - box.top + scroll.scrollTop) / width) * 10000) / 10000, pressure];
+  };
+  let erasedFrom = null;
+  const eraseAt = (point) => {
+    const radius = 10 / scroll.clientWidth;
+    const before = board.data.strokes.length;
+    const kept = board.data.strokes.filter((stroke) => !stroke.p.some((p) => Math.hypot(p[0] - point[0], p[1] - point[1]) < radius + (stroke.w / NOTE_INK_REF_WIDTH) / 2));
+    if (kept.length === before) return;
+    erasedFrom ||= JSON.stringify(board.data);
+    board.data.strokes = kept;
+  };
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.button > 0 || !board.data) return;
+    if (event.pointerType === "pen") {
+      lastPenInput = Date.now();
+      board.penSeen = true;
+    }
+    canvas.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    // Con lápiz, el dedo desplaza la pizarra y la palma no escribe.
+    if (event.pointerType === "touch" && (board.penSeen || Date.now() - lastPenInput < 2000)) {
+      board.pan = { id: event.pointerId, y: event.clientY, top: scroll.scrollTop };
+      return;
+    }
+    const point = pointFrom(event);
+    if (boardTool.mode === "move") {
+      const item = boardItemAt(point);
+      const selected = board.data.items.find((entry) => entry.id === board.selected);
+      const corner = selected && Math.hypot(point[0] - (selected.x + selected.w), point[1] - (selected.y + selected.h)) < 14 / scroll.clientWidth;
+      const target = corner ? selected : item;
+      board.selected = target?.id || null;
+      board.drag = target ? { id: event.pointerId, item: target, start: point, from: { ...target }, resize: Boolean(corner), snapshot: JSON.stringify(board.data), moved: false } : null;
+      if (!target) board.pan = { id: event.pointerId, y: event.clientY, top: scroll.scrollTop };
+      renderBoardTools();
+      paintBoard();
+      return;
+    }
+    if (boardTool.mode === "eraser") {
+      erasedFrom = null;
+      eraseAt(point);
+      paintBoard();
+      return;
+    }
+    const width = scroll.clientWidth;
+    board.stroke = { t: "pen", c: boardTool.color, w: (BOARD_WIDTHS[boardTool.width] * NOTE_INK_REF_WIDTH) / width, p: [point] };
+    schedulePaintBoard();
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!canvas.hasPointerCapture(event.pointerId) || !board.data) return;
+    if (board.pan?.id === event.pointerId) {
+      scroll.scrollTop = board.pan.top - (event.clientY - board.pan.y);
+      return;
+    }
+    if (board.drag?.id === event.pointerId) {
+      const point = pointFrom(event);
+      const { item, from, start } = board.drag;
+      const dx = point[0] - start[0],
+        dy = point[1] - start[1];
+      if (board.drag.resize) {
+        item.w = Math.max(0.08, from.w + dx);
+        item.h = (item.w * from.h) / from.w;
+      } else {
+        item.x = Math.max(-item.w * 0.8, Math.min(0.95, from.x + dx));
+        item.y = Math.max(0, from.y + dy);
+      }
+      board.drag.moved = true;
+      schedulePaintBoard();
+      return;
+    }
+    const events = event.getCoalescedEvents?.() || [event];
+    if (boardTool.mode === "eraser") {
+      for (const item of events) eraseAt(pointFrom(item));
+      schedulePaintBoard();
+      return;
+    }
+    if (!board.stroke) return;
+    for (const item of events) {
+      const point = pointFrom(item);
+      const last = board.stroke.p[board.stroke.p.length - 1];
+      if (Math.hypot(point[0] - last[0], point[1] - last[1]) > 0.0015) board.stroke.p.push(point);
+    }
+    // Al escribir cerca del final, la pizarra crece.
+    const bottom = board.stroke.p[board.stroke.p.length - 1][1];
+    if (bottom > board.data.h - scroll.clientHeight / scroll.clientWidth / 3) {
+      board.data.h = bottom + scroll.clientHeight / scroll.clientWidth;
+      refreshBoardHeight();
+    }
+    schedulePaintBoard();
+  });
+  const finish = (event) => {
+    if (!canvas.hasPointerCapture(event.pointerId)) return;
+    canvas.releasePointerCapture(event.pointerId);
+    if (board.pan?.id === event.pointerId) {
+      board.pan = null;
+      return;
+    }
+    if (board.drag?.id === event.pointerId) {
+      if (board.drag.moved) {
+        pushBoardUndo(board.drag.snapshot);
+        saveBoard();
+        refreshBoardHeight();
+      }
+      board.drag = null;
+      paintBoard();
+      return;
+    }
+    if (boardTool.mode === "eraser") {
+      if (erasedFrom) {
+        pushBoardUndo(erasedFrom);
+        saveBoard();
+      }
+      erasedFrom = null;
+      return;
+    }
+    if (board.stroke) {
+      const stroke = board.stroke;
+      board.stroke = null;
+      commitBoard((data) => data.strokes.push(stroke));
+    }
+  };
+  canvas.addEventListener("pointerup", finish);
+  canvas.addEventListener("pointercancel", finish);
+  scroll.addEventListener("scroll", schedulePaintBoard, { passive: true });
+  new ResizeObserver(() => {
+    if (!boardOpen()) return;
+    refreshBoardHeight();
+    paintBoard();
+  }).observe(scroll);
+  pane.addEventListener("change", (event) => {
+    if (event.target.matches("[data-board-grid]")) commitBoard((data) => (data.grid = event.target.value));
+  });
+  pane.addEventListener("click", (event) => {
+    const target = event.target.closest("button");
+    if (!target) return;
+    const data = target.dataset;
+    if (data.boardMode) return setBoardTool({ mode: data.boardMode });
+    if (data.boardColor) return setBoardTool({ color: data.boardColor, mode: "pen" });
+    if (data.boardWidth) return setBoardTool({ width: data.boardWidth, mode: "pen" });
+    if (data.boardUndo !== undefined) return undoBoard();
+    if (data.boardRedo !== undefined) return undoBoard(true);
+    if (data.boardDelete !== undefined) return deleteBoardSelection();
+    if (data.boardCrop !== undefined) {
+      const areas = captureAreas();
+      return areas.length ? insertBoardImages(areas.map((area) => area.image)) : openCapture({ toBoard: true });
+    }
+    if (data.boardBg !== undefined) {
+      commitBoard((value) => (value.bg = value.bg === "dark" ? "light" : "dark"));
+      return renderBoardTools();
+    }
+    if (data.boardExport !== undefined) return exportBoardPng();
+    if (data.boardClear !== undefined) {
+      if (!board.data.strokes.length && !board.data.items.length) return;
+      if (!confirm("¿Borrar todo lo escrito en la pizarra? Podrás deshacerlo mientras no cierres el documento.")) return;
+      board.selected = null;
+      commitBoard((value) => {
+        value.strokes = [];
+        value.items = [];
+      });
+      return renderBoardTools();
+    }
+    if (data.boardClose !== undefined) closeBoard();
+  });
+  $("boardBtn").onclick = toggleBoard;
+  setIcon("boardBtn", "board");
+  // Ctrl+Z y Supr actúan sobre la pizarra si fue lo último que se tocó.
+  document.addEventListener("pointerdown", (event) => (board.focused = Boolean(event.target.closest?.("#boardPane"))), true);
+  // Pegar una imagen del portapapeles con la pizarra abierta.
+  document.addEventListener("paste", (event) => {
+    if (!boardOpen() || event.target.closest?.("input, textarea, [contenteditable]")) return;
+    const file = [...(event.clipboardData?.files || [])].find((item) => item.type.startsWith("image/"));
+    if (!file) return;
+    event.preventDefault();
+    const reader = new FileReader();
+    reader.onload = () => insertBoardImages([reader.result]);
+    reader.readAsDataURL(file);
+  });
+  bindPaneResizer($("boardResizer"), () => {
+    refreshBoardHeight();
+    paintBoard();
+  });
+}
+function deleteBoardSelection() {
+  if (!board.selected) return false;
+  const id = board.selected;
+  board.selected = null;
+  commitBoard((data) => (data.items = data.items.filter((item) => item.id !== id)));
+  renderBoardTools();
+  return true;
 }
 
 // ---- Abrir con Paper Reader y compartir ----
@@ -6684,14 +7226,17 @@ function closeCapture() {
   $("captureBox").hidden = true;
 }
 // `append`: el recorte se suma a las áreas ya adjuntas en vez de sustituirlas.
-async function openCapture({ append = false } = {}) {
+async function openCapture({ append = false, toBoard = false } = {}) {
   if (!pdfDoc) return toast("Abre un PDF primero");
   if (reflowMode) await setReadingMode("pdf");
   closeCapture();
   closePromptMenu();
   hideAnnotationActions();
   captureAppend = append && captureAreas().length > 0;
-  $("captureOverlay").querySelector(".capture-guide").textContent = captureAppend
+  captureToBoard = toBoard;
+  $("captureOverlay").querySelector(".capture-guide").textContent = toBoard
+    ? "Arrastra sobre una zona del PDF para pegarla en la pizarra · Esc para cancelar"
+    : captureAppend
     ? `Arrastra sobre otra zona para añadirla (área ${captureAreas().length + 1}) · Esc para cancelar`
     : "Arrastra sobre una fórmula, tabla o párrafo para recortarlo · Esc para cancelar";
   $("captureOverlay").classList.add("show");
@@ -6798,8 +7343,11 @@ function cropPdfCapture(a, b) {
     },
   };
   const append = captureAppend;
+  const toBoard = captureToBoard;
   closeCapture();
   captureAppend = false;
+  captureToBoard = false;
+  if (toBoard) return insertBoardImages([area.image]);
   const areas = append ? [...captureAreas(), area].slice(-MAX_CAPTURE_AREAS) : [area];
   setAssistantContext({ kind: "image", areas });
   const anchor = areaHost(area.page)?.querySelector(`.area-mark[data-area="${area.id}"]`)?.getBoundingClientRect();
@@ -6904,6 +7452,8 @@ function promptMenuHtml(context) {
     .map((action) => `<button type="button" role="menuitem" data-prompt-action="${action}">${escapeHtml(ASSISTANT_ACTIONS[action].menu)}</button>`)
     .join("")}</div><div class="pm-sep"></div><div class="pm-list" role="menu">${
     context.kind === "image" && count < MAX_CAPTURE_AREAS ? `<button type="button" role="menuitem" data-prompt-add>${iconSvg("plus")}<span>Añadir otra área</span></button>` : ""
+  }${
+    context.kind === "image" ? `<button type="button" role="menuitem" data-prompt-board>${iconSvg("board")}<span>Pegar en la pizarra</span></button>` : ""
   }<button type="button" role="menuitem" data-prompt-ask>${iconSvg("send")}<span>Preguntar otra cosa…</span></button></div><footer class="pm-foot">${escapeHtml(footer)}</footer>`;
 }
 function openPromptMenu(context, anchor, { below = false } = {}) {
@@ -6958,6 +7508,7 @@ function bindPromptMenu(menu) {
     closePromptMenu();
     if (button.dataset.promptAction) return runAssistantAction(button.dataset.promptAction, context);
     if (button.dataset.promptAdd !== undefined) return openCapture({ append: true });
+    if (button.dataset.promptBoard !== undefined) return insertBoardImages(context.areas.map((area) => area.image));
     if (button.dataset.promptAsk !== undefined) openAssistant({ context });
   });
   menu.addEventListener("keydown", (event) => {
@@ -9364,6 +9915,17 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.target.matches?.("input,select,textarea") || e.target.isContentEditable) return;
+  if (boardOpen() && board.focused && !$("boardPane").hidden) {
+    if (commandKey && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y")) {
+      e.preventDefault();
+      undoBoard(e.shiftKey || e.key.toLowerCase() === "y");
+      return;
+    }
+    if ((e.key === "Delete" || e.key === "Backspace") && deleteBoardSelection()) {
+      e.preventDefault();
+      return;
+    }
+  }
   if (commandKey && e.key.toLowerCase() === "z" && currentBook) {
     e.preventDefault();
     if (e.shiftKey) redoAnnotation();
@@ -9450,6 +10012,10 @@ window.addEventListener("keydown", (e) => {
   if ((e.key === "d" || e.key === "D") && pdfDoc) {
     e.preventDefault();
     toggleSplitView();
+  }
+  if ((e.key === "w" || e.key === "W") && currentBook) {
+    e.preventDefault();
+    toggleBoard();
   }
   if ((e.key === "x" || e.key === "X") && pdfDoc) {
     e.preventDefault();
@@ -9639,6 +10205,7 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
   bindHoverPreviews();
   bindReferencesPanel();
   bindSplitView();
+  bindBoard();
   configureFooterIsland();
   configureResponsiveUi();
   setTheme(kv.getItem("paper.theme") || "light");

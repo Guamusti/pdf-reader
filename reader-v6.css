@@ -139,3 +139,42 @@ body.split-resizing { user-select: none; cursor: col-resize; }
 .as-answer .katex-display { margin: 6px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .as-answer code.as-tex { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .as-answer code.as-tex.is-display { display: block; padding: 6px 8px; margin: 6px 0; white-space: pre-wrap; }
+
+/* ---- v7: pizarra ---- */
+body.board-open .viewer { margin-right: var(--split-w, 42vw); }
+body.board-open .footer { left: calc((100% - var(--split-w, 42vw)) / 2) !important; max-width: calc(100% - var(--split-w, 42vw) - 16px); }
+body.board-open .footer .page-scrubber, body.board-open .footer .page-remaining, body.board-open .footer #fitBtn, body.board-open .footer #rotateBtn { display: none !important; }
+body.board-open .thumbnail-rail { right: calc(var(--split-w, 42vw) + 14px) !important; }
+.board-pane { --bd-bg: #16181d; --bd-bar: #1f2228; --bd-line: rgba(255, 255, 255, .1); --bd-text: #e8eaee; --bd-muted: #9aa1ad; --bd-hover: rgba(255, 255, 255, .08);
+  position: absolute; z-index: 22; top: var(--paper-topbar, 58px); right: 0; bottom: 0; width: var(--split-w, 42vw); display: grid; grid-template-rows: auto minmax(0, 1fr); border-left: 1px solid var(--bd-line); background: var(--bd-bg); color: var(--bd-text); }
+.board-pane[data-bg="light"] { --bd-bg: #fbfaf6; --bd-bar: #f1efe8; --bd-line: rgba(0, 0, 0, .1); --bd-text: #1f2328; --bd-muted: #6b7280; --bd-hover: rgba(0, 0, 0, .06); }
+.board-pane[hidden] { display: none; }
+body.reader-chrome-hidden .board-pane { top: 0; }
+.board-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 6px 8px; border-bottom: 1px solid var(--bd-line); background: var(--bd-bar); }
+.bd-group { display: flex; align-items: center; gap: 2px; }
+.bd-group + .bd-group { padding-left: 8px; border-left: 1px solid var(--bd-line); }
+.board-head .btn.icon { width: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--bd-text); }
+.board-head .btn.icon:hover { background: var(--bd-hover); }
+.board-head .btn.icon[aria-pressed="true"] { background: #3b7cff; color: #fff; }
+.board-head .btn.icon:disabled { opacity: .35; cursor: default; background: transparent; }
+.board-head .ui-icon { width: 17px; height: 17px; }
+.bd-swatch { width: 22px; height: 22px; margin: 0 1px; padding: 0; border: 2px solid transparent; border-radius: 99px; background: var(--swatch); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .25); cursor: pointer; }
+.bd-swatch[aria-pressed="true"] { border-color: var(--bd-bg); box-shadow: 0 0 0 2px var(--swatch); }
+.bd-width { width: 28px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
+.bd-width i { width: var(--size); height: var(--size); border-radius: 99px; background: var(--bd-text); }
+.bd-width:hover { background: var(--bd-hover); }
+.bd-width[aria-pressed="true"] { background: var(--bd-hover); box-shadow: inset 0 0 0 1px var(--bd-muted); }
+.bd-select { min-height: 30px; padding: 2px 6px; border: 1px solid var(--bd-line); border-radius: 8px; background: transparent; color: var(--bd-text); font-size: 12px; }
+.bd-select option { color: #1f2328; }
+.bd-status { flex: 1; min-width: 0; color: var(--bd-muted); font-size: 11px; text-align: right; }
+.board-scroll { position: relative; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.board-canvas { position: sticky; top: 0; display: block; touch-action: none; cursor: crosshair; }
+.board-canvas[data-mode="eraser"] { cursor: cell; }
+.board-canvas[data-mode="move"] { cursor: grab; }
+.board-empty { position: absolute; top: 38%; left: 50%; width: min(300px, 80%); margin: 0; transform: translate(-50%, -50%); color: var(--bd-muted); font-size: 13px; line-height: 1.55; text-align: center; pointer-events: none; }
+.board-empty[hidden] { display: none; }
+@media (max-width: 759px) {
+  .board-pane { position: fixed; z-index: 105; inset: 0; width: auto; border-left: 0; }
+  .board-pane .split-resizer { display: none; }
+  body.board-open .viewer { margin-right: 0; }
+}
