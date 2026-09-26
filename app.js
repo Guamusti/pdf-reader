@@ -459,7 +459,8 @@ function buildDocText(state = docText) {
       try {
         const page = await doc.getPage(i);
         const content = await page.getTextContent();
-        state.pages[i - 1] = content.items.map((item) => item.str).join(" ");
+        const native = content.items.map((item) => item.str).join(" ");
+        state.pages[i - 1] = native.trim() ? native : (getJSON(key(state.id, `ocr-${i}`), null)?.text || "").replace(/\n/g, " ");
       } catch {
         state.pages[i - 1] = "";
       }
@@ -1616,6 +1617,7 @@ function renderPage(num, options = {}) {
 // currentPage. Compartido por el modo página única, doble y scroll continuo.
 function updatePageChrome() {
   if (!pdfDoc) return;
+  scheduleOcrCheck();
   $("pageStatus").textContent = `Página ${currentPage} de ${pdfDoc.numPages}`;
   $("pageStatus").hidden = true;
   $("pageTotal").textContent = `de ${pdfDoc.numPages}`;
@@ -1716,9 +1718,199 @@ async function renderPageGraphics(pageNumber, targets, token) {
       const layer = new pdfjsLib.TextLayer({ textContentSource: content, container: textLayer, viewport });
       await layer.render();
     } catch {}
+    textLayer.classList.remove("ocr-layer");
+    if (!textLayer.textContent.trim()) renderOcrLayer(textLayer, pageNumber, viewport);
   }
   if (linkLayer) renderLinkLayerInto(linkLayer, page, viewport, token);
   return viewport;
+}
+
+// ---- OCR de páginas escaneadas ----
+// Tesseract.js en el propio navegador (español e inglés, unos 5 MB que se
+// descargan una vez). Cada página reconocida guarda sus palabras con posición:
+// con ellas se crea una capa de texto invisible para seleccionar, resaltar y
+// buscar, y el texto alimenta la búsqueda, la lectura en voz alta y la IA.
+const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+const OCR_MIN_CHARS = 25;
+let tesseractLoading = null;
+let ocrWorker = null;
+let ocrRun = null;
+let ocrCheckTimer = 0;
+let ocrMeasure = null;
+function pageOcr(pageNumber, id = currentBook?.id) {
+  return id ? getJSON(key(id, `ocr-${pageNumber}`), null) : null;
+}
+function loadTesseract() {
+  if (globalThis.Tesseract) return Promise.resolve(globalThis.Tesseract);
+  tesseractLoading ||= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = TESSERACT_URL;
+    script.onload = () => resolve(globalThis.Tesseract);
+    script.onerror = () => {
+      tesseractLoading = null;
+      reject(new Error("No se pudo descargar el motor de OCR (¿sin conexión?)"));
+    };
+    document.head.append(script);
+  });
+  return tesseractLoading;
+}
+function getOcrWorker() {
+  ocrWorker ||= loadTesseract()
+    .then((Tesseract) => Tesseract.createWorker(["spa", "eng"], 1, { logger: (message) => ocrRun?.onProgress?.(message) }))
+    .catch((error) => {
+      ocrWorker = null;
+      throw error;
+    });
+  return ocrWorker;
+}
+async function pageHasNativeText(pageNumber) {
+  const content = await getCachedTextContent(await getCachedPage(pageNumber));
+  return content.items.map((item) => item.str).join("").replace(/\s+/g, "").length >= OCR_MIN_CHARS;
+}
+// Reconoce una página y guarda { text, lines: [[palabra, x, y, w, h]…] } con
+// posiciones relativas (0–1) a la página sin girar.
+async function ocrPage(pageNumber) {
+  const bookId = currentBook.id;
+  const page = await getCachedPage(pageNumber);
+  const base = page.getViewport({ scale: 1, rotation: 0 });
+  const viewport = page.getViewport({ scale: Math.min(3, 2200 / base.width), rotation: 0 });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: context, viewport }).promise;
+  const worker = await getOcrWorker();
+  const { data } = await worker.recognize(canvas, {}, { text: true, blocks: true });
+  const round = (value) => Math.round(value * 10000) / 10000;
+  const lines = [];
+  for (const block of data.blocks || [])
+    for (const paragraph of block.paragraphs || [])
+      for (const line of paragraph.lines || []) {
+        const words = (line.words || [])
+          .filter((word) => word.text?.trim() && word.confidence > 25)
+          .map((word) => [word.text.trim(), round(word.bbox.x0 / canvas.width), round(word.bbox.y0 / canvas.height), round((word.bbox.x1 - word.bbox.x0) / canvas.width), round((word.bbox.y1 - word.bbox.y0) / canvas.height)]);
+        if (words.length) lines.push(words);
+      }
+  const text = lines.map((line) => line.map((word) => word[0]).join(" ")).join("\n");
+  const result = { v: 1, text, lines, at: Date.now() };
+  setJSON(key(bookId, `ocr-${pageNumber}`), result);
+  if (docText.id === bookId) {
+    docText.pages[pageNumber - 1] = text.replace(/\n/g, " ");
+    if (docText.complete) putTextIndex(bookId, docText.pages).catch(() => {});
+  }
+  return result;
+}
+// Capa de texto invisible a partir del OCR: cada palabra en su sitio y con su
+// ancho, igual que la de pdf.js, para que seleccionar y resaltar funcionen.
+function renderOcrLayer(layer, pageNumber, viewport) {
+  const ocr = pageOcr(pageNumber);
+  if (!ocr?.lines?.length || rotation % 360) return false;
+  ocrMeasure ||= document.createElement("canvas").getContext("2d");
+  const fragment = document.createDocumentFragment();
+  for (const line of ocr.lines) {
+    line.forEach(([text, x, y, w, h], index) => {
+      const span = document.createElement("span");
+      const size = Math.max(4, h * viewport.height * 0.92);
+      span.textContent = index < line.length - 1 ? `${text} ` : text;
+      ocrMeasure.font = `${size}px sans-serif`;
+      const measured = ocrMeasure.measureText(text).width || 1;
+      Object.assign(span.style, { left: `${x * 100}%`, top: `${y * 100}%`, fontSize: `${size}px`, fontFamily: "sans-serif", transform: `scaleX(${(w * viewport.width) / measured})` });
+      fragment.append(span);
+    });
+    fragment.append(document.createElement("br"));
+  }
+  layer.append(fragment);
+  layer.classList.add("ocr-layer");
+  return true;
+}
+// Aviso sobre la página cuando no tiene texto: ofrece reconocerlo.
+function scheduleOcrCheck() {
+  clearTimeout(ocrCheckTimer);
+  ocrCheckTimer = setTimeout(checkOcrNeeded, 400);
+}
+async function checkOcrNeeded() {
+  if (!pdfDoc || !currentBook || currentBook.kind === "markdown" || ocrRun) return;
+  const page = currentPage;
+  const needed = !pageOcr(page) && !(await pageHasNativeText(page).catch(() => true));
+  if (page !== currentPage || ocrRun) return;
+  renderOcrChip(needed ? { kind: "offer" } : null);
+}
+function renderOcrChip(state) {
+  let chip = $("ocrChip");
+  if (!state) {
+    if (chip) chip.hidden = true;
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("div");
+    chip.id = "ocrChip";
+    chip.className = "ocr-chip";
+    chip.setAttribute("role", "status");
+    document.body.append(chip);
+    chip.addEventListener("click", (event) => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      if (button.dataset.ocr === "page") runOcr([currentPage]);
+      else if (button.dataset.ocr === "all") runOcr("all");
+      else if (button.dataset.ocr === "cancel") ocrRun && (ocrRun.cancelled = true);
+      else if (button.dataset.ocr === "close") chip.hidden = true;
+    });
+  }
+  chip.innerHTML =
+    state.kind === "offer"
+      ? `${iconSvg("type")}<span><b>Página escaneada</b> · sin texto seleccionable</span><button type="button" class="btn" data-ocr="page">Reconocer texto</button><button type="button" class="btn" data-ocr="all" title="Reconocer todas las páginas escaneadas">Todo el documento</button><button type="button" class="btn icon" data-ocr="close" aria-label="Cerrar">${iconSvg("close")}</button>`
+      : `<i class="ocr-spinner" aria-hidden="true"></i><span>${escapeHtml(state.text)}</span>${state.cancellable ? '<button type="button" class="btn" data-ocr="cancel">Detener</button>' : ""}`;
+  chip.hidden = false;
+}
+// Reconoce las páginas indicadas (o todas las que no tienen texto).
+async function runOcr(pages) {
+  if (!pdfDoc || !currentBook || ocrRun) return;
+  const run = { cancelled: false, done: 0, total: 0, page: 0, onProgress: null };
+  ocrRun = run;
+  const bookId = currentBook.id;
+  let recognized = 0;
+  try {
+    renderOcrChip({ text: "Preparando el OCR (la primera vez descarga unos 5 MB)…", cancellable: true });
+    let list = pages;
+    if (pages === "all") {
+      list = [];
+      for (let p = 1; p <= pdfDoc.numPages && !run.cancelled; p++) if (!pageOcr(p) && !(await pageHasNativeText(p).catch(() => true))) list.push(p);
+    }
+    run.total = list.length;
+    if (!list.length) return toast("No hay páginas escaneadas pendientes de reconocer");
+    run.onProgress = (message) => {
+      if (message.status !== "recognizing text") return;
+      const percent = Math.round(((run.done + (message.progress || 0)) / run.total) * 100);
+      renderOcrChip({ text: run.total > 1 ? `Reconociendo texto · página ${run.page} (${run.done + 1} de ${run.total}) · ${percent}%` : `Reconociendo texto · ${percent}%`, cancellable: true });
+    };
+    for (const pageNumber of list) {
+      if (run.cancelled || currentBook?.id !== bookId) break;
+      run.page = pageNumber;
+      const result = await ocrPage(pageNumber);
+      if (result.text.trim()) recognized++;
+      run.done++;
+      if (pageNumber === currentPage || (viewMode !== "single" && Math.abs(pageNumber - currentPage) < 3)) rerenderAfterOcr();
+    }
+    toast(run.cancelled ? `OCR detenido: ${recognized} página${recognized === 1 ? "" : "s"} reconocida${recognized === 1 ? "" : "s"}` : recognized ? `Texto reconocido en ${recognized} página${recognized === 1 ? "" : "s"}: ya puedes seleccionar, buscar y preguntar a la IA` : "No se encontró texto legible");
+  } catch (error) {
+    console.error("OCR", error);
+    toast(`No se pudo reconocer el texto: ${error.message || error}`);
+  } finally {
+    ocrRun = null;
+    renderOcrChip(null);
+    scheduleOcrCheck();
+  }
+}
+function rerenderAfterOcr() {
+  if (viewMode === "continuous") {
+    continuousRendered.clear();
+    document.querySelectorAll("#continuousView .cont-page").forEach((slot) => {
+      const rect = slot.getBoundingClientRect();
+      if (rect.bottom > -200 && rect.top < window.innerHeight + 200) renderContinuousSlot(slot);
+    });
+  } else renderPage(currentPage);
 }
 
 // ---- Modo doble página (libro) ----
@@ -2065,6 +2257,8 @@ async function getPagePlainText(pageNumber) {
     if (block.type === "list") parts.push(...block.items);
     else if (block.text) parts.push(block.text);
   }
+  // Página escaneada: se usa el texto reconocido por OCR, si lo hay.
+  if (!parts.join("").trim()) return pageOcr(pageNumber)?.text || "";
   return parts.join("\n");
 }
 function splitSentences(text) {
@@ -2278,6 +2472,8 @@ function paletteActions() {
     { icon: "☾", title: "Tema oscuro", keys: "apariencia noche", run: () => setTheme("dark") },
     { icon: "◐", title: "Tema sepia", keys: "apariencia papel", run: () => setTheme("sepia") },
     { icon: "↗", title: "Exportar anotaciones a Markdown", keys: "descargar notas md", when: hasDoc, run: exportMarkdown },
+    { icon: "⌗", title: "Reconocer texto (OCR) de esta página", keys: "ocr escaneado escaneo reconocer texto imagen", when: hasPdf, run: () => runOcr([currentPage]) },
+    { icon: "⌗", title: "Reconocer texto (OCR) de todo el documento", keys: "ocr escaneado libro reconocer texto todas paginas", when: hasPdf, run: () => runOcr("all") },
     { icon: "⇩", title: "Guardar PDF con las anotaciones dentro", keys: "exportar descargar pdf anotado acrobat zotero goodnotes compartir", when: hasPdf, run: exportAnnotatedPdf },
     { icon: "↓", title: "Exportar copia de las anotaciones (JSON)", keys: "descargar backup", when: hasDoc, run: exportAnnotations },
     { icon: "◫", title: splitOpen() ? "Cerrar la vista dividida" : "Vista dividida (dos documentos a la vez)", keys: "split dividir comparar dos paneles lado", shortcut: ["D"], when: hasPdf, run: toggleSplitView },
@@ -4380,6 +4576,8 @@ async function renderTextLayer(page, viewport) {
       viewport,
     });
     await textLayer.render();
+    layer.classList.remove("ocr-layer");
+    if (!layer.textContent.trim()) renderOcrLayer(layer, page.pageNumber, viewport);
     paintSearchHits();
   } catch (e) {
     console.error("No se pudo crear la capa de texto", e);
@@ -10036,6 +10234,7 @@ function mobileMoreItems() {
     { id: "study", icon: "check", label: "Estudiar", when: hasDoc, run: () => openStudy() },
     { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
     { id: "pdf", icon: "download", label: "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
+    { id: "ocr", icon: "type", label: "Reconocer texto (OCR)", when: hasPdf, run: () => runOcr("all") },
     { id: "focus", icon: "maximize", label: "Pantalla completa", when: hasDoc, run: toggleFocusMode },
   ].filter((item) => item.when !== false);
 }

@@ -267,3 +267,16 @@ body.reader-chrome-hidden .return-chip, body.footer-is-minimized .return-chip { 
 .as-server details { font-size: 12.5px; line-height: 1.5; }
 .as-server summary { cursor: pointer; font-weight: 600; }
 .as-server code { padding: 1px 4px; border-radius: 4px; background: var(--soft); font-size: 11.5px; overflow-wrap: anywhere; }
+
+/* ---- v9: OCR ---- */
+.ocr-chip { position: fixed; z-index: 70; top: calc(var(--paper-topbar, 56px) + 10px); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 20px); padding: 6px 6px 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-solid); color: var(--text); box-shadow: 0 10px 30px rgba(0, 0, 0, .14); font-size: 13px; }
+.ocr-chip[hidden] { display: none; }
+.ocr-chip > .ui-icon { width: 16px; height: 16px; color: var(--accent); flex: none; }
+.ocr-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ocr-chip .btn { min-height: 30px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--soft); color: var(--text); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.ocr-chip .btn[data-ocr="page"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ocr-chip .btn.icon { width: 30px; padding: 0; background: transparent; border: 0; display: grid; place-items: center; }
+.ocr-spinner { width: 14px; height: 14px; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: ocr-spin .8s linear infinite; }
+@keyframes ocr-spin { to { transform: rotate(360deg); } }
+body.reader-chrome-hidden .ocr-chip { top: max(10px, env(safe-area-inset-top)); }
+@media (max-width: 700px) { .ocr-chip { flex-wrap: wrap; justify-content: center; border-radius: 16px; padding: 8px 10px; } .ocr-chip span { white-space: normal; text-align: center; flex-basis: 100%; } }
