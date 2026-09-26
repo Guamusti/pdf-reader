@@ -76,6 +76,11 @@ Incluye:
 - **Volver**: tras saltar desde una vista previa aparece «Volver a la p. N» para regresar a donde leías.
 - **Recortes nítidos**: la zona recortada se vuelve a dibujar desde el PDF a unos 1600 px de ancho, así que la IA y la pizarra reciben fórmulas legibles aunque la página se vea con poco zoom.
 
+### Novedades v9
+
+- **Pizarra enlazada al PDF** (al estilo LiquidText): cada recorte que pegas en la pizarra recuerda su página y su zona. Su pastilla «p. N ↗» te lleva al original, que parpadea al llegar; y en el PDF, las zonas que tienes en la pizarra llevan una marca que abre la pizarra justo en ese recorte.
+- **PDF anotado** (barra lateral → Portabilidad → «⇩ PDF anotado», la paleta o «Más» en el móvil): guarda una copia del PDF con tus anotaciones dentro como anotaciones PDF estándar y editables (resaltado, subrayado, tachado, ondulado, trazos, recuadros, flechas y notas con su texto), que se ven en Acrobat, Preview, Zotero, GoodNotes o el visor de Chrome. La pizarra se añade como páginas al final. En el móvil se ofrece compartir el archivo directamente. Todo ocurre en el dispositivo; el PDF original no se modifica.
+
 ### Pruebas
 
 ```bash

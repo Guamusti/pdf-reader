@@ -1849,6 +1849,7 @@ async function renderContinuousSlot(slot) {
     });
     if (viewMode !== "continuous") return;
     if (captureAreas().some((area) => area.page === pageNumber)) renderAreaMarks();
+    if (board.data?.items.some((item) => item.source?.page === pageNumber)) renderBoardLinks();
     // Si la página salió de la vista mientras se dibujaba, se libera ya: si no,
     // un desplazamiento rápido dejaba cientos de lienzos ocupando memoria.
     if (!continuousRendered.has(pageNumber)) clearContinuousSlot(slot);
@@ -2277,6 +2278,7 @@ function paletteActions() {
     { icon: "☾", title: "Tema oscuro", keys: "apariencia noche", run: () => setTheme("dark") },
     { icon: "◐", title: "Tema sepia", keys: "apariencia papel", run: () => setTheme("sepia") },
     { icon: "↗", title: "Exportar anotaciones a Markdown", keys: "descargar notas md", when: hasDoc, run: exportMarkdown },
+    { icon: "⇩", title: "Guardar PDF con las anotaciones dentro", keys: "exportar descargar pdf anotado acrobat zotero goodnotes compartir", when: hasPdf, run: exportAnnotatedPdf },
     { icon: "↓", title: "Exportar copia de las anotaciones (JSON)", keys: "descargar backup", when: hasDoc, run: exportAnnotations },
     { icon: "◫", title: splitOpen() ? "Cerrar la vista dividida" : "Vista dividida (dos documentos a la vez)", keys: "split dividir comparar dos paneles lado", shortcut: ["D"], when: hasPdf, run: toggleSplitView },
     { icon: "❝", title: "Referencias y cita del documento", keys: "bibliografia bibtex zotero doi citar referencias ris", when: hasPdf, run: () => { if (isDrawerLayout()) document.body.classList.add("sidebar-open"); else if (document.body.classList.contains("sidebar-collapsed")) toggleSidebar(); setSidebarPanel("refs"); } },
@@ -5255,6 +5257,7 @@ function commitBoard(change) {
   saveBoard();
   refreshBoardHeight();
   paintBoard();
+  renderBoardLinks();
 }
 function undoBoard(redo = false) {
   const from = redo ? board.redo : board.undo;
@@ -5266,6 +5269,7 @@ function undoBoard(redo = false) {
   saveBoard();
   refreshBoardHeight();
   paintBoard();
+  renderBoardLinks();
   renderBoardTools();
 }
 // Parte más baja con contenido, en unidades de ancho.
@@ -5331,7 +5335,7 @@ function drawBoardGrid(ctx, width, height, top, data) {
   }
   ctx.restore();
 }
-function drawBoardContent(ctx, data, width, top, height, { live = null, selected = null } = {}) {
+function drawBoardContent(ctx, data, width, top, height, { live = null, selected = null, badges = null } = {}) {
   const palette = BOARD_COLORS[data.bg];
   ctx.save();
   ctx.translate(0, -top);
@@ -5345,6 +5349,25 @@ function drawBoardContent(ctx, data, width, top, height, { live = null, selected
       ctx.globalCompositeOperation = data.bg === "dark" ? "lighten" : "multiply";
       ctx.drawImage(image, item.x * width, item.y * width, item.w * width, item.h * width);
       ctx.restore();
+    }
+    if (item.source && badges) {
+      // Pastilla «p. N ↗» en la esquina: lleva a la zona original del PDF.
+      const label = `p. ${item.source.page} ↗`;
+      ctx.save();
+      ctx.font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
+      const bw = ctx.measureText(label).width + 16,
+        bh = 22;
+      const bx = Math.min((item.x + item.w) * width - bw - 4, width - bw - 6),
+        by = item.y * width + 4;
+      ctx.fillStyle = "#3b7cff";
+      ctx.beginPath();
+      ctx.roundRect?.(bx, by, bw, bh, 11) ?? ctx.rect(bx, by, bw, bh);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, bx + 8, by + bh / 2 + 0.5);
+      ctx.restore();
+      badges.push({ item, x: bx, y: by, w: bw, h: bh });
     }
     if (item.id === selected) {
       ctx.save();
@@ -5392,7 +5415,8 @@ function paintBoard() {
   ctx.fillStyle = BOARD_BACKGROUNDS[data.bg];
   ctx.fillRect(0, 0, width, height);
   drawBoardGrid(ctx, width, height, scroll.scrollTop, data);
-  drawBoardContent(ctx, data, width, scroll.scrollTop, height, { live: board.stroke, selected: board.selected });
+  board.badges = [];
+  drawBoardContent(ctx, data, width, scroll.scrollTop, height, { live: board.stroke, selected: board.selected, badges: board.badges });
   $("boardPane").dataset.bg = data.bg;
   $("boardEmpty").hidden = Boolean(data.strokes.length || data.items.length || board.stroke);
 }
@@ -5458,9 +5482,12 @@ function toggleBoard() {
 function boardLoadDocument() {
   board.data = null;
   board.images.clear();
+  // Se carga siempre: las zonas del PDF enlazadas a la pizarra se marcan
+  // aunque la pizarra esté cerrada.
+  if (currentBook) loadBoardData();
+  renderBoardLinks();
   if (!boardOpen()) return;
   if (!currentBook) return closeBoard();
-  loadBoardData();
   $("boardScroll").scrollTop = 0;
   renderBoardTools();
   refreshBoardHeight();
@@ -5468,6 +5495,8 @@ function boardLoadDocument() {
 }
 // Pega una imagen (un recorte del PDF o una imagen del portapapeles) en la
 // parte visible de la pizarra, debajo de lo que ya haya en pantalla.
+// Cada fuente es una imagen o { src, page, rect } si viene de un recorte del
+// PDF: entonces la imagen queda enlazada a su zona de origen.
 async function insertBoardImages(sources) {
   if (!sources.length) return;
   if (!boardOpen()) openBoard();
@@ -5475,10 +5504,12 @@ async function insertBoardImages(sources) {
   const width = scroll.clientWidth;
   const loaded = await Promise.all(
     sources.map(
-      (src) =>
+      (source) =>
         new Promise((resolve) => {
+          const src = typeof source === "string" ? source : source.src;
+          const origin = typeof source === "string" || !source.page ? null : { page: source.page, rect: source.rect };
           const image = new Image();
-          image.onload = () => resolve({ src, image });
+          image.onload = () => resolve({ src, image, origin });
           image.onerror = () => resolve(null);
           image.src = src;
         }),
@@ -5490,7 +5521,7 @@ async function insertBoardImages(sources) {
     board.images.set(entry.src, entry.image);
     const w = Math.min(0.9, Math.max(0.45, entry.image.naturalWidth / width));
     const h = (w * entry.image.naturalHeight) / entry.image.naturalWidth;
-    items.push({ id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, type: "image", src: entry.src, x: 0.05, y, w, h });
+    items.push({ id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, type: "image", src: entry.src, x: 0.05, y, w, h, ...(entry.origin ? { source: entry.origin } : {}) });
     y += h + 0.03;
   }
   if (!items.length) return toast("No se pudo pegar la imagen");
@@ -5499,11 +5530,21 @@ async function insertBoardImages(sources) {
   setBoardTool({ mode: "move" });
   toast(items.length > 1 ? `${items.length} recortes pegados en la pizarra` : "Recorte pegado en la pizarra");
 }
+function boardHasContent() {
+  return Boolean(board.data && (board.data.strokes.length || board.data.items.length));
+}
 async function exportBoardPng() {
+  if (!boardHasContent()) return toast("La pizarra está vacía");
+  const canvas = await renderBoardCanvas(1400);
+  canvas.toBlob((blob) => {
+    if (!blob) return toast("No se pudo crear la imagen");
+    downloadBlob(`${(currentBook?.name || "documento").replace(/\.(pdf|md|markdown)$/i, "")}-pizarra.png`, blob);
+  }, "image/png");
+}
+// La pizarra entera dibujada en un lienzo del ancho pedido.
+async function renderBoardCanvas(width, minHeight = 0) {
   const data = board.data;
-  if (!data || !(data.strokes.length || data.items.length)) return toast("La pizarra está vacía");
-  const width = 1400;
-  const height = Math.min(20000, Math.round((boardContentBottom() + 0.06) * width));
+  const height = Math.max(minHeight, Math.min(20000, Math.round((boardContentBottom() + 0.06) * width)));
   await Promise.all(
     data.items.map((item) => {
       const image = boardImage(item.src);
@@ -5518,10 +5559,7 @@ async function exportBoardPng() {
   ctx.fillRect(0, 0, width, height);
   drawBoardGrid(ctx, width, height, 0, data);
   drawBoardContent(ctx, data, width, 0, height);
-  canvas.toBlob((blob) => {
-    if (!blob) return toast("No se pudo crear la imagen");
-    downloadBlob(`${(currentBook?.name || "documento").replace(/\.(pdf|md|markdown)$/i, "")}-pizarra.png`, blob);
-  }, "image/png");
+  return canvas;
 }
 function boardItemAt(point) {
   for (let index = board.data.items.length - 1; index >= 0; index--) {
@@ -5554,6 +5592,16 @@ function bindBoard() {
     if (event.pointerType === "pen") {
       lastPenInput = Date.now();
       board.penSeen = true;
+    }
+    // La pastilla de un recorte enlazado lleva a su origen con cualquier herramienta.
+    const box = canvas.getBoundingClientRect();
+    const bx = event.clientX - box.left,
+      by = event.clientY - box.top + scroll.scrollTop;
+    const badge = (board.badges || []).find((entry) => bx >= entry.x && bx <= entry.x + entry.w && by >= entry.y && by <= entry.y + entry.h);
+    if (badge) {
+      event.preventDefault();
+      goToBoardSource(badge.item);
+      return;
     }
     canvas.setPointerCapture(event.pointerId);
     event.preventDefault();
@@ -5681,7 +5729,7 @@ function bindBoard() {
     if (data.boardDelete !== undefined) return deleteBoardSelection();
     if (data.boardCrop !== undefined) {
       const areas = captureAreas();
-      return areas.length ? insertBoardImages(areas.map((area) => area.image)) : openCapture({ toBoard: true });
+      return areas.length ? insertBoardImages(areas.map(areaBoardSource)) : openCapture({ toBoard: true });
     }
     if (data.boardBg !== undefined) {
       commitBoard((value) => (value.bg = value.bg === "dark" ? "light" : "dark"));
@@ -5701,6 +5749,12 @@ function bindBoard() {
     if (data.boardClose !== undefined) closeBoard();
   });
   $("boardBtn").onclick = toggleBoard;
+  $("viewer").addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-board-item]");
+    if (!button) return;
+    event.stopPropagation();
+    showBoardItem(button.dataset.boardItem);
+  });
   setIcon("boardBtn", "board");
   // Ctrl+Z y Supr actúan sobre la pizarra si fue lo último que se tocó.
   document.addEventListener("pointerdown", (event) => (board.focused = Boolean(event.target.closest?.("#boardPane"))), true);
@@ -5718,6 +5772,56 @@ function bindBoard() {
     refreshBoardHeight();
     paintBoard();
   });
+}
+function areaBoardSource(area) {
+  return { src: area.image, page: area.page, rect: area.rect };
+}
+// Del recorte de la pizarra a su zona en el PDF, que parpadea al llegar.
+async function goToBoardSource(item) {
+  if (!item?.source || !pdfDoc) return;
+  // En el móvil la pizarra ocupa toda la pantalla: se cierra para ver el PDF.
+  if (window.innerWidth < 760) closeBoard();
+  if (reflowMode) await setReadingMode("pdf");
+  await jumpToPage(item.source.page);
+  flashPdfRegion(item.source.page, item.source.rect);
+}
+function flashPdfRegion(page, rect, attempt = 0) {
+  const host = areaHost(page);
+  if (!host) {
+    if (attempt < 8) setTimeout(() => flashPdfRegion(page, rect, attempt + 1), 150);
+    return;
+  }
+  const flash = document.createElement("div");
+  flash.className = "source-flash";
+  Object.assign(flash.style, { left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.w * 100}%`, height: `${rect.h * 100}%` });
+  host.append(flash);
+  flash.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  setTimeout(() => flash.remove(), 1800);
+}
+// Marcas en el PDF sobre las zonas que están en la pizarra; su botón abre la
+// pizarra justo en ese recorte.
+function renderBoardLinks() {
+  document.querySelectorAll(".board-link-mark").forEach((node) => node.remove());
+  for (const item of board.data?.items || []) {
+    if (!item.source?.rect) continue;
+    const host = areaHost(item.source.page);
+    if (!host) continue;
+    const { rect } = item.source;
+    const mark = document.createElement("div");
+    mark.className = "board-link-mark";
+    Object.assign(mark.style, { left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.w * 100}%`, height: `${rect.h * 100}%` });
+    mark.innerHTML = `<button type="button" data-board-item="${escapeHtml(item.id)}" title="Ver en la pizarra" aria-label="Ver este fragmento en la pizarra">${iconSvg("board")}</button>`;
+    host.append(mark);
+  }
+}
+function showBoardItem(id) {
+  if (!boardOpen()) openBoard();
+  const item = board.data?.items.find((entry) => entry.id === id);
+  if (!item) return;
+  const scroll = $("boardScroll");
+  scroll.scrollTop = Math.max(0, item.y * scroll.clientWidth - 40);
+  board.selected = item.id;
+  setBoardTool({ mode: "move" });
 }
 function deleteBoardSelection() {
   if (!board.selected) return false;
@@ -6267,6 +6371,218 @@ function exportAnnotations() {
   );
   toast("Anotaciones exportadas");
 }
+// ---- PDF con las anotaciones dentro ----
+// Se escriben como anotaciones PDF estándar (Highlight, Underline, StrikeOut,
+// Squiggly, Ink, Square, Line y Text), con su apariencia dibujada, para que
+// Acrobat, Preview, Zotero, GoodNotes o el visor de Chrome las muestren y
+// permitan editarlas. La pizarra se añade como páginas al final.
+const PDF_LIB_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";
+let pdfLibLoading = null;
+function loadPdfLib() {
+  if (globalThis.PDFLib) return Promise.resolve(globalThis.PDFLib);
+  pdfLibLoading ||= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = PDF_LIB_URL;
+    script.onload = () => resolve(globalThis.PDFLib);
+    script.onerror = () => {
+      pdfLibLoading = null;
+      reject(new Error("No se pudo cargar pdf-lib (¿sin conexión?)"));
+    };
+    document.head.append(script);
+  });
+  return pdfLibLoading;
+}
+const pdfNum = (value) => String(Math.round(value * 100) / 100);
+const pdfPoints = (points) => points.map(pdfNum).join(" ");
+function pdfRgb(color) {
+  return (ANNOTATION_RGB[color] || ANNOTATION_RGB.yellow).map((value) => Math.round((value / 255) * 1000) / 1000);
+}
+function pdfDateString(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `D:${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`;
+}
+function boundsOf(points, pad = 0) {
+  const xs = points.map((point) => point[0]),
+    ys = points.map((point) => point[1]);
+  return [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad];
+}
+// Diccionario de la anotación (sin registrar) o null si no se puede exportar.
+function pdfAnnotationFor(lib, context, mark, toPdf, extra) {
+  const { PDFHexString } = lib;
+  const opacity = Math.max(0.1, Math.min(1, Number(mark.opacity) || (mark.type === "highlight" || mark.type === "note" ? 0.48 : 0.85)));
+  const color = pdfRgb(mark.type === "note" ? "blue" : mark.color);
+  const rgb = color.join(" ");
+  const appearance = (bbox, content, multiply = false) =>
+    context.register(
+      context.stream(content, {
+        Type: "XObject",
+        Subtype: "Form",
+        BBox: bbox,
+        Resources: { ExtGState: { GS0: { Type: "ExtGState", CA: opacity, ca: opacity, ...(multiply ? { BM: "Multiply" } : {}) } } },
+      }),
+    );
+  const base = { Type: "Annot", F: 4, C: color, CA: opacity, T: PDFHexString.fromText("Paper Reader"), M: PDFHexString.fromText(extra.date), NM: PDFHexString.fromText(`paper-reader-${mark.id}`) };
+  const note = String(mark.note || "").trim();
+  if (note) base.Contents = PDFHexString.fromText(note);
+  if (["highlight", "underline", "strike", "wavy", "note"].includes(mark.type)) {
+    const quads = (mark.rects || []).map((r) => [toPdf(r.x, r.y), toPdf(r.x + r.w, r.y), toPdf(r.x, r.y + r.h), toPdf(r.x + r.w, r.y + r.h)]);
+    if (!quads.length) return null;
+    const bbox = boundsOf(quads.flat(), 3);
+    let content = "/GS0 gs ";
+    if (mark.type === "highlight" || mark.type === "note") {
+      content += `${rgb} rg `;
+      for (const [ul, ur, ll, lr] of quads) content += `${pdfPoints(ul)} m ${pdfPoints(ur)} l ${pdfPoints(lr)} l ${pdfPoints(ll)} l h f `;
+    } else {
+      content += `${rgb} RG 1 J 1 j `;
+      for (const [ul, ur, ll, lr] of quads) {
+        const height = Math.hypot(ul[0] - ll[0], ul[1] - ll[1]) || 1;
+        const up = [(ul[0] - ll[0]) / height, (ul[1] - ll[1]) / height];
+        const at = (point, lift) => [point[0] + up[0] * lift, point[1] + up[1] * lift];
+        const width = Math.max(0.8, height * 0.075);
+        content += `${pdfNum(width)} w `;
+        if (mark.type === "strike") content += `${pdfPoints(at(ll, height * 0.45))} m ${pdfPoints(at(lr, height * 0.45))} l S `;
+        else if (mark.type === "underline") content += `${pdfPoints(at(ll, height * 0.06))} m ${pdfPoints(at(lr, height * 0.06))} l S `;
+        else {
+          const length = Math.hypot(lr[0] - ll[0], lr[1] - ll[1]);
+          const steps = Math.max(4, Math.round(length / (height * 0.18)));
+          for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const point = at([ll[0] + (lr[0] - ll[0]) * t, ll[1] + (lr[1] - ll[1]) * t], i % 2 ? height * 0.1 : 0);
+            content += `${pdfPoints(point)} ${i ? "l" : "m"} `;
+          }
+          content += "S ";
+        }
+      }
+    }
+    const subtype = { highlight: "Highlight", note: "Highlight", underline: "Underline", strike: "StrikeOut", wavy: "Squiggly" }[mark.type];
+    return { ...base, Subtype: subtype, Rect: bbox, QuadPoints: quads.flatMap(([ul, ur, ll, lr]) => [...ul, ...ur, ...ll, ...lr]), AP: { N: appearance(bbox, content, mark.type === "highlight" || mark.type === "note") } };
+  }
+  if ((mark.type === "pen" || mark.type === "arrow") && mark.points?.length > 1) {
+    const width = Math.max(0.5, Number(mark.width) || 3);
+    const points = mark.points.map((point) => toPdf(point.x, point.y));
+    const bbox = boundsOf(points, width + 6);
+    if (mark.type === "arrow") {
+      const [from, to] = [points[0], points.at(-1)];
+      const angle = Math.atan2(to[1] - from[1], to[0] - from[0]);
+      const head = (delta) => [to[0] - Math.cos(angle + delta) * width * 4, to[1] - Math.sin(angle + delta) * width * 4];
+      const content = `/GS0 gs ${rgb} RG 1 J 1 j ${pdfNum(width)} w ${pdfPoints(from)} m ${pdfPoints(to)} l S ${pdfPoints(head(0.45))} m ${pdfPoints(to)} l ${pdfPoints(head(-0.45))} l S`;
+      return { ...base, Subtype: "Line", Rect: bbox, L: [...from, ...to], LE: ["None", "OpenArrow"], BS: { W: width }, AP: { N: appearance(bbox, content) } };
+    }
+    const content = `/GS0 gs ${rgb} RG 1 J 1 j ${pdfNum(width)} w ${points.map((point, index) => `${pdfPoints(point)} ${index ? "l" : "m"}`).join(" ")} S`;
+    return { ...base, Subtype: "Ink", Rect: bbox, InkList: [points.flat()], BS: { W: width }, AP: { N: appearance(bbox, content) } };
+  }
+  if (mark.type === "box" && mark.rects?.length) {
+    const r = mark.rects[0];
+    const width = Math.max(0.5, Number(mark.width) || 2);
+    const [x0, y0, x1, y1] = boundsOf([toPdf(r.x, r.y), toPdf(r.x + r.w, r.y + r.h)]);
+    const bbox = [x0 - width, y0 - width, x1 + width, y1 + width];
+    const content = `/GS0 gs ${rgb} RG ${pdfNum(width)} w ${pdfNum(x0)} ${pdfNum(y0)} ${pdfNum(x1 - x0)} ${pdfNum(y1 - y0)} re S`;
+    return { ...base, Subtype: "Square", Rect: bbox, BS: { W: width }, AP: { N: appearance(bbox, content) } };
+  }
+  return null;
+}
+// Nota de texto (icono de comentario) en un punto de la página.
+function pdfTextNote(lib, point, text, color, id, date) {
+  const { PDFHexString } = lib;
+  return { Type: "Annot", Subtype: "Text", F: 4, Name: "Comment", Open: false, Rect: [point[0], point[1] - 20, point[0] + 20, point[1]], C: pdfRgb(color), Contents: PDFHexString.fromText(text), T: PDFHexString.fromText("Paper Reader"), M: PDFHexString.fromText(date), NM: PDFHexString.fromText(`paper-reader-${id}`) };
+}
+async function buildAnnotatedPdf({ includeBoard = true } = {}) {
+  const lib = await loadPdfLib();
+  const { PDFDocument, PDFName, PDFArray } = lib;
+  const record = currentBook.blob ? currentBook : await dbGet(currentBook.id);
+  const doc = await PDFDocument.load(new Uint8Array(await record.blob.arrayBuffer()), { ignoreEncryption: true, updateMetadata: false });
+  if (doc.isEncrypted) throw Object.assign(new Error("El PDF está cifrado"), { code: "encrypted" });
+  const context = doc.context;
+  const pages = doc.getPages();
+  const date = pdfDateString();
+  const add = (page, dict) => {
+    const ref = context.register(context.obj(dict));
+    const annots = page.node.lookup(PDFName.of("Annots"));
+    if (annots instanceof PDFArray) annots.push(ref);
+    else page.node.set(PDFName.of("Annots"), context.obj([ref]));
+  };
+  // Las que se importaron del propio PDF ya están en el archivo original.
+  const marks = annotations().filter((mark) => !String(mark.sourceId || "").startsWith("pdf:"));
+  const pageNotes = pageNotesStore();
+  const docNote = documentNote().trim();
+  const pageNumbers = new Set([...marks.map((mark) => mark.page), ...Object.keys(pageNotes).map(Number), ...(docNote ? [1] : [])]);
+  let count = 0;
+  for (const pageNumber of [...pageNumbers].sort((a, b) => a - b)) {
+    const page = pages[pageNumber - 1];
+    if (!page) continue;
+    const viewport = (await getCachedPage(pageNumber)).getViewport({ scale: 1, rotation });
+    const toPdf = (x, y) => viewport.convertToPdfPoint(x * viewport.width, y * viewport.height);
+    let margin = 0;
+    const marginPoint = () => toPdf(0.015, 0.02 + 0.035 * margin++);
+    for (const mark of marks.filter((item) => item.page === pageNumber)) {
+      let dict = null;
+      if (mark.type === "sticky") {
+        const text = String(mark.note || "").trim();
+        if (text) dict = pdfTextNote(lib, isPinned(mark) ? toPdf(mark.x, mark.y) : marginPoint(), text, mark.color || "yellow", mark.id, date);
+      } else dict = pdfAnnotationFor(lib, context, mark, toPdf, { date });
+      if (dict) {
+        add(page, dict);
+        count++;
+      }
+    }
+    const pageText = String(pageNotes[pageNumber]?.text || "").trim();
+    if (pageText) {
+      add(page, pdfTextNote(lib, marginPoint(), pageText, "yellow", `page-${pageNumber}`, date));
+      count++;
+    }
+    if (pageNumber === 1 && docNote) {
+      add(page, pdfTextNote(lib, toPdf(0.94, 0.02), `Nota del documento\n\n${docNote}`, "blue", "document", date));
+      count++;
+    }
+  }
+  let boardPages = 0;
+  if (includeBoard && boardHasContent()) {
+    const width = 1240,
+      sliceHeight = Math.round(width * Math.SQRT2);
+    const canvas = await renderBoardCanvas(width, sliceHeight);
+    for (let top = 0; top < canvas.height - 4; top += sliceHeight) {
+      const slice = document.createElement("canvas");
+      slice.width = width;
+      slice.height = sliceHeight;
+      const ctx = slice.getContext("2d");
+      ctx.fillStyle = BOARD_BACKGROUNDS[board.data.bg];
+      ctx.fillRect(0, 0, width, sliceHeight);
+      ctx.drawImage(canvas, 0, -top);
+      const image = await doc.embedJpg(await (await fetch(slice.toDataURL("image/jpeg", 0.88))).arrayBuffer());
+      const page = doc.addPage([595.28, 841.89]);
+      page.drawImage(image, { x: 0, y: 0, width: 595.28, height: 841.89 });
+      boardPages++;
+    }
+  }
+  return { bytes: await doc.save({ useObjectStreams: false }), count, boardPages };
+}
+async function exportAnnotatedPdf() {
+  if (!pdfDoc || !currentBook || currentBook.kind === "markdown") return toast("Abre un PDF primero");
+  showLoader(true, "Preparando el PDF anotado…", "Escribiendo las anotaciones en el documento");
+  try {
+    const { bytes, count, boardPages } = await buildAnnotatedPdf();
+    if (!count && !boardPages) return toast("Este documento no tiene anotaciones que guardar");
+    const name = `${currentBook.name.replace(/\.pdf$/i, "")}-anotado.pdf`;
+    const file = new File([bytes], name, { type: "application/pdf" });
+    const summary = `${count} ${count === 1 ? "anotación" : "anotaciones"}${boardPages ? ` y ${boardPages} página${boardPages === 1 ? "" : "s"} de pizarra` : ""}`;
+    // En el móvil se ofrece compartir (GoodNotes, Files, Drive…); si no, se descarga.
+    if (document.body.classList.contains("is-mobile") && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: name });
+        return toast(`PDF anotado listo: ${summary}`);
+      } catch (error) {
+        if (error?.name === "AbortError") return;
+      }
+    }
+    downloadBlob(name, file);
+    toast(`PDF anotado descargado: ${summary}`);
+  } catch (error) {
+    console.error("No se pudo crear el PDF anotado", error);
+    toast(error?.code === "encrypted" ? "Este PDF está protegido y no se puede modificar" : `No se pudo crear el PDF anotado: ${error.message || error}`);
+  } finally {
+    showLoader(false);
+  }
+}
 function exportMarkdown() {
   if (!currentBook) return toast("Abre un PDF primero");
   const lines = [
@@ -6552,16 +6868,17 @@ function commitAnnotations(items, record = true) {
   }
   setAnnotations(items);
 }
+const ANNOTATION_RGB = {
+  yellow: [255, 193, 7],
+  green: [46, 160, 88],
+  pink: [229, 72, 134],
+  blue: [47, 112, 224],
+  orange: [239, 123, 38],
+  purple: [137, 74, 204],
+  red: [218, 64, 64],
+};
 function annotationStyle(color, opacity) {
-  const rgb = {
-    yellow: "255,193,7",
-    green: "46,160,88",
-    pink: "229,72,134",
-    blue: "47,112,224",
-    orange: "239,123,38",
-    purple: "137,74,204",
-    red: "218,64,64",
-  }[color] || "255,193,7";
+  const rgb = (ANNOTATION_RGB[color] || ANNOTATION_RGB.yellow).join(",");
   const alpha = Number.isFinite(opacity) ? opacity : 0.48;
   return `rgba(${rgb},${alpha})`;
 }
@@ -6679,6 +6996,7 @@ function renderAnnotations() {
   const layer = $("annotationLayer");
   layer.innerHTML = "";
   renderAreaMarks();
+  renderBoardLinks();
   if (!currentBook) return;
   for (const mark of annotations().filter((a) => a.page === currentPage)) {
     if (mark.type === "sticky") continue;
@@ -7454,7 +7772,7 @@ async function cropPdfCapture(a, b) {
   } catch (error) {
     console.warn("Se usa la captura de pantalla del recorte", error);
   }
-  if (toBoard) return insertBoardImages([area.image]);
+  if (toBoard) return insertBoardImages([areaBoardSource(area)]);
   const areas = append ? [...captureAreas(), area].slice(-MAX_CAPTURE_AREAS) : [area];
   setAssistantContext({ kind: "image", areas });
   const anchor = areaHost(area.page)?.querySelector(`.area-mark[data-area="${area.id}"]`)?.getBoundingClientRect();
@@ -7615,7 +7933,7 @@ function bindPromptMenu(menu) {
     closePromptMenu();
     if (button.dataset.promptAction) return runAssistantAction(button.dataset.promptAction, context);
     if (button.dataset.promptAdd !== undefined) return openCapture({ append: true });
-    if (button.dataset.promptBoard !== undefined) return insertBoardImages(context.areas.map((area) => area.image));
+    if (button.dataset.promptBoard !== undefined) return insertBoardImages(context.areas.map(areaBoardSource));
     if (button.dataset.promptAsk !== undefined) openAssistant({ context });
   });
   menu.addEventListener("keydown", (event) => {
@@ -9475,6 +9793,7 @@ function mobileMoreItems() {
     { id: "read", icon: "volume", label: "Leer en voz alta", when: hasDoc, run: () => $("readAloudBtn").click() },
     { id: "study", icon: "check", label: "Estudiar", when: hasDoc, run: () => openStudy() },
     { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
+    { id: "pdf", icon: "download", label: "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
     { id: "focus", icon: "maximize", label: "Pantalla completa", when: hasDoc, run: toggleFocusMode },
   ].filter((item) => item.when !== false);
 }
@@ -9712,6 +10031,7 @@ $("viewer").addEventListener("wheel", (event) => {
 }, { passive: false });
 $("exportNotes").onclick = exportAnnotations;
 $("exportMarkdown").onclick = exportMarkdown;
+$("exportAnnotatedPdf").onclick = exportAnnotatedPdf;
 $("annotationImportInput").onchange = async (event) => {
   const [file] = event.target.files || [];
   if (file) await importAnnotationBackup(file);
