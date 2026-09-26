@@ -1620,6 +1620,10 @@ function renderPage(num, options = {}) {
 function updatePageChrome() {
   if (!pdfDoc) return;
   scheduleOcrCheck();
+  if (boardOpen() && boardFollowOn()) {
+    followBoardToPage(currentPage);
+    paintBoard();
+  }
   $("pageStatus").textContent = `Página ${currentPage} de ${pdfDoc.numPages}`;
   $("pageStatus").hidden = true;
   $("pageTotal").textContent = `de ${pdfDoc.numPages}`;
@@ -3398,6 +3402,7 @@ const ICONS = {
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
   board: '<rect x="3" y="3.5" width="18" height="13" rx="2"/><path d="M7 20.5 9.5 16.5M17 20.5l-2.5-4M7 12.5c1.5-3 3-3 4 0s2.5 3 4-1"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z"/>',
@@ -5628,7 +5633,7 @@ function drawBoardGrid(ctx, width, height, top, data) {
   }
   ctx.restore();
 }
-function drawBoardContent(ctx, data, width, top, height, { live = null, selected = null, badges = null } = {}) {
+function drawBoardContent(ctx, data, width, top, height, { live = null, selected = null, badges = null, labels = false } = {}) {
   const palette = BOARD_COLORS[data.bg];
   ctx.save();
   ctx.translate(0, -top);
@@ -5676,6 +5681,7 @@ function drawBoardContent(ctx, data, width, top, height, { live = null, selected
   }
   const from = top / width,
     to = (top + height) / width;
+  if (labels) drawBoardPageLabels(ctx, data, width, from, to);
   for (const stroke of live ? [...data.strokes, live] : data.strokes) {
     const [min, max] = stroke === live ? [-Infinity, Infinity] : strokeBounds(stroke);
     if (max < from - 0.05 || min > to + 0.05) continue;
@@ -5709,7 +5715,7 @@ function paintBoard() {
   ctx.fillRect(0, 0, width, height);
   drawBoardGrid(ctx, width, height, scroll.scrollTop, data);
   board.badges = [];
-  drawBoardContent(ctx, data, width, scroll.scrollTop, height, { live: board.stroke, selected: board.selected, badges: board.badges });
+  drawBoardContent(ctx, data, width, scroll.scrollTop, height, { live: board.stroke, selected: board.selected, badges: board.badges, labels: boardFollowOn() });
   $("boardPane").dataset.bg = data.bg;
   $("boardEmpty").hidden = Boolean(data.strokes.length || data.items.length || board.stroke);
 }
@@ -5730,7 +5736,7 @@ function renderBoardTools() {
     .map((name) => `<button type="button" class="bd-width" data-board-width="${name}" aria-pressed="${boardTool.width === name}" title="Grosor" aria-label="Grosor ${name}"><i style="--size:${BOARD_WIDTHS[name] * 1.6 + 1}px"></i></button>`)
     .join("")}</div><div class="bd-group">${button("data-board-undo", "back", "Deshacer (Ctrl+Z)")}${button("data-board-redo", "forward", "Rehacer (Ctrl+Shift+Z)")}${
     board.selected ? button("data-board-delete", "trash", "Quitar la imagen seleccionada (Supr)") : ""
-  }</div><div class="bd-group">${button("data-board-crop", "crop", "Recortar una zona del PDF y pegarla aquí")}<select class="bd-select" data-board-grid aria-label="Fondo">${Object.entries(BOARD_GRIDS)
+  }</div><div class="bd-group">${button("data-board-follow", "link", boardFollowOn() ? "Dejar de seguir la lectura" : "Seguir la lectura: mostrar los apuntes de la página que lees", boardFollowOn())}${button("data-board-crop", "crop", "Recortar una zona del PDF y pegarla aquí")}<select class="bd-select" data-board-grid aria-label="Fondo">${Object.entries(BOARD_GRIDS)
     .map(([id, label]) => `<option value="${id}" ${board.data.grid === id ? "selected" : ""}>${label}</option>`)
     .join("")}</select>${button("data-board-bg", board.data.bg === "dark" ? "sun" : "moon", board.data.bg === "dark" ? "Fondo claro" : "Fondo oscuro")}${button("data-board-export", "download", "Guardar como imagen PNG")}${button(
     "data-board-clear",
@@ -5814,7 +5820,7 @@ async function insertBoardImages(sources) {
     board.images.set(entry.src, entry.image);
     const w = Math.min(0.9, Math.max(0.45, entry.image.naturalWidth / width));
     const h = (w * entry.image.naturalHeight) / entry.image.naturalWidth;
-    items.push({ id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, type: "image", src: entry.src, x: 0.05, y, w, h, ...(entry.origin ? { source: entry.origin } : {}) });
+    items.push({ id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, type: "image", src: entry.src, x: 0.05, y, w, h, ...(entry.origin ? { source: entry.origin } : {}), ...(pdfDoc ? { pg: entry.origin?.page || currentPage } : {}) });
     y += h + 0.03;
   }
   if (!items.length) return toast("No se pudo pegar la imagen");
@@ -5923,7 +5929,8 @@ function bindBoard() {
       return;
     }
     const width = scroll.clientWidth;
-    board.stroke = { t: "pen", c: boardTool.color, w: (BOARD_WIDTHS[boardTool.width] * NOTE_INK_REF_WIDTH) / width, p: [point] };
+    // `pg`: la página que se estaba leyendo, para que la pizarra la siga.
+    board.stroke = { t: "pen", c: boardTool.color, w: (BOARD_WIDTHS[boardTool.width] * NOTE_INK_REF_WIDTH) / width, p: [point], ...(pdfDoc ? { pg: currentPage } : {}) };
     schedulePaintBoard();
   });
   canvas.addEventListener("pointermove", (event) => {
@@ -6029,6 +6036,13 @@ function bindBoard() {
       return renderBoardTools();
     }
     if (data.boardExport !== undefined) return exportBoardPng();
+    if (data.boardFollow !== undefined) {
+      kv.setItem("paper.board-follow", boardFollowOn() ? "0" : "1");
+      renderBoardTools();
+      paintBoard();
+      if (boardFollowOn()) followBoardToPage(currentPage, true);
+      return;
+    }
     if (data.boardClear !== undefined) {
       if (!board.data.strokes.length && !board.data.items.length) return;
       if (!confirm("¿Borrar todo lo escrito en la pizarra? Podrás deshacerlo mientras no cierres el documento.")) return;
@@ -6115,6 +6129,50 @@ function showBoardItem(id) {
   scroll.scrollTop = Math.max(0, item.y * scroll.clientWidth - 40);
   board.selected = item.id;
   setBoardTool({ mode: "move" });
+}
+// ---- La pizarra sigue la lectura ----
+function boardFollowOn() {
+  return kv.getItem("paper.board-follow") === "1";
+}
+// Primer punto (en unidades de ancho) de lo escrito o pegado para cada página.
+function boardPageAnchors(data = board.data) {
+  const anchors = new Map();
+  const note = (page, y) => page && (!anchors.has(page) || y < anchors.get(page)) && anchors.set(page, y);
+  for (const stroke of data?.strokes || []) note(stroke.pg, strokeBounds(stroke)[0]);
+  for (const item of data?.items || []) note(item.pg || item.source?.page, item.y);
+  return anchors;
+}
+function followBoardToPage(page, announce = false) {
+  if (!boardOpen() || !board.data || !boardFollowOn() || board.stroke) return;
+  const anchors = boardPageAnchors();
+  const status = $("boardStatus");
+  if (!anchors.has(page)) {
+    if (status) status.textContent = `Sin apuntes de la p. ${page}`;
+    // Página nueva: se deja sitio libre debajo de lo último para empezar.
+    if (announce) toast(`Aún no hay apuntes de la página ${page}: lo que escribas quedará unido a ella`);
+    return;
+  }
+  const scroll = $("boardScroll");
+  scroll.scrollTo({ top: Math.max(0, anchors.get(page) * scroll.clientWidth - 36), behavior: "smooth" });
+  if (status) status.textContent = `Apuntes de la p. ${page}`;
+}
+// Etiquetas «p. N» en el margen, donde empiezan los apuntes de cada página.
+function drawBoardPageLabels(ctx, data, width, from, to) {
+  ctx.save();
+  ctx.font = "600 11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textBaseline = "top";
+  for (const [page, y] of boardPageAnchors(data)) {
+    if (y < from - 0.05 || y > to) continue;
+    const label = `p. ${page}`;
+    const w = ctx.measureText(label).width + 12;
+    ctx.fillStyle = page === currentPage ? "#3b7cff" : data.bg === "dark" ? "rgba(255,255,255,.14)" : "rgba(0,0,0,.08)";
+    ctx.beginPath();
+    ctx.roundRect?.(width - w - 8, y * width, w, 18, 9) ?? ctx.rect(width - w - 8, y * width, w, 18);
+    ctx.fill();
+    ctx.fillStyle = page === currentPage ? "#fff" : data.bg === "dark" ? "#c9ced8" : "#555";
+    ctx.fillText(label, width - w - 2, y * width + 3.5);
+  }
+  ctx.restore();
 }
 function deleteBoardSelection() {
   if (!board.selected) return false;

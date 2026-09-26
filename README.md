@@ -81,6 +81,13 @@ Incluye:
 - **Pizarra enlazada al PDF** (al estilo LiquidText): cada recorte que pegas en la pizarra recuerda su página y su zona. Su pastilla «p. N ↗» te lleva al original, que parpadea al llegar; y en el PDF, las zonas que tienes en la pizarra llevan una marca que abre la pizarra justo en ese recorte.
 - **PDF anotado** (barra lateral → Portabilidad → «⇩ PDF anotado», la paleta o «Más» en el móvil): guarda una copia del PDF con tus anotaciones dentro como anotaciones PDF estándar y editables (resaltado, subrayado, tachado, ondulado, trazos, recuadros, flechas y notas con su texto), que se ven en Acrobat, Preview, Zotero, GoodNotes o el visor de Chrome. La pizarra se añade como páginas al final. En el móvil se ofrece compartir el archivo directamente. Todo ocurre en el dispositivo; el PDF original no se modifica.
 
+### Novedades v10 (todo gratis, sin API)
+
+- **Motor de IA a elegir** (pulsa el indicador bajo «Asistente»): Ligero (Llama 3.2 1B, 0,9 GB), Equilibrado (Qwen 3.5 2B, 2,2 GB), Avanzado (Qwen 3.5 4B, 3,9 GB) o Máximo (Qwen 3.5 9B, 6,4 GB), todos dentro del navegador; o **tu ordenador** con Ollama o LM Studio, con un modelo de texto y otro visual para recortes de fórmulas. Nada sale del dispositivo y no hay coste por uso.
+- **OCR de PDFs escaneados**: en una página sin texto aparece «Reconocer texto»; también para todo el documento. Tesseract (español e inglés) funciona en el navegador y crea una capa de texto invisible: ya se puede seleccionar, resaltar, buscar, escuchar y preguntar a la IA sobre libros y apuntes escaneados.
+- **Resultados y notación** (Contenido): lista de teoremas, lemas, definiciones…, de las ecuaciones numeradas y de los símbolos que define el texto («Let λ be…», «Sea n…», «Denotamos por…»), con vista previa y salto directo.
+- **La pizarra sigue tu lectura**: lo que escribes queda unido a la página que lees; con «Seguir la lectura» la pizarra se desplaza sola a tus apuntes de cada página y los marca con «p. N».
+
 ### Pruebas
 
 ```bash
