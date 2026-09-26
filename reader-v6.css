@@ -178,3 +178,54 @@ body.reader-chrome-hidden .board-pane { top: 0; }
   .board-pane .split-resizer { display: none; }
   body.board-open .viewer { margin-right: 0; }
 }
+
+/* ---- v7: móvil ---- */
+/* Zona segura: con la app instalada la barra de estado es translúcida y la
+   cabecera quedaba debajo del notch y la hora. La altura de la cabecera
+   incluye ahora ese margen (y todo lo que se coloca bajo ella lo hereda). */
+html.ui4 { --safe-top: env(safe-area-inset-top, 0px); --safe-bottom: env(safe-area-inset-bottom, 0px); --paper-topbar: calc(56px + var(--safe-top)); }
+html.ui4 .toolbar { padding-top: var(--safe-top) !important; padding-left: max(12px, env(safe-area-inset-left)) !important; padding-right: max(12px, env(safe-area-inset-right)) !important; }
+html.ui4 body.reader-chrome-hidden .viewer { padding-top: max(16px, var(--safe-top)) !important; }
+.board-head { padding-top: max(6px, env(safe-area-inset-top)); }
+
+/* Modo inmersivo: un toque oculta las dos barras, no solo la de arriba. */
+html.ui4 body.reader-chrome-hidden .footer { display: none !important; }
+
+/* Pie contraído: una pastilla con la página actual que se expande al tocarla. */
+html.ui4 .footer.footer-minimized { width: auto !important; min-width: 0 !important; height: 40px !important; padding: 0 4px !important; border-radius: 999px !important; gap: 0 !important; }
+html.ui4 .footer.footer-minimized > :not(.right) { display: none !important; }
+html.ui4 .footer.footer-minimized > .right { display: flex !important; width: auto !important; height: auto !important; padding: 0 !important; margin: 0 !important; border: 0 !important; gap: 0 !important; }
+html.ui4 .footer.footer-minimized > .right > [id]:not(#footerCollapse), html.ui4 .footer.footer-minimized > .right > :not(.footer-collapse) { display: none !important; }
+html.ui4 .footer.footer-minimized { min-height: 0 !important; }
+html.ui4 .footer.footer-minimized > .right::before, html.ui4 .footer.footer-minimized > .right::after { display: none !important; }
+html.ui4 .footer.footer-minimized .footer-collapse { width: auto !important; min-width: 40px !important; height: 34px !important; min-height: 34px !important; padding: 0 10px !important; gap: 6px; display: inline-flex !important; align-items: center; border-radius: 999px !important; color: var(--text) !important; font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.footer-mini-page { display: none; }
+html.ui4 .footer.footer-minimized .footer-mini-page:not(:empty) { display: inline; }
+
+/* Botón «Más» y su hoja de herramientas: solo en móvil. */
+html.ui4 .toolbar .mobile-more-btn { display: none !important; }
+.mobile-more[hidden] { display: none; }
+.mobile-more { position: fixed; z-index: 180; inset: 0; }
+.mm-backdrop { position: absolute; inset: 0; background: rgba(12, 15, 22, .38); }
+.mm-sheet { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px max(12px, env(safe-area-inset-left)) max(14px, var(--safe-bottom, 0px)) max(12px, env(safe-area-inset-right)); border-radius: 20px 20px 0 0; background: var(--surface-solid); color: var(--text); box-shadow: 0 -12px 40px rgba(0, 0, 0, .18); transform: translateY(100%); transition: transform .2s ease; }
+.mobile-more.is-open .mm-sheet { transform: none; }
+.mm-grip { width: 38px; height: 4px; margin: 2px auto 10px; border-radius: 99px; background: var(--line); }
+.mm-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.mm-grid button { min-height: 76px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: 8px 4px; border: 0; border-radius: 14px; background: transparent; color: var(--text); font: 500 12px/1.2 inherit; text-align: center; cursor: pointer; }
+.mm-grid button:active { background: var(--soft); }
+.mm-grid button .ui-icon { width: 22px; height: 22px; }
+.mm-grid button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft, var(--soft)); }
+
+@media (max-width: 700px) {
+  html.ui4 { --paper-topbar: calc(54px + var(--safe-top)); }
+  html.ui4 .toolbar { padding-left: max(6px, env(safe-area-inset-left)) !important; padding-right: max(6px, env(safe-area-inset-right)) !important; }
+  html.ui4 .toolbar .mobile-more-btn { display: grid !important; place-items: center; }
+  /* Sin documento, el pie (páginas y zoom) y los atajos de teclado sobran. */
+  body:not(.has-doc) .footer, #emptyState p[style] { display: none !important; }
+  /* Las hojas inferiores ocupan todo el ancho, sin hueco a la derecha. */
+  html.ui4 .assistant { max-width: none !important; }
+  /* Con una hoja abierta (asistente, notas, pizarra) el pie estorba debajo. */
+  body.assistant-open .footer, body.notebook-open .footer, body.board-open .footer { display: none !important; }
+  /* El pie contraído se aparta a la esquina para no tapar el texto. */
+  html.ui4 .footer.footer-minimized { left: auto !important; right: max(12px, env(safe-area-inset-right)) !important; transform: none !important; }
+}

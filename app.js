@@ -1619,6 +1619,7 @@ function updatePageChrome() {
   updateBookmarkButton();
   $("pageJump").value = currentPage;
   $("pageJump").max = pdfDoc.numPages;
+  updateFooterMini();
   $("pageJump").hidden = false;
   $("toolbarPage").value = currentPage;
   $("toolbarPage").max = pdfDoc.numPages;
@@ -3194,6 +3195,7 @@ const ICONS = {
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
   board: '<rect x="3" y="3.5" width="18" height="13" rx="2"/><path d="M7 20.5 9.5 16.5M17 20.5l-2.5-4M7 12.5c1.5-3 3-3 4 0s2.5 3 4-1"/>',
+  more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z"/>',
   download: '<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
@@ -9346,9 +9348,82 @@ $("shortcutsPanel").addEventListener("pointerdown", (event) => {
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   kv.setItem("paper.theme", theme);
+  syncThemeColor();
   $("themeSelect").value = theme;
   $("appearanceTheme").value = theme;
   document.querySelectorAll("[data-theme-choice]").forEach((button) => button.classList.toggle("active", button.dataset.themeChoice === theme));
+}
+// ---- Menú «Más» del móvil ----
+// La cabecera del móvil solo muestra buscar, IA, Ink y Vista; el resto de
+// herramientas que en escritorio están en la barra se abren desde aquí.
+function mobileMoreItems() {
+  const hasDoc = Boolean(currentBook);
+  const hasPdf = Boolean(pdfDoc);
+  const marked = hasDoc && getJSON(key(currentBook.id, "bookmarks"), []).includes(currentPage);
+  return [
+    { id: "library", icon: "library", label: "Biblioteca", run: () => $("homeBtn").click() },
+    { id: "notes", icon: "notebook", label: "Cuaderno", when: hasDoc, run: toggleNotebook },
+    { id: "board", icon: "board", label: "Pizarra", when: hasDoc, active: boardOpen(), run: toggleBoard },
+    { id: "crop", icon: "crop", label: "Recortar para IA", when: hasPdf, run: () => openCapture() },
+    { id: "sticky", icon: "sticky", label: "Nota en la página", when: hasPdf, run: () => setStickyPlacement(true) },
+    { id: "bookmark", icon: "bookmark", label: marked ? "Quitar marcador" : "Marcar página", when: hasDoc, active: marked, run: toggleBookmark },
+    { id: "read", icon: "volume", label: "Leer en voz alta", when: hasDoc, run: () => $("readAloudBtn").click() },
+    { id: "study", icon: "check", label: "Estudiar", when: hasDoc, run: () => openStudy() },
+    { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
+    { id: "focus", icon: "maximize", label: "Pantalla completa", when: hasDoc, run: toggleFocusMode },
+  ].filter((item) => item.when !== false);
+}
+function openMobileMore() {
+  let sheet = $("mobileMore");
+  if (!sheet) {
+    sheet = document.createElement("div");
+    sheet.id = "mobileMore";
+    sheet.className = "mobile-more";
+    document.body.append(sheet);
+    sheet.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-mm]");
+      if (event.target.closest("[data-mm-close]") || button) closeMobileMore();
+      if (button) mobileMoreItems().find((item) => item.id === button.dataset.mm)?.run();
+    });
+  }
+  sheet.innerHTML = `<div class="mm-backdrop" data-mm-close></div><section class="mm-sheet" role="menu" aria-label="Más herramientas"><div class="mm-grip" aria-hidden="true"></div><div class="mm-grid">${mobileMoreItems()
+    .map((item) => `<button type="button" role="menuitem" data-mm="${item.id}"${item.active ? ' aria-pressed="true"' : ""}>${iconSvg(item.icon)}<span>${item.label}</span></button>`)
+    .join("")}</div></section>`;
+  sheet.hidden = false;
+  requestAnimationFrame(() => sheet.classList.add("is-open"));
+  $("mobileMoreBtn")?.setAttribute("aria-expanded", "true");
+}
+function closeMobileMore() {
+  const sheet = $("mobileMore");
+  if (!sheet || sheet.hidden) return false;
+  sheet.classList.remove("is-open");
+  sheet.hidden = true;
+  $("mobileMoreBtn")?.setAttribute("aria-expanded", "false");
+  return true;
+}
+function configureMobileMore() {
+  const actions = document.querySelector(".toolbar-actions");
+  if (!actions || $("mobileMoreBtn")) return;
+  const button = document.createElement("button");
+  button.id = "mobileMoreBtn";
+  button.type = "button";
+  button.className = "btn icon mobile-more-btn";
+  button.title = "Más herramientas";
+  button.setAttribute("aria-label", button.title);
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  setIcon(button, "more");
+  button.onclick = () => ($("mobileMore") && !$("mobileMore").hidden ? closeMobileMore() : openMobileMore());
+  actions.append(button);
+}
+// La barra de estado del móvil toma el color de la cabecera del tema activo.
+function syncThemeColor() {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) return;
+  requestAnimationFrame(() => {
+    const color = getComputedStyle(document.querySelector(".toolbar") || document.body).backgroundColor;
+    if (color && color !== "rgba(0, 0, 0, 0)") meta.content = color;
+  });
 }
 $("themeSelect").onchange = (e) => setTheme(e.target.value);
 $("appearanceTheme").onchange = (e) => setTheme(e.target.value);
@@ -9451,6 +9526,8 @@ document.addEventListener("webkitfullscreenchange", syncFullscreenState);
 // (un toque no selecciona); con el ratón, solo fuera del texto, para no
 // estorbar al seleccionar.
 let paperTap = null;
+let viewerScrolledAt = 0;
+$("viewer").addEventListener("scroll", () => (viewerScrolledAt = performance.now()), { passive: true });
 $("viewer").addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || document.body.classList.contains("ink-drawing-mode") || !currentBook) return;
   paperTap = { id: event.pointerId, x: event.clientX, y: event.clientY, time: performance.now(), selection: window.getSelection()?.toString() || "" };
@@ -9469,6 +9546,9 @@ $("viewer").addEventListener("pointerup", (event) => {
   if (!event.target.closest("#canvasWrap, #facingWrap, #continuousView, #reflowReader, #viewer")) return;
   // Un toque que cierra una selección no alterna la interfaz.
   if (tap.selection.trim()) return;
+  // Ni el que detiene un desplazamiento con inercia: en el móvil se tocaba
+  // para frenar el scroll y la cabecera desaparecía sin querer.
+  if (touch && viewerScrolledAt > tap.time - 250) return;
   setTimeout(() => {
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.toString().trim()) return;
@@ -9713,6 +9793,11 @@ function configureResponsiveUi() {
   syncViewport();
   window.addEventListener("resize", syncViewport, { passive: true });
 }
+// Con el pie contraído queda una pastilla con la página actual.
+function updateFooterMini() {
+  const label = document.querySelector("#footerCollapse .footer-mini-page");
+  if (label) label.textContent = pdfDoc ? `${currentPage} / ${pdfDoc.numPages}` : "";
+}
 function configureFooterIsland() {
   const footer = document.querySelector(".footer");
   if (!footer || $("footerCollapse")) return;
@@ -9725,8 +9810,11 @@ function configureFooterIsland() {
   (footer.querySelector(".right") || footer).append(collapse);
   const setMinimized = (minimized) => {
     footer.classList.toggle("footer-minimized", minimized);
+    document.body.classList.toggle("footer-is-minimized", minimized);
     kv.setItem("paper.footer-minimized", String(minimized));
     setIcon(collapse, minimized ? "chevronUp" : "chevronDown");
+    collapse.insertAdjacentHTML("afterbegin", '<span class="footer-mini-page"></span>');
+    updateFooterMini();
     collapse.title = minimized ? "Expandir navegador de páginas" : "Contraer navegador de páginas";
     collapse.setAttribute("aria-label", collapse.title);
   };
@@ -9890,6 +9978,7 @@ window.addEventListener("keydown", (e) => {
     closeCapture();
     return;
   }
+  if (e.key === "Escape" && closeMobileMore()) return;
   if (e.key === "Escape" && $("promptMenu") && !$("promptMenu").hidden) {
     closePromptMenu();
     return;
@@ -10207,6 +10296,7 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
   bindSplitView();
   bindBoard();
   configureFooterIsland();
+  configureMobileMore();
   configureResponsiveUi();
   setTheme(kv.getItem("paper.theme") || "light");
   setUiScale(Number(kv.getItem("paper.ui-scale") || 1));
