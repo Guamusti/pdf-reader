@@ -225,7 +225,7 @@ html.ui4 .toolbar .mobile-more-btn { display: none !important; }
   /* Las hojas inferiores ocupan todo el ancho, sin hueco a la derecha. */
   html.ui4 .assistant { max-width: none !important; }
   /* Con una hoja abierta (asistente, notas, pizarra) el pie estorba debajo. */
-  body.assistant-open .footer, body.notebook-open .footer, body.board-open .footer { display: none !important; }
+  body.assistant-open:not(.assistant-minimized) .footer, body.notebook-open .footer, body.board-open .footer { display: none !important; }
   /* El pie contraído se aparta a la esquina para no tapar el texto. */
   html.ui4 .footer.footer-minimized { left: auto !important; right: max(12px, env(safe-area-inset-right)) !important; transform: none !important; }
 }
@@ -295,3 +295,28 @@ body.reader-chrome-hidden .ocr-chip { top: max(10px, env(safe-area-inset-top)); 
 .structure-item.is-notation .structure-text { grid-column: 2; -webkit-line-clamp: 2; }
 .structure-item .structure-page { grid-column: 3; grid-row: 1; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .structure-symbol { font-family: "Latin Modern Math", "Cambria Math", "STIX Two Math", serif; font-size: 14px; font-style: italic; }
+
+/* ---- Asistente minimizado: un cuadradito flotante ---- */
+html.ui4 .assistant.is-minimized {
+  left: auto !important; top: auto !important;
+  right: max(16px, env(safe-area-inset-right)) !important;
+  bottom: calc(max(14px, env(safe-area-inset-bottom)) + 72px) !important;
+  width: 52px !important; height: 52px !important; min-width: 0 !important; min-height: 0 !important; max-width: none !important;
+  display: grid !important; place-items: center; padding: 0 !important; overflow: visible;
+  border-radius: 16px !important; resize: none !important; cursor: pointer;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .22) !important;
+  transition: transform .15s ease;
+}
+html.ui4 .assistant.is-minimized:hover { transform: translateY(-2px); }
+html.ui4 .assistant.is-minimized:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+html.ui4 .assistant.is-minimized > :not(.as-head) { display: none !important; }
+html.ui4 .assistant.is-minimized .as-head { display: grid !important; place-items: center; width: 100%; height: 100%; margin: 0 !important; padding: 0 !important; border: 0 !important; cursor: pointer; }
+html.ui4 .assistant.is-minimized .as-head::before, html.ui4 .assistant.is-minimized .as-head::after { display: none !important; }
+html.ui4 .assistant.is-minimized .as-head { grid-template-columns: 1fr !important; grid-template-rows: 1fr !important; justify-items: center !important; align-items: center !important; }
+html.ui4 .assistant.is-minimized .as-title { margin: 0 !important; padding: 0 !important; justify-self: center !important; align-self: center !important; }
+html.ui4 .assistant.is-minimized .as-head > :not(.as-title), html.ui4 .assistant.is-minimized .as-title > :not(.as-spark) { display: none !important; }
+html.ui4 .assistant.is-minimized .as-title { display: grid; place-items: center; gap: 0; }
+html.ui4 .assistant.is-minimized .as-spark { width: 36px; height: 36px; border-radius: 11px; }
+/* Punto de aviso: ha llegado una respuesta mientras estaba minimizado. */
+html.ui4 .assistant.is-minimized.has-unread::after { content: ""; position: absolute; top: -3px; right: -3px; width: 12px; height: 12px; border: 2px solid var(--surface-solid); border-radius: 50%; background: #e5484d; }
+body.footer-is-minimized .assistant.is-minimized, body.reader-chrome-hidden .assistant.is-minimized { bottom: calc(max(14px, env(safe-area-inset-bottom)) + 58px) !important; }

@@ -8529,11 +8529,19 @@ function saveAssistantGeometry() {
     height: panel.classList.contains("is-minimized") ? saved.height : Math.round(box.height),
   });
 }
+// Minimizado, el asistente queda como un cuadradito con el icono ✦ en la
+// esquina; un punto avisa de que ha llegado una respuesta.
 function setAssistantMinimized(minimized) {
   const panel = $("assistantPanel");
   panel.classList.toggle("is-minimized", minimized);
+  document.body.classList.toggle("assistant-minimized", minimized);
+  if (!minimized) panel.classList.remove("has-unread");
   setIcon("assistantMinimize", minimized ? "chevronUp" : "minus");
   $("assistantMinimize").title = minimized ? "Restaurar" : "Minimizar";
+  panel.title = minimized ? "Abrir el asistente" : "";
+  if (minimized) panel.tabIndex = 0;
+  else panel.removeAttribute("tabindex");
+  panel.setAttribute("aria-label", minimized ? "Asistente minimizado: pulsa para abrirlo" : "Asistente");
   applyAssistantGeometry();
 }
 function openAssistant(options = {}) {
@@ -8561,7 +8569,7 @@ function openAssistant(options = {}) {
 function closeAssistant() {
   assistantAbort?.abort();
   $("assistantPanel").hidden = true;
-  document.body.classList.remove("assistant-open");
+  document.body.classList.remove("assistant-open", "assistant-minimized");
   setAssistantButton(false);
 }
 function toggleAssistant() {
@@ -9212,6 +9220,7 @@ async function sendAssistant({ action = "ask", question = "", request = null } =
     assistantAbort = null;
     aiStatus("");
     saveAssistantThread();
+    if ($("assistantPanel").classList.contains("is-minimized")) $("assistantPanel").classList.add("has-unread");
     renderAssistant();
   }
 }
@@ -9355,7 +9364,7 @@ function bindAssistant() {
   let drag = null;
   const handle = $("assistantDragHandle");
   handle.addEventListener("pointerdown", (event) => {
-    if (event.target.closest("button, #assistantModel") || window.innerWidth <= 700) return;
+    if (event.target.closest("button, #assistantModel") || window.innerWidth <= 700 || panel.classList.contains("is-minimized")) return;
     const box = panel.getBoundingClientRect();
     drag = { id: event.pointerId, dx: event.clientX - box.left, dy: event.clientY - box.top };
     handle.setPointerCapture(event.pointerId);
@@ -9375,7 +9384,20 @@ function bindAssistant() {
   handle.addEventListener("pointerup", endDrag);
   handle.addEventListener("pointercancel", endDrag);
   handle.addEventListener("dblclick", (event) => {
-    if (!event.target.closest("button")) setAssistantMinimized(!panel.classList.contains("is-minimized"));
+    if (!event.target.closest("button") && !panel.classList.contains("is-minimized")) setAssistantMinimized(true);
+  });
+  // El cuadradito minimizado se abre con un toque (o Enter).
+  panel.addEventListener("click", (event) => {
+    if (!panel.classList.contains("is-minimized")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setAssistantMinimized(false);
+  }, true);
+  panel.addEventListener("keydown", (event) => {
+    if (panel.classList.contains("is-minimized") && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      setAssistantMinimized(false);
+    }
   });
   let resizeTimer = 0;
   new ResizeObserver(() => {
