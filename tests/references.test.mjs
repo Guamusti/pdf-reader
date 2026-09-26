@@ -100,3 +100,30 @@ test("identificadores y exportación", () => {
   const csl = metaFromCsl({ title: "Longformer", author: [{ family: "Beltagy", given: "Iz" }], issued: { "date-parts": [[2020]] }, DOI: "10.48550/arXiv.2004.05150", "container-title": "arXiv" });
   assert.match(toBibtex(csl), /author = \{Beltagy, Iz\}/);
 });
+
+test("referencias internas: ecuaciones, enunciados y secciones", async () => {
+  const { anchorScore, anchorProbe } = await import("../references.js");
+  assert.deepEqual(
+    ["by (6.1) we get", "as in Eq. (3) above", "see Theorem 2.3 and", "by Thm. 4.1b,", "el Lema 3 dice", "in Section 3.2 we", "§4 shows"].map((text) => {
+      const hit = citationAt(text, text.search(/\d/));
+      return [hit.kind, hit.number, hit.word || ""];
+    }),
+    [["equation", "6.1", ""], ["equation", "3", ""], ["statement", "2.3", "theorem"], ["statement", "4.1b", "theorem"], ["statement", "3", "lemma"], ["section", "3.2", ""], ["section", "4", ""]],
+  );
+  // Un año entre paréntesis sigue siendo una cita de autor, no una ecuación.
+  assert.equal(citationAt("Smith (2019) show", 8).kind, "author");
+  const eq = { kind: "equation", number: "6.1" };
+  assert.ok(anchorScore(eq, "dim(V λ ) = n! / ∏ h(i,j) (6.1)") > anchorScore(eq, "(6.1)"));
+  assert.ok(anchorScore(eq, "(6.1)") > anchorScore(eq, "as shown in the formula (6.1)"));
+  assert.equal(anchorScore(eq, "by (6.1) we get"), 0);
+  const theorem = { kind: "statement", word: "theorem", number: "2.3" };
+  assert.ok(anchorScore(theorem, "Theorem 2.3. Let G be a finite group"));
+  assert.ok(anchorScore(theorem, "Theorem 2.3 (Frobenius). Let"));
+  assert.equal(anchorScore(theorem, "By Theorem 2.3 we have"), 0);
+  assert.equal(anchorScore(theorem, "Theorem 2.31. Let"), 0);
+  assert.equal(anchorScore(theorem, "Lemma 2.3. Let"), 0);
+  const section = { kind: "section", number: "3.2" };
+  assert.ok(anchorScore(section, "3.2 Hook lengths"));
+  assert.equal(anchorScore(section, "In 3.2 we saw"), 0);
+  assert.ok(anchorProbe(theorem).test("… Thm. 2.3 …"));
+});

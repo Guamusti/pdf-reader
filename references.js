@@ -181,7 +181,8 @@ export function citationAt(text, offset = null) {
     { kind: "author", re: /([\p{Lu}][\p{L}'’-]+)(?:\s+et\s+al\.?|\s+(?:and|&|y)\s+[\p{Lu}][\p{L}'’-]+)?(?:,\s*|\s+\()(\d{4})[a-z]?\b/gu },
   ];
   let best = null;
-  for (const { kind, re } of patterns) {
+  const all = [...patterns, ...STRUCTURE_PATTERNS];
+  for (const { kind, re } of all) {
     for (const match of text.matchAll(re)) {
       const start = match.index,
         end = start + match[0].length;
@@ -198,10 +199,80 @@ export function citationAt(text, offset = null) {
         });
         best = { kind, numbers, label: match[0], distance };
       } else if (kind === "author") best = { kind, surname: match[1], year: match[2], label: match[0], distance };
+      else if (kind === "equation") best = { kind, number: match[1] || match[2], label: match[0], distance };
+      else if (kind === "statement") best = { kind, word: canonicalStatement(match[1]), number: match[2], label: match[0], distance };
+      else if (kind === "section") best = { kind, number: match[1], label: match[0], distance };
       else best = { kind, number: match[2], word: match[1], label: match[0], distance };
     }
   }
   return best;
+}
+
+// ---- Referencias internas de artículos matemáticos ----
+// «(6.1)», «Eq. 3», «Theorem 2.3», «Lema 4», «Section 3.2»: se localiza el
+// enunciado o la ecuación en el propio documento (como hace Sioyek).
+const STATEMENT_WORDS = {
+  theorem: ["Theorem", "Thm", "Teorema"],
+  lemma: ["Lemma", "Lem", "Lema"],
+  proposition: ["Proposition", "Prop", "Proposición", "Proposicion"],
+  corollary: ["Corollary", "Cor", "Corolario"],
+  definition: ["Definition", "Def", "Definición", "Definicion"],
+  remark: ["Remark", "Rem", "Observación", "Observacion", "Nota"],
+  example: ["Example", "Ejemplo"],
+  conjecture: ["Conjecture", "Conjetura"],
+  claim: ["Claim", "Afirmación"],
+  exercise: ["Exercise", "Ejercicio", "Problem", "Problema"],
+  algorithm: ["Algorithm", "Algoritmo"],
+  assumption: ["Assumption", "Hypothesis", "Hipótesis", "Supuesto"],
+};
+export const STATEMENT_LABELS = {
+  theorem: "Teorema", lemma: "Lema", proposition: "Proposición", corollary: "Corolario", definition: "Definición", remark: "Observación",
+  example: "Ejemplo", conjecture: "Conjetura", claim: "Afirmación", exercise: "Ejercicio", algorithm: "Algoritmo", assumption: "Hipótesis",
+};
+const STATEMENT_ALTERNATION = Object.values(STATEMENT_WORDS).flat().sort((a, b) => b.length - a.length).join("|");
+const NUMBER = "\\d{1,3}(?:\\.\\d{1,3}){0,3}[a-z]?";
+const STRUCTURE_PATTERNS = [
+  // Ecuación con palabra («Eq. (3)», «ecuación 2.4») o solo entre paréntesis
+  // («(6.1)»); cuatro cifras seguidas serían un año, no una ecuación.
+  { kind: "equation", re: new RegExp(`\\b(?:Eqs?\\.?|Equations?|Eqn\\.?|ecuaci[oó]n(?:es)?)\\s*\\(?(${NUMBER})\\)?|\\((${NUMBER})\\)`, "gi") },
+  { kind: "statement", re: new RegExp(`\\b(${STATEMENT_ALTERNATION})s?\\.?\\s*(${NUMBER})\\b`, "g") },
+  { kind: "section", re: new RegExp(`(?:\\b(?:Sections?|Secci[oó]n(?:es)?|Secs?\\.|Chapter|Cap[ií]tulo)|§)\\s*(${NUMBER})\\b`, "gi") },
+];
+function canonicalStatement(word) {
+  const clean = String(word).replace(/\.$/, "").toLowerCase();
+  return Object.keys(STATEMENT_WORDS).find((key) => STATEMENT_WORDS[key].some((alias) => alias.toLowerCase() === clean)) || "theorem";
+}
+const escapeNumber = (number) => String(number).replace(/[.]/g, "\\.");
+// Puntuación de una línea como destino de la referencia (0 = no lo es). Así se
+// distingue «Theorem 2.3.» al empezar un enunciado de «by Theorem 2.3 we…».
+export function anchorScore(citation, text) {
+  const line = String(text || "").trim();
+  const number = escapeNumber(citation.number);
+  if (citation.kind === "equation") {
+    if (!new RegExp(`\\(${number}\\)$`).test(line)) return 0;
+    const body = line.replace(new RegExp(`\\(${number}\\)$`), "").trim();
+    if (!body) return 2;
+    if (/[=<>≤≥≈∼≡⊂⊆∈∑∏∫+−×·/^_|]|\\[a-z]/.test(body)) return 3;
+    // Prosa que termina en la etiqueta («as shown in (6.1)»): último recurso.
+    return /\b\p{Ll}{2,}\s+\p{Ll}{2,}\s+\p{Ll}{2,}\b/u.test(body) ? 1 : 2;
+  }
+  if (citation.kind === "statement") {
+    const words = STATEMENT_WORDS[citation.word] || [];
+    const re = new RegExp(`^(?:${words.join("|")})\\.?\\s*${number}(?![\\d.]\\d)\\s*(?:[.:(\\[—–-]|$|\\p{Lu})`, "u");
+    return re.test(line) ? 3 : 0;
+  }
+  if (citation.kind === "section") {
+    if (new RegExp(`^(?:Section|Sección|Chapter|Capítulo|§)?\\s*${number}\\.?\\s+\\p{Lu}`, "u").test(line) && line.length < 90) return 3;
+    return 0;
+  }
+  return 0;
+}
+// Texto que debe aparecer en una página para que merezca la pena mirarla.
+export function anchorProbe(citation) {
+  const number = escapeNumber(citation.number);
+  if (citation.kind === "equation") return new RegExp(`\\(${number}\\)`);
+  if (citation.kind === "statement") return new RegExp(`(?:${(STATEMENT_WORDS[citation.word] || []).join("|")})\\.?\\s*${number}`);
+  return new RegExp(`${number}\\.?\\s+\\p{Lu}`, "u");
 }
 
 export function findEntryForCitation(entries, citation) {

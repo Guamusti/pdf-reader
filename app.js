@@ -30,7 +30,10 @@ import {
   bibKey,
   formatCitation,
   metaFromCsl,
-} from "./references.js?v=1";
+  anchorScore,
+  anchorProbe,
+  STATEMENT_LABELS,
+} from "./references.js?v=2";
 
 const $ = (id) => document.getElementById(id);
 const STORE = "pdfs";
@@ -4495,7 +4498,7 @@ function positionPreview(el, rect) {
   el.style.top = `${top}px`;
 }
 // `loader` devuelve { label, page, node, go } o null si no hay nada que mostrar.
-function requestPreview(rect, key, loader) {
+function requestPreview(rect, key, loader, delay = 260) {
   clearTimeout(hoverPreview.hideTimer);
   if (hoverPreview.key === key && hoverPreview.el && !hoverPreview.el.hidden) return;
   clearTimeout(hoverPreview.showTimer);
@@ -4512,8 +4515,9 @@ function requestPreview(rect, key, loader) {
     el.querySelector(".hp-label").textContent = content.label;
     el.querySelector(".hp-go span").textContent = content.page ? `p. ${content.page}` : "";
     el.querySelector(".hp-go").onclick = () => {
+      const from = currentPage;
       hidePreview();
-      content.go?.();
+      Promise.resolve(content.go?.()).then(() => currentPage !== from && showReturnChip(from));
     };
     const splitButton = el.querySelector(".hp-split");
     splitButton.hidden = !content.page;
@@ -4525,15 +4529,42 @@ function requestPreview(rect, key, loader) {
     el.hidden = false;
     hoverPreview.key = key;
     positionPreview(el, rect);
-  }, 260);
+  }, delay);
+}
+// Tras saltar a una referencia, un botón flotante devuelve a donde se leía.
+let returnChipTimer = 0;
+function showReturnChip(page) {
+  let chip = $("returnChip");
+  if (!chip) {
+    chip = document.createElement("button");
+    chip.id = "returnChip";
+    chip.type = "button";
+    chip.className = "return-chip";
+    document.body.append(chip);
+    chip.onclick = () => {
+      hideReturnChip();
+      navigateBack();
+    };
+  }
+  chip.innerHTML = `${iconSvg("back")}<span>Volver a la p. ${page}</span>`;
+  chip.hidden = false;
+  clearTimeout(returnChipTimer);
+  returnChipTimer = setTimeout(hideReturnChip, 12000);
+}
+function hideReturnChip() {
+  clearTimeout(returnChipTimer);
+  const chip = $("returnChip");
+  if (chip) chip.hidden = true;
 }
 // Recorte de una página: `focusY` en coordenadas PDF; "above" deja el punto
 // abajo (figuras, cuyo pie va debajo), "top" lo deja arriba.
 async function pageCropNode(pageNumber, { focusY = null, align = "top", height = 230 } = {}) {
   const page = await pdfDoc.getPage(pageNumber);
   const base = page.getViewport({ scale: 1, rotation });
-  const viewport = page.getViewport({ scale: 460 / base.width, rotation });
-  const cacheKey = `${currentBook.id}:${pageNumber}:${rotation}`;
+  // En el móvil la vista previa es más estrecha que 460 px.
+  const width = Math.min(460, window.innerWidth - 22);
+  const viewport = page.getViewport({ scale: width / base.width, rotation });
+  const cacheKey = `${currentBook.id}:${pageNumber}:${rotation}:${width}`;
   let canvas = previewCanvasCache.get(cacheKey);
   if (!canvas) {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -4552,7 +4583,7 @@ async function pageCropNode(pageNumber, { focusY = null, align = "top", height =
   let top = 0;
   if (Number.isFinite(focusY)) {
     const [, y] = viewport.convertToViewportPoint(0, focusY);
-    top = align === "above" ? y - visible + 26 : y - 16;
+    top = align === "above" ? y - visible + 26 : align === "center" ? y - visible / 2 : y - 16;
   }
   top = Math.max(0, Math.min(viewport.height - visible, top));
   const frame = document.createElement("div");
@@ -4607,7 +4638,45 @@ async function findCaption(kind, number) {
   touchCache(captionCache, cacheKey, result, 60);
   return result;
 }
+// Ecuación, enunciado o sección referidos dentro del documento: la línea que
+// mejor encaja (ver anchorScore), empezando por las páginas que la contienen.
+const anchorCache = new Map();
+async function findAnchor(citation) {
+  const cacheKey = `${currentBook.id}:${citation.kind}:${citation.word || ""}:${citation.number}`;
+  if (anchorCache.has(cacheKey)) return anchorCache.get(cacheKey);
+  const probe = anchorProbe(citation);
+  const indexed = currentDocPages();
+  const candidates = indexed
+    ? indexed.map((text, i) => (probe.test(text || "") ? i + 1 : 0)).filter(Boolean)
+    : Array.from({ length: Math.min(pdfDoc.numPages, 61) }, (_, i) => Math.max(1, currentPage - 30) + i).filter((p) => p <= pdfDoc.numPages);
+  let best = null;
+  for (const p of candidates.slice(0, 80)) {
+    for (const line of await pageLines(pdfDoc, p)) {
+      const score = anchorScore(citation, line.text);
+      if (score && (!best || score > best.score)) best = { page: p, y: line.y, size: line.size, score };
+    }
+    if (best?.score >= 3) break;
+  }
+  touchCache(anchorCache, cacheKey, best, 80);
+  return best;
+}
+function citationTitle(citation) {
+  if (citation.kind === "equation") return `Ecuación (${citation.number})`;
+  if (citation.kind === "section") return `Sección ${citation.number}`;
+  return `${STATEMENT_LABELS[citation.word] || "Enunciado"} ${citation.number}`;
+}
 async function citationPreview(citation) {
+  if (citation.kind === "equation" || citation.kind === "statement" || citation.kind === "section") {
+    const hit = await findAnchor(citation);
+    if (!hit) return null;
+    const equation = citation.kind === "equation";
+    return {
+      label: `${citationTitle(citation)} · página ${hit.page}`,
+      page: hit.page,
+      node: await pageCropNode(hit.page, { focusY: hit.y + (equation ? hit.size / 2 : hit.size), align: equation ? "center" : "top", height: equation ? 170 : 280 }),
+      go: () => jumpToPage(hit.page),
+    };
+  }
   if (citation.kind === "figure" || citation.kind === "table") {
     const hit = await findCaption(citation.kind, citation.number);
     if (!hit) return null;
@@ -4633,9 +4702,10 @@ async function citationPreview(citation) {
   };
 }
 let textHoverFrame = 0;
-function handleTextHover(span, x, y) {
+// La cita, ecuación o enunciado bajo el punto (x, y) de un fragmento de texto.
+function citationForSpan(span, x, y) {
   const text = span.textContent || "";
-  if (text.length < 3) return;
+  if (text.length < 3) return null;
   let offset = null;
   const caret = document.caretPositionFromPoint?.(x, y);
   if (caret && span.contains(caret.offsetNode)) offset = caret.offset;
@@ -4652,12 +4722,24 @@ function handleTextHover(span, x, y) {
   };
   const before = sibling(span, -1).slice(-80);
   const context = `${before} ${text} ${sibling(span, 1).slice(0, 80)}`;
-  const citation = offset === null ? null : citationAt(context, offset + before.length + 1);
+  return offset === null ? null : citationAt(context, offset + before.length + 1);
+}
+function handleTextHover(span, x, y) {
+  const citation = citationForSpan(span, x, y);
   if (!citation) {
     if (hoverPreview.key.startsWith("txt:")) scheduleHidePreview();
     return;
   }
   requestPreview(span.getBoundingClientRect(), `txt:${citation.kind}:${citation.label}`, () => citationPreview(citation));
+}
+// Con el dedo no hay «pasar por encima»: tocar una referencia la previsualiza.
+function previewCitationAtTap(target, x, y) {
+  const span = target.closest?.(".textLayer span");
+  if (!span || !pdfDoc || reflowMode) return false;
+  const citation = citationForSpan(span, x, y);
+  if (!citation) return false;
+  requestPreview(span.getBoundingClientRect(), `txt:${citation.kind}:${citation.label}`, () => citationPreview(citation), 0);
+  return true;
 }
 function bindHoverPreviews() {
   $("viewer").addEventListener("pointermove", (event) => {
@@ -7297,7 +7379,25 @@ function textInsideRect(layer, clip) {
   }
   return text.replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n").trim().slice(0, 3000);
 }
-function cropPdfCapture(a, b) {
+// Vuelve a dibujar una zona de la página directamente desde el PDF, a unos
+// 1600 px de ancho: fórmulas y letra pequeña salen nítidas aunque la página se
+// esté viendo con poco zoom (la IA y la pizarra reciben una imagen legible).
+async function renderPdfRegion(pageNumber, rect, targetWidth = 1600) {
+  const page = await pdfDoc.getPage(pageNumber);
+  const base = page.getViewport({ scale: 1, rotation });
+  const area = rect.w * base.width * rect.h * base.height;
+  const scale = Math.min(8, targetWidth / Math.max(1, rect.w * base.width), Math.sqrt(8e6 / Math.max(1, area)));
+  const viewport = page.getViewport({ scale, rotation });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(rect.w * viewport.width));
+  canvas.height = Math.max(1, Math.round(rect.h * viewport.height));
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: context, viewport, transform: [1, 0, 0, 1, -rect.x * viewport.width, -rect.y * viewport.height] }).promise;
+  return canvas.toDataURL("image/jpeg", 0.9);
+}
+async function cropPdfCapture(a, b) {
   const sel = { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y), right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) };
   // La página que más se solapa con el rectángulo dibujado.
   let target = null;
@@ -7349,6 +7449,11 @@ function cropPdfCapture(a, b) {
   closeCapture();
   captureAppend = false;
   captureToBoard = false;
+  try {
+    area.image = await renderPdfRegion(area.page, area.rect);
+  } catch (error) {
+    console.warn("Se usa la captura de pantalla del recorte", error);
+  }
   if (toBoard) return insertBoardImages([area.image]);
   const areas = append ? [...captureAreas(), area].slice(-MAX_CAPTURE_AREAS) : [area];
   setAssistantContext({ kind: "image", areas });
@@ -9552,6 +9657,7 @@ $("viewer").addEventListener("pointerup", (event) => {
   setTimeout(() => {
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+    if (touch && !presentationMode && previewCitationAtTap(event.target, event.clientX, event.clientY)) return;
     if (presentationMode) {
       // En presentación, el toque avanza (mitad derecha) o retrocede (izquierda).
       const rect = $("viewer").getBoundingClientRect();

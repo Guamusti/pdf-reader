@@ -229,3 +229,10 @@ html.ui4 .toolbar .mobile-more-btn { display: none !important; }
   /* El pie contraído se aparta a la esquina para no tapar el texto. */
   html.ui4 .footer.footer-minimized { left: auto !important; right: max(12px, env(safe-area-inset-right)) !important; transform: none !important; }
 }
+
+/* ---- v7: volver tras saltar a una referencia ---- */
+.return-chip { position: fixed; z-index: 160; left: 50%; bottom: calc(max(14px, env(safe-area-inset-bottom)) + 64px); transform: translateX(-50%); display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 14px 0 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--text); color: var(--surface-solid); box-shadow: 0 10px 28px rgba(0, 0, 0, .22); font: 600 13px/1 inherit; cursor: pointer; animation: return-chip-in .18s ease; }
+.return-chip[hidden] { display: none; }
+.return-chip .ui-icon { width: 16px; height: 16px; }
+body.reader-chrome-hidden .return-chip, body.footer-is-minimized .return-chip { bottom: calc(max(14px, env(safe-area-inset-bottom)) + 8px); }
+@keyframes return-chip-in { from { opacity: 0; transform: translate(-50%, 8px); } }

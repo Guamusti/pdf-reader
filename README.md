@@ -69,6 +69,13 @@ Incluye:
 - **Pizarra** (`W` o el botón junto al cuaderno): un panel a la derecha del documento para resolver ejercicios a mano mientras lees. Fondo oscuro o claro, liso, con puntos, rayado o cuadrícula; lápiz con presión en cinco colores y tres grosores, goma de trazos, deshacer/rehacer (`Ctrl+Z` / `Ctrl+Shift+Z`) y crece hacia abajo al escribir. Con lápiz óptico, el dedo desplaza y la palma no escribe. Pega recortes del PDF (botón de recorte, «Pegar en la pizarra» en el menú de un área o `Ctrl+V` con una imagen), que se mueven y se escalan con la herramienta de mover. Se guarda por documento, entra en copias y sincronización y se exporta como PNG. Comparte el ancho con la vista dividida y en móvil ocupa toda la pantalla.
 - **Fórmulas bien escritas**: las respuestas muestran el LaTeX (`$…$`, `$$…$$`) con KaTeX, que se carga solo cuando aparece una fórmula.
 
+### Novedades v8
+
+- **Referencias matemáticas vivas**: al pasar el ratón (o tocar, en móvil y tableta) por «(6.1)», «Eq. 3», «Theorem 2.3», «Lema 4.1», «Definition 2», «Proposición 5», «Section 3.2» o «§4», aparece la ecuación, el enunciado o la sección tal como están en el PDF, sin salir de la página. Se distingue el enunciado («Theorem 2.3. Let…») de las menciones («by Theorem 2.3»), y la ecuación con su etiqueta a la derecha de la prosa que la cita.
+- **Vistas previas al tocar**: citas, figuras, tablas y referencias internas se previsualizan también con el dedo; antes solo con ratón.
+- **Volver**: tras saltar desde una vista previa aparece «Volver a la p. N» para regresar a donde leías.
+- **Recortes nítidos**: la zona recortada se vuelve a dibujar desde el PDF a unos 1600 px de ancho, así que la IA y la pizarra reciben fórmulas legibles aunque la página se vea con poco zoom.
+
 ### Pruebas
 
 ```bash
