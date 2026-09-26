@@ -33,7 +33,8 @@ import {
   anchorScore,
   anchorProbe,
   STATEMENT_LABELS,
-} from "./references.js?v=2";
+  extractStructure,
+} from "./references.js?v=3";
 
 const $ = (id) => document.getElementById(id);
 const STORE = "pdfs";
@@ -1518,6 +1519,7 @@ async function openStored(id) {
     renderAnnotationList();
     if (!$("sidebarRefsPanel").hidden) renderReferencesPanel();
     await renderOutline();
+    scheduleStructure();
     renderLibrary();
     if (!$("notebookPanel").hidden) renderNotebook();
     if (kv.getItem("paper.ruler") === "1") setReadingRuler(true, true);
@@ -4963,6 +4965,99 @@ function bindHoverPreviews() {
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") hidePreview();
   });
+}
+
+// ---- Resultados y notación del documento ----
+// Enunciados numerados, ecuaciones con etiqueta y símbolos definidos en el
+// texto, reunidos en segundo plano (sin IA) para navegar un artículo técnico.
+let structureState = { id: "", data: null, loading: null, tab: "statements" };
+function scheduleStructure() {
+  if (!pdfDoc || !currentBook) {
+    $("structureSection").hidden = true;
+    return;
+  }
+  const id = currentBook.id;
+  structureState = { ...structureState, id, data: null, loading: null };
+  $("structureSection").hidden = true;
+  const start = () => ensureStructure().then(() => structureState.id === id && renderStructure()).catch((error) => console.warn("Estructura", error));
+  if ("requestIdleCallback" in window) requestIdleCallback(start, { timeout: 3000 });
+  else setTimeout(start, 800);
+}
+function ensureStructure() {
+  if (structureState.data) return Promise.resolve(structureState.data);
+  if (structureState.loading) return structureState.loading;
+  const doc = pdfDoc,
+    id = currentBook.id;
+  structureState.loading = (async () => {
+    const pages = [];
+    const total = Math.min(doc.numPages, 500);
+    for (let p = 1; p <= total; p++) {
+      if (structureState.id !== id || pdfDoc !== doc) return null;
+      let lines = await pageLines(doc, p);
+      // Páginas escaneadas: las líneas reconocidas por OCR.
+      if (!lines.length) lines = (pageOcr(p, id)?.lines || []).map((words) => ({ text: words.map((word) => word[0]).join(" "), y: 0, size: 10 }));
+      pages.push({ page: p, lines });
+      if (p % 10 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const data = extractStructure(pages);
+    if (structureState.id === id) structureState.data = data;
+    return data;
+  })();
+  return structureState.loading;
+}
+function structureItemHtml(item, index) {
+  const page = `<span class="structure-page">p. ${item.page}</span>`;
+  if (item.symbol !== undefined)
+    return `<button type="button" class="structure-item is-notation" data-structure-index="${index}" title="${escapeHtml(item.sentence)}"><b class="structure-symbol">${escapeHtml(item.symbol)}</b><span class="structure-text">${escapeHtml(item.meaning)}</span>${page}</button>`;
+  const title = item.kind === "equation" ? `(${item.number})` : `${STATEMENT_LABELS[item.word] || "Enunciado"} ${item.number}`;
+  return `<button type="button" class="structure-item" data-structure-index="${index}"><b>${escapeHtml(title)}</b>${item.name ? `<em>${escapeHtml(item.name)}</em>` : ""}<span class="structure-text">${escapeHtml(item.snippet)}</span>${page}</button>`;
+}
+function renderStructure() {
+  const data = structureState.data;
+  const section = $("structureSection");
+  if (!data || !(data.statements.length || data.equations.length || data.notation.length)) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const counts = { statements: data.statements.length, equations: data.equations.length, notation: data.notation.length };
+  if (!counts[structureState.tab]) structureState.tab = Object.keys(counts).find((tab) => counts[tab]) || "statements";
+  section.querySelectorAll("[data-structure-tab]").forEach((button) => {
+    const tab = button.dataset.structureTab;
+    button.setAttribute("aria-selected", String(tab === structureState.tab));
+    button.disabled = !counts[tab];
+    button.title = `${counts[tab] || 0} en el documento`;
+  });
+  $("structureList").innerHTML = data[structureState.tab].map(structureItemHtml).join("");
+}
+function bindStructure() {
+  const section = $("structureSection");
+  section.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-structure-tab]");
+    if (tab) {
+      structureState.tab = tab.dataset.structureTab;
+      return renderStructure();
+    }
+    const item = event.target.closest("[data-structure-index]");
+    const entry = item && structureState.data?.[structureState.tab]?.[Number(item.dataset.structureIndex)];
+    if (!entry) return;
+    const from = currentPage;
+    hidePreview();
+    if (isDrawerLayout?.()) document.body.classList.remove("sidebar-open");
+    Promise.resolve(jumpToPage(entry.page)).then(() => currentPage !== from && showReturnChip(from));
+  });
+  section.addEventListener("pointerover", (event) => {
+    if (event.pointerType === "touch") return;
+    const item = event.target.closest("[data-structure-index]");
+    const entry = item && structureState.data?.[structureState.tab]?.[Number(item.dataset.structureIndex)];
+    if (!entry || entry.symbol !== undefined) return;
+    // Se abre a la derecha de la barra lateral, sin taparla.
+    const box = item.getBoundingClientRect();
+    const width = Math.min(480, window.innerWidth - 20);
+    const anchor = window.innerWidth - box.right > width + 20 ? { left: box.right + 12, width, top: box.top - 8, bottom: box.top - 16 } : box;
+    requestPreview(anchor, `structure:${entry.kind}:${entry.word || ""}:${entry.number}`, () => citationPreview(entry));
+  });
+  section.addEventListener("pointerleave", scheduleHidePreview);
 }
 
 // ---- Referencias bibliográficas y cita del documento ----
@@ -11162,6 +11257,7 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
   bindReferencesPanel();
   bindSplitView();
   bindBoard();
+  bindStructure();
   configureFooterIsland();
   configureMobileMore();
   configureResponsiveUi();

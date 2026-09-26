@@ -280,3 +280,18 @@ body.reader-chrome-hidden .return-chip, body.footer-is-minimized .return-chip { 
 @keyframes ocr-spin { to { transform: rotate(360deg); } }
 body.reader-chrome-hidden .ocr-chip { top: max(10px, env(safe-area-inset-top)); }
 @media (max-width: 700px) { .ocr-chip { flex-wrap: wrap; justify-content: center; border-radius: 16px; padding: 8px 10px; } .ocr-chip span { white-space: normal; text-align: center; flex-basis: 100%; } }
+
+/* ---- v9: resultados y notación ---- */
+.structure-tabs { display: flex; gap: 2px; margin: 6px 0 8px; padding: 2px; border-radius: 9px; background: var(--soft); }
+.structure-tabs button { flex: 1; min-width: 0; padding: 5px 4px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: 600 11.5px/1.2 inherit; cursor: pointer; white-space: nowrap; }
+.structure-tabs button[aria-selected="true"] { background: var(--surface-solid); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .08); }
+.structure-tabs button:disabled { opacity: .4; cursor: default; }
+.structure-list { display: grid; gap: 1px; max-height: 46vh; overflow: auto; overscroll-behavior: contain; }
+.structure-item { display: grid; grid-template-columns: auto 1fr auto; align-items: baseline; gap: 2px 7px; width: 100%; padding: 7px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text); text-align: left; font: inherit; font-size: 12.5px; cursor: pointer; }
+.structure-item:hover { background: var(--soft); }
+.structure-item b { font-weight: 650; white-space: nowrap; }
+.structure-item em { grid-column: 2; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.structure-item .structure-text { grid-column: 1 / 3; color: var(--muted); font-size: 11.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.structure-item.is-notation .structure-text { grid-column: 2; -webkit-line-clamp: 2; }
+.structure-item .structure-page { grid-column: 3; grid-row: 1; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.structure-symbol { font-family: "Latin Modern Math", "Cambria Math", "STIX Two Math", serif; font-size: 14px; font-style: italic; }

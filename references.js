@@ -275,6 +275,80 @@ export function anchorProbe(citation) {
   return new RegExp(`${number}\\.?\\s+\\p{Lu}`, "u");
 }
 
+// ---- Estructura de un artículo: enunciados, ecuaciones y notación ----
+// A partir de las líneas de cada página ([{ page, lines }]) reúne los
+// enunciados numerados («Theorem 2.3 (Frobenius). …»), las ecuaciones con
+// etiqueta y las frases que introducen símbolos («Let λ be a partition…»).
+const STATEMENT_START = new RegExp(`^(${STATEMENT_ALTERNATION})\\.?\\s*(${NUMBER})(?![\\d.]\\d)\\s*(?:\\(([^)]{1,60})\\))?\\s*[.:—–-]?\\s*(.*)$`, "u");
+const SYM = "(\\S{1,14}(?:\\s\\S{1,3})?)";
+const NOTATION_PATTERNS = [
+  new RegExp(`\\b(?:Let|let)\\s+${SYM}\\s+(?:be|denote)\\s+([^.;]{3,90})`, "gu"),
+  new RegExp(`\\b[Ww]e\\s+(?:write|denote|use)\\s+(?:by\\s+)?${SYM}\\s+(?:for|to denote|the)\\s+([^.;]{3,90})`, "gu"),
+  new RegExp(`(?:^|[\\s,(])${SYM}\\s+(?:denotes|stands for)\\s+([^.;]{3,90})`, "gu"),
+  new RegExp(`\\b(?:Sea|sea|Sean|sean)\\s+${SYM}\\s+((?:un|una|el|la|los|las|unos|unas)\\s+[^.;]{3,90})`, "gu"),
+  new RegExp(`\\b(?:[Dd]enotamos|[Ll]lamamos|[Ee]scribimos)\\s+(?:por\\s+|como\\s+)?${SYM}\\s+(?:a\\s+|al\\s+|la\\s+|el\\s+)?([^.;]{3,90})`, "gu"),
+  new RegExp(`(?:^|[\\s,(])${SYM}\\s+denota\\s+([^.;]{3,90})`, "gu"),
+];
+const NOT_SYMBOLS = new Set("the this that these those us it its we he she they them one each any all some a an and or of to in on at is be as by for with from which who what when where there here then than also such its its un una el la los las lo le les se que de del en con por para como esto este esta estos estas ese esa eso".split(" "));
+function looksLikeSymbol(token) {
+  const symbol = token.replace(/^[\[{,]+|[\]},:.]+$/g, "").replace(/^\((?![^)]*\()/, "").trim();
+  if (!symbol || symbol.length > 14) return "";
+  let [head, tail] = symbol.split(" ");
+  if (NOT_SYMBOLS.has(head.toLowerCase())) return "";
+  // «h(i,j) la longitud…»: el artículo no es un subíndice.
+  if (tail && NOT_SYMBOLS.has(tail.toLowerCase())) return looksLikeSymbol(head);
+  // «V λ», «S n»: letra con subíndice que el PDF separa; el segundo trozo es corto.
+  if (tail && (!/^[\p{L}\p{N}]{1,3}$/u.test(tail) || head.length > 3)) return "";
+  if (!/^[\p{L}\p{N}_^'′*∗~\\{}()|+−,-]+$/u.test(symbol.replace(" ", ""))) return "";
+  // Una palabra corriente en minúsculas («partition») no es un símbolo.
+  if (/^\p{Ll}{4,}$/u.test(symbol) && !/[\u0370-\u03ff]/u.test(symbol)) return "";
+  return symbol;
+}
+export function extractStructure(pages) {
+  const statements = [];
+  const equations = [];
+  const notation = [];
+  const seenSymbols = new Set();
+  const seenStatements = new Set();
+  for (const { page, lines } of pages) {
+    lines.forEach((line, index) => {
+      const text = line.text.trim();
+      const statement = text.match(STATEMENT_START);
+      if (statement) {
+        const citation = { kind: "statement", word: canonicalStatement(statement[1]), number: statement[2] };
+        const id = `${citation.word}:${citation.number}`;
+        if (!seenStatements.has(id) && anchorScore(citation, text)) {
+          seenStatements.add(id);
+          const next = lines[index + 1]?.text || "";
+          statements.push({ ...citation, name: statement[3] || "", page, y: line.y, snippet: `${statement[4]} ${next}`.trim().slice(0, 140) });
+        }
+      }
+      const label = text.match(/\((\d{1,3}(?:\.\d{1,3}){0,3}[a-z]?)\)$/);
+      if (label && anchorScore({ kind: "equation", number: label[1] }, text) >= 2) {
+        const body = text.slice(0, -label[0].length).trim();
+        if (body && !equations.some((equation) => equation.number === label[1])) equations.push({ kind: "equation", number: label[1], page, y: line.y, snippet: body.slice(0, 120) });
+      }
+    });
+    const joined = lines.map((line) => line.text).join(" ").replace(/\s+/g, " ");
+    for (const pattern of NOTATION_PATTERNS) {
+      pattern.lastIndex = 0;
+      // Búsqueda solapada: «Let λ be a partition and let V λ denote…» tiene dos.
+      for (let match; (match = pattern.exec(joined)); pattern.lastIndex = match.index + match[0].indexOf(match[1]) + match[1].length) {
+        const symbol = looksLikeSymbol(match[1]);
+        if (!symbol || seenSymbols.has(symbol)) continue;
+        seenSymbols.add(symbol);
+        const start = Math.max(0, joined.lastIndexOf(".", match.index) + 1);
+        const end = joined.indexOf(".", match.index + match[0].length);
+        const sentence = joined.slice(start, end < 0 ? undefined : end + 1).trim();
+        // El significado termina donde empieza otra definición («… and let V be …»).
+        const meaning = (match[2] || sentence).split(/,?\s+(?:and|y)\s+(?:let|sea|sean|we)\b|\s+where\s+|\s+donde\s+/i)[0];
+        notation.push({ symbol, meaning: meaning.trim().replace(/[,:]$/, "").slice(0, 110), sentence: sentence.slice(0, 220), page });
+      }
+    }
+  }
+  return { statements, equations, notation };
+}
+
 export function findEntryForCitation(entries, citation) {
   if (!citation || !entries?.length) return [];
   if (citation.kind === "numeric") return citation.numbers.map((n) => entries.find((entry) => entry.label === String(n))).filter(Boolean);

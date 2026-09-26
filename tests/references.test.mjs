@@ -127,3 +127,21 @@ test("referencias internas: ecuaciones, enunciados y secciones", async () => {
   assert.equal(anchorScore(section, "In 3.2 we saw"), 0);
   assert.ok(anchorProbe(theorem).test("… Thm. 2.3 …"));
 });
+
+test("estructura del artículo: enunciados, ecuaciones y notación", async () => {
+  const { extractStructure } = await import("../references.js");
+  const L = (text) => ({ text, y: 0, size: 10 });
+  const { statements, equations, notation } = extractStructure([
+    { page: 3, lines: [L("Let λ be a partition of n and let V λ denote the irreducible module."), L("Theorem 2.3 (Frobenius). Let G be a finite group."), L("By Theorem 2.3 we have"), L("dim(V λ ) = n! / ∏ h(i,j) (6.1)"), L("as shown in (6.1)"), L("We write S n for the symmetric group. Let us now prove it.")] },
+    { page: 4, lines: [L("Sea n un entero positivo. Denotamos por h(i,j) la longitud del gancho."), L("Lema 5.1. Sea G un grupo.")] },
+  ]);
+  assert.deepEqual(statements.map((s) => [s.word, s.number, s.name, s.page]), [["theorem", "2.3", "Frobenius", 3], ["lemma", "5.1", "", 4]]);
+  assert.deepEqual(equations.map((e) => [e.number, e.page]), [["6.1", 3]]);
+  const symbols = Object.fromEntries(notation.map((n) => [n.symbol, n.meaning]));
+  assert.equal(symbols["λ"], "a partition of n");
+  assert.equal(symbols["V λ"], "the irreducible module");
+  assert.equal(symbols["S n"], "the symmetric group");
+  assert.equal(symbols["h(i,j)"], "longitud del gancho");
+  assert.equal(symbols["n"], "un entero positivo");
+  assert.ok(!("us" in symbols));
+});
