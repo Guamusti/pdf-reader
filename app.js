@@ -1690,12 +1690,19 @@ function navigateForward() {
 // ---- Motor de dibujo reutilizable (página única, doble y continuo) ----
 // Dibuja una página en un canvas + capa de texto + capa de enlaces dados,
 // sin tocar el estado global. `token` permite descartar renders obsoletos.
+// Presupuesto de memoria de los lienzos. Safari en iPhone/iPad limita la
+// memoria total de <canvas>: si se supera, las páginas salen en blanco o la
+// pestaña se recarga. Allí cada página se dibuja con menos píxeles y el scroll
+// continuo mantiene menos páginas dibujadas a la vez.
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const CANVAS_PIXELS_PER_PAGE = IS_IOS ? 12_000_000 : 24_000_000;
+const CANVAS_PIXELS_TOTAL = IS_IOS ? 60_000_000 : 260_000_000;
 async function renderPageGraphics(pageNumber, targets, token) {
   const page = await getCachedPage(pageNumber);
   if (token !== undefined && token !== renderToken) return null;
   const viewport = page.getViewport({ scale, rotation });
   const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
-  const dpr = Math.min(targetDpr, Math.sqrt(24_000_000 / (viewport.width * viewport.height)));
+  const dpr = Math.min(targetDpr, Math.sqrt(CANVAS_PIXELS_PER_PAGE / (viewport.width * viewport.height)));
   const { canvas, textLayer, linkLayer, sizeTarget } = targets;
   const ctx = canvas.getContext("2d");
   canvas.width = Math.floor(viewport.width * dpr);
@@ -1977,7 +1984,7 @@ async function buildContinuousView(targetPage = currentPage) {
     slot.dataset.page = String(i);
     slot.style.width = `${baseViewport.width}px`;
     slot.style.height = `${baseViewport.height}px`;
-    slot.innerHTML = `<canvas></canvas><div class="annotation-layer"></div><div class="live-highlight-layer"></div><div class="textLayer"></div><div class="link-layer"></div><svg class="ink-drawing-layer" viewBox="0 0 1 1" preserveAspectRatio="none"></svg><span class="cont-num">${i}</span>`;
+    slot.innerHTML = `<canvas width="0" height="0"></canvas><div class="annotation-layer"></div><div class="live-highlight-layer"></div><div class="textLayer"></div><div class="link-layer"></div><svg class="ink-drawing-layer" viewBox="0 0 1 1" preserveAspectRatio="none"></svg><span class="cont-num">${i}</span>`;
     fragment.append(slot);
   }
   container.append(fragment);
@@ -2066,7 +2073,12 @@ function trimContinuousRenders() {
   const sample = container?.children[currentPage - 1];
   if (!sample) return;
   const perScreen = Math.ceil($("viewer").clientHeight / Math.max(40, sample.offsetHeight));
-  const limit = Math.max(14, perScreen * 3 + 4);
+  // Tantas páginas como quepan en el presupuesto de memoria, y nunca menos que
+  // las visibles más una por encima y otra por debajo.
+  const canvas = sample.querySelector("canvas");
+  const pixels = Math.max(1, canvas?.width * canvas?.height || sample.offsetWidth * sample.offsetHeight * (window.devicePixelRatio || 1) ** 2);
+  const byMemory = Math.floor(CANVAS_PIXELS_TOTAL / pixels);
+  const limit = Math.max(perScreen + 2, Math.min(Math.max(14, perScreen * 3 + 4), byMemory));
   if (continuousRendered.size <= limit) return;
   const farthest = [...continuousRendered].sort((a, b) => Math.abs(b - currentPage) - Math.abs(a - currentPage));
   for (const page of farthest.slice(0, continuousRendered.size - limit)) {
@@ -3093,6 +3105,7 @@ function bindInkHost(host) {
   const repaint = () => {
     frame = 0;
     paintInkHost(host, ink, stroke);
+    if (stroke) stroke.drawn = stroke.p.length;
   };
   const eraseAt = (point) => {
     const radius = 12 / NOTE_INK_REF_WIDTH;
@@ -3138,11 +3151,21 @@ function bindInkHost(host) {
       }
     }
     // Al acercarse al borde inferior, el área de escritura crece sola.
+    let grew = false;
     if (stroke && (event.clientY - canvas.getBoundingClientRect().top) > height - 28) {
       host.dataset.ratio = String(Math.min(6, (Number(host.dataset.ratio) || NOTE_INK_DEFAULT_RATIO) + 0.25));
       ink.h = Number(host.dataset.ratio);
+      grew = true;
     }
-    if (!frame) frame = requestAnimationFrame(repaint);
+    // Con la pluma se dibuja solo el tramo nuevo, en el mismo evento; el
+    // marcador (translúcido), la goma o un lienzo que ha crecido redibujan todo.
+    if (stroke?.t === "pen" && !grew && !frame && stroke.drawn) {
+      const ctx = canvas.getContext("2d");
+      const dpr = canvas.width / width;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawInkStroke(ctx, { ...stroke, p: stroke.p.slice(Math.max(0, stroke.drawn - 2)) }, width);
+      stroke.drawn = stroke.p.length;
+    } else if (!frame) frame = requestAnimationFrame(repaint);
   });
   const finish = (event) => {
     if (!ink || !canvas.hasPointerCapture(event.pointerId)) return;
@@ -3154,6 +3177,7 @@ function bindInkHost(host) {
         writeTargetInk(target(), after);
       }
     } else if (stroke) {
+      delete stroke.drawn;
       ink.strokes.push(stroke);
       writeTargetInk(target(), ink);
     }
@@ -4320,7 +4344,7 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
   // El límite evita que un PDF enorme a 500% bloquee el navegador; seguimos
   // renderizando desde el vector de origen y reducimos sólo la sobremuestra.
-  const maxCanvasPixels = 24_000_000;
+  const maxCanvasPixels = CANVAS_PIXELS_PER_PAGE;
   const dpr = Math.min(targetDpr, Math.sqrt(maxCanvasPixels / (viewport.width * viewport.height)));
   const canvas = $("pdfCanvas"),
     ctx = canvas.getContext("2d");
