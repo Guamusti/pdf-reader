@@ -10953,29 +10953,52 @@ function buildReflowControls() {
     toast("Preferencias de lectura restablecidas");
   };
 }
-function pageColorStorageKey() {
-  return currentBook ? key(currentBook.id, `page-color-${currentPage}`) : "paper.page-color";
+// ---- Color de página ----
+// Un único tono para todas las páginas del PDF (en cualquier vista: página,
+// doble página, scroll continuo y vista dividida), que se recuerda entre
+// documentos. Los tonos claros tiñen el papel; los oscuros invierten la página
+// conservando los colores de figuras y resaltados.
+const PAGE_TONES = [
+  { id: "paper", label: "Blanco" },
+  { id: "cream", label: "Crema" },
+  { id: "sepia", label: "Sepia" },
+  { id: "mint", label: "Menta" },
+  { id: "gray", label: "Gris" },
+  { id: "graphite", label: "Grafito" },
+  { id: "night", label: "Noche" },
+  { id: "night-warm", label: "Noche cálida" },
+];
+// Nombres antiguos de la versión con color por página.
+const LEGACY_PAGE_TONES = { warm: "cream" };
+function currentPageTone() {
+  const stored = kv.getItem("paper.page-tone") || kv.getItem("paper.page-color") || "paper";
+  const tone = LEGACY_PAGE_TONES[stored] || stored;
+  return PAGE_TONES.some((item) => item.id === tone) ? tone : "paper";
 }
 function updatePageColor() {
-  pageColor = kv.getItem(pageColorStorageKey()) || "paper";
-  const wrap = $("canvasWrap");
-  wrap.classList.remove("page-color-warm", "page-color-sepia", "page-color-gray", "page-color-night");
-  if (pageColor !== "paper") wrap.classList.add(`page-color-${pageColor}`);
-  document.querySelectorAll("[data-page-color]").forEach((button) => button.classList.toggle("active", button.dataset.pageColor === pageColor));
+  pageColor = currentPageTone();
+  if (pageColor === "paper") delete document.documentElement.dataset.pageTone;
+  else document.documentElement.dataset.pageTone = pageColor;
+  document.querySelectorAll("[data-page-color]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.pageColor === pageColor);
+    button.setAttribute("aria-pressed", String(button.dataset.pageColor === pageColor));
+  });
 }
 function setPageColor(color) {
-  pageColor = color;
-  kv.setItem(pageColorStorageKey(), color);
+  kv.setItem("paper.page-tone", color);
   updatePageColor();
+  const tone = PAGE_TONES.find((item) => item.id === color);
+  if (tone) toast(`Páginas en ${tone.label.toLowerCase()}`);
 }
 function buildPageColorControls() {
   const popover = $("appearancePopover");
   if (!popover || $("pageColors")) return;
   const section = document.createElement("div");
   section.id = "pageColors";
-  section.innerHTML = '<div class="label">Color de página</div><div class="page-colors"><button data-page-color="paper" title="Blanco" aria-label="Blanco"></button><button data-page-color="warm" title="Cálido" aria-label="Cálido"></button><button data-page-color="sepia" title="Sepia" aria-label="Sepia"></button><button data-page-color="gray" title="Gris" aria-label="Gris"></button><button data-page-color="night" title="Noche" aria-label="Noche"></button></div><p class="reader-hint">Solo cambia la visualización de esta página.</p>';
+  section.innerHTML = `<div class="label">Color de página</div><div class="page-colors">${PAGE_TONES.map((tone) => `<button type="button" data-page-color="${tone.id}" title="${tone.label}" aria-label="${tone.label}" aria-pressed="false"></button>`).join("")}</div><p class="reader-hint">Se aplica a todas las páginas del PDF, en cualquier vista.</p>`;
   popover.append(section);
   section.querySelectorAll("[data-page-color]").forEach((button) => (button.onclick = () => setPageColor(button.dataset.pageColor)));
+  updatePageColor();
 }
 function buildThemeChoices() {
   const select = $("appearanceTheme");
