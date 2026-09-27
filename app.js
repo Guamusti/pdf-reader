@@ -34,7 +34,7 @@ import {
   anchorProbe,
   STATEMENT_LABELS,
   extractStructure,
-} from "./references.js?v=3";
+} from "./references.js?v=4";
 
 const $ = (id) => document.getElementById(id);
 const STORE = "pdfs";
@@ -1907,6 +1907,7 @@ async function runOcr(pages) {
     ocrRun = null;
     renderOcrChip(null);
     scheduleOcrCheck();
+    if (recognized) scheduleStructure();
   }
 }
 function rerenderAfterOcr() {
@@ -5012,11 +5013,19 @@ function scheduleStructure() {
   if ("requestIdleCallback" in window) requestIdleCallback(start, { timeout: 3000 });
   else setTimeout(start, 800);
 }
+// Se calcula una vez por documento y se guarda: los arranques siguientes no
+// vuelven a recorrer todas las páginas. La versión cambia si cambian las reglas.
+const STRUCTURE_VERSION = 1;
 function ensureStructure() {
   if (structureState.data) return Promise.resolve(structureState.data);
   if (structureState.loading) return structureState.loading;
   const doc = pdfDoc,
     id = currentBook.id;
+  const stored = getJSON(key(id, "structure"), null);
+  if (stored?.v === STRUCTURE_VERSION && stored.pages === doc.numPages && stored.ocr === ocrPageCount(id, doc.numPages)) {
+    structureState.data = stored.data;
+    return Promise.resolve(stored.data);
+  }
   structureState.loading = (async () => {
     const pages = [];
     const total = Math.min(doc.numPages, 500);
@@ -5030,9 +5039,16 @@ function ensureStructure() {
     }
     const data = extractStructure(pages);
     if (structureState.id === id) structureState.data = data;
+    setJSON(key(id, "structure"), { v: STRUCTURE_VERSION, pages: doc.numPages, ocr: ocrPageCount(id, doc.numPages), data });
     return data;
   })();
   return structureState.loading;
+}
+// Cuántas páginas tienen OCR: si cambia, el índice guardado ya no vale.
+function ocrPageCount(id, total) {
+  let count = 0;
+  for (let p = 1; p <= total; p++) if (kv.getItem(key(id, `ocr-${p}`)) !== null) count++;
+  return count;
 }
 function structureItemHtml(item, index) {
   const page = `<span class="structure-page">p. ${item.page}</span>`;
@@ -7711,6 +7727,7 @@ async function copySelectionText() {
 }
 function paintLiveHighlight() {
   clearLiveHighlight();
+  if (!markerMode) return;
   const rects = selectedRects(),
     layer = selectionSurface()?.host.querySelector(".live-highlight-layer");
   if (!markerMode || !rects || !layer) return;
@@ -11641,6 +11658,13 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
   if (books[0]) openStored(books[0].id);
   startBackgroundSync();
   consumeSharedFiles();
-  if ("serviceWorker" in navigator)
+  if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
+    // La app arranca desde la copia guardada; si en segundo plano se instala
+    // una versión nueva, se avisa de que se verá al volver a abrirla.
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (hadController) toast("Paper Reader se ha actualizado: verás las novedades la próxima vez que la abras");
+    });
+  }
 })();

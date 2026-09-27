@@ -281,6 +281,9 @@ export function anchorProbe(citation) {
 // etiqueta y las frases que introducen símbolos («Let λ be a partition…»).
 const STATEMENT_START = new RegExp(`^(${STATEMENT_ALTERNATION})\\.?\\s*(${NUMBER})(?![\\d.]\\d)\\s*(?:\\(([^)]{1,60})\\))?\\s*[.:—–-]?\\s*(.*)$`, "u");
 const SYM = "(\\S{1,14}(?:\\s\\S{1,3})?)";
+// Cada patrón solo se prueba si la página contiene su palabra clave: algunos
+// empiezan en cualquier posición y recorrer páginas enteras sin ella es caro.
+const NOTATION_KEYWORDS = [/\blet\b/i, /\bwe\s+(?:write|denote|use)\b/i, /\b(?:denotes|stands for)\b/, /\bsean?\b/i, /\b(?:denotamos|llamamos|escribimos)\b/i, /\bdenota\b/];
 const NOTATION_PATTERNS = [
   new RegExp(`\\b(?:Let|let)\\s+${SYM}\\s+(?:be|denote)\\s+([^.;]{3,90})`, "gu"),
   new RegExp(`\\b[Ww]e\\s+(?:write|denote|use)\\s+(?:by\\s+)?${SYM}\\s+(?:for|to denote|the)\\s+([^.;]{3,90})`, "gu"),
@@ -330,7 +333,8 @@ export function extractStructure(pages) {
       }
     });
     const joined = lines.map((line) => line.text).join(" ").replace(/\s+/g, " ");
-    for (const pattern of NOTATION_PATTERNS) {
+    for (const [index, pattern] of NOTATION_PATTERNS.entries()) {
+      if (!NOTATION_KEYWORDS[index].test(joined)) continue;
       pattern.lastIndex = 0;
       // Búsqueda solapada: «Let λ be a partition and let V λ denote…» tiene dos.
       for (let match; (match = pattern.exec(joined)); pattern.lastIndex = match.index + match[0].indexOf(match[1]) + match[1].length) {

@@ -1,6 +1,6 @@
-const CACHE = 'paper-reader-v104';
+const CACHE = 'paper-reader-v105';
 const SHARE_CACHE = 'paper-share';
-const CORE = ['/', '/index.html', '/reader-ui.css?v=32', '/reader-v3.css?v=8', '/reader-v6.css?v=13', '/app.js?v=91', '/storage.js?v=1', '/sync.js?v=1', '/references.js?v=3', '/ai-worker.js?v=1', '/manifest.json', '/icon.svg', '/icon-192.png', '/icon-512.png'];
+const CORE = ['/', '/index.html', '/reader-ui.css?v=32', '/reader-v3.css?v=8', '/reader-v6.css?v=13', '/app.js?v=92', '/storage.js?v=1', '/sync.js?v=1', '/references.js?v=4', '/ai-worker.js?v=1', '/manifest.json', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 const PDFJS = ['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs', 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs'];
 
 // El precacheo es tolerante a fallos: si un recurso concreto no se puede
@@ -45,17 +45,25 @@ self.addEventListener('fetch', event => {
   }
   if (request.method !== 'GET') return;
 
-  // Navegación: la red manda (para recibir siempre el HTML más reciente) y la
-  // copia en caché sirve solo como reserva sin conexión.
+  // Navegación: la app se abre al instante desde la copia guardada y la versión
+  // nueva se descarga en segundo plano (se aplica en la siguiente apertura).
+  // Antes se esperaba a la red en cada arranque: con mala cobertura, segundos.
   if (request.mode === 'navigate') {
     event.respondWith((async () => {
-      try {
-        const fresh = await fetch(request);
-        const cache = await caches.open(CACHE);
-        cache.put('/index.html', fresh.clone());
+      const cache = await caches.open(CACHE);
+      const cached = (await cache.match('/index.html')) || (await caches.match(request, { ignoreSearch: true }));
+      const network = fetch(request).then(async (fresh) => {
+        if (fresh && fresh.ok) await cache.put('/index.html', fresh.clone());
         return fresh;
+      });
+      if (cached) {
+        event.waitUntil(network.catch(() => {}));
+        return cached;
+      }
+      try {
+        return await network;
       } catch {
-        return (await caches.match(request, { ignoreSearch: true })) || (await caches.match('/index.html')) || Response.error();
+        return Response.error();
       }
     })());
     return;
