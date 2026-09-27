@@ -2934,6 +2934,26 @@ function bindStickyInteractions() {
 // así se ven igual con la ventana estrecha o ancha. `h` es alto/ancho.
 let lastPenInput = 0;
 const noteInkUndo = [];
+// ---- Rechazo de la palma (pizarra, tinta sobre el PDF y notas) ----
+// Mientras un lápiz toca la pantalla, justo después, o si el contacto es ancho
+// (la mano), los toques con el dedo no escriben. Tras usar un lápiz se activa
+// «Solo lápiz» (se puede cambiar en la pizarra) y el dedo deja de dibujar.
+let inkPenActive = null;
+function inkPenOnly() {
+  return kv.getItem("paper.board-pen-only") === "1";
+}
+function registerPenInput(event) {
+  if (event.pointerType !== "pen") return;
+  lastPenInput = Date.now();
+  inkPenActive = event.pointerId;
+  if (kv.getItem("paper.board-pen-only") === null) kv.setItem("paper.board-pen-only", "1");
+}
+function rejectInkTouch(event) {
+  if (event.pointerType !== "touch") return false;
+  return inkPenActive !== null || inkPenOnly() || event.width > 42 || event.height > 42 || Date.now() - lastPenInput < 600;
+}
+for (const type of ["pointerup", "pointercancel"])
+  document.addEventListener(type, (event) => event.pointerId === inkPenActive && (inkPenActive = null), true);
 function inkCanvasSize(host) {
   const canvas = host.querySelector("canvas");
   const width = Math.max(120, host.clientWidth);
@@ -3078,9 +3098,9 @@ function bindInkHost(host) {
   };
   canvas.addEventListener("pointerdown", (event) => {
     if (noteTool.mode === "text" || event.button > 0) return;
-    if (event.pointerType === "pen") lastPenInput = Date.now();
-    // Mientras se usa lápiz, la palma de la mano no dibuja.
-    else if (event.pointerType === "touch" && Date.now() - lastPenInput < 2000) return;
+    registerPenInput(event);
+    // La palma de la mano no dibuja, ni interrumpe un trazo en curso.
+    if (rejectInkTouch(event) || ink) return;
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
     const { width } = inkCanvasSize(host);
@@ -3402,6 +3422,7 @@ const ICONS = {
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
   board: '<rect x="3" y="3.5" width="18" height="13" rx="2"/><path d="M7 20.5 9.5 16.5M17 20.5l-2.5-4M7 12.5c1.5-3 3-3 4 0s2.5 3 4-1"/>',
+  hand: '<path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
@@ -5513,7 +5534,7 @@ const BOARD_COLORS = {
 const BOARD_BACKGROUNDS = { dark: "#16181d", light: "#fbfaf6" };
 const BOARD_GRIDS = { none: "Liso", dots: "Puntos", lines: "Rayado", grid: "Cuadrícula" };
 const BOARD_WIDTHS = { fine: 1.5, medium: 2.6, thick: 4.6 };
-const board = { data: null, undo: [], redo: [], stroke: null, pan: null, drag: null, frame: 0, selected: null, penSeen: false, images: new Map(), bounds: new WeakMap() };
+const board = { data: null, undo: [], redo: [], stroke: null, strokePointer: null, penDown: null, erasing: null, pan: null, drag: null, frame: 0, selected: null, images: new Map(), inverted: new Map(), bounds: new WeakMap(), liveCtx: null };
 const boardTool = { mode: "pen", color: "yellow", width: "medium", ...getJSON("paper.board-tool", {}) };
 function boardOpen() {
   return document.body.classList.contains("board-open");
@@ -5536,17 +5557,49 @@ function loadBoardData() {
   board.redo = [];
   board.selected = null;
 }
+// Guardar serializa la pizarra entera (imágenes incluidas): se agrupa en una
+// escritura diferida para no bloquear el lápiz al terminar cada trazo.
+let boardSaveTimer = 0;
+let boardSavePending = null;
 function saveBoard() {
   if (!board.data || !currentBook) return;
-  setJSON(boardStorageKey(), board.data);
+  boardSavePending = { key: boardStorageKey(), data: board.data };
+  clearTimeout(boardSaveTimer);
+  boardSaveTimer = setTimeout(() => flushBoardSave({ idle: true }), 400);
+}
+function flushBoardSave({ idle = false } = {}) {
+  clearTimeout(boardSaveTimer);
+  // Nunca en mitad de un trazo: se espera a que el lápiz se levante.
+  if (idle && board.stroke && boardSavePending) {
+    boardSaveTimer = setTimeout(() => flushBoardSave({ idle: true }), 250);
+    return;
+  }
+  const pending = boardSavePending;
+  boardSavePending = null;
+  if (!pending) return;
+  setJSON(pending.key, pending.data);
   const status = $("boardStatus");
   if (status) status.textContent = "Guardado";
 }
-function pushBoardUndo(snapshot = JSON.stringify(board.data)) {
+// Copia para deshacer sin serializar: los trazos no cambian una vez hechos
+// (se comparten) y las imágenes, que sí se mueven, se copian por encima.
+function boardSnapshot(data = board.data) {
+  return { ...data, strokes: data.strokes.slice(), items: data.items.map((item) => ({ ...item })) };
+}
+function pushBoardUndo(snapshot = boardSnapshot()) {
   board.undo.push(snapshot);
   if (board.undo.length > 60) board.undo.shift();
   board.redo = [];
-  renderBoardTools();
+  updateBoardUndoButtons();
+}
+// Solo los botones de deshacer y rehacer: reconstruir la barra entera en cada
+// trazo costaba varios milisegundos justo al levantar el lápiz.
+function updateBoardUndoButtons() {
+  const tools = $("boardTools");
+  const undo = tools?.querySelector("[data-board-undo]");
+  if (!undo) return renderBoardTools();
+  undo.disabled = !board.undo.length;
+  tools.querySelector("[data-board-redo]").disabled = !board.redo.length;
 }
 // Aplica un cambio con deshacer, lo guarda y redibuja.
 function commitBoard(change) {
@@ -5561,8 +5614,8 @@ function undoBoard(redo = false) {
   const from = redo ? board.redo : board.undo;
   const to = redo ? board.undo : board.redo;
   if (!from.length) return toast(redo ? "Nada que rehacer" : "Nada que deshacer en la pizarra");
-  to.push(JSON.stringify(board.data));
-  board.data = JSON.parse(from.pop());
+  to.push(boardSnapshot());
+  board.data = from.pop();
   board.selected = null;
   saveBoard();
   refreshBoardHeight();
@@ -5599,6 +5652,31 @@ function refreshBoardHeight() {
   const view = scroll.clientHeight / width;
   board.data.h = Math.max(board.data.h || 0, view, boardContentBottom() + view * 0.6);
   $("boardSpacer").style.height = `${Math.max(0, Math.round(board.data.h * width - scroll.clientHeight))}px`;
+}
+// Versión para fondo oscuro, calculada una sola vez: invierte la luminosidad
+// conservando el tono (lo negro pasa a claro sin cambiar de color lo rojo).
+function invertedBoardImage(src, image) {
+  let canvas = board.inverted.get(src);
+  if (canvas) return canvas;
+  canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(image, 0, 0);
+  try {
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = pixels.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const shift = 255 - Math.max(r, g, b) - Math.min(r, g, b);
+      d[i] = (r + shift) * 0.92;
+      d[i + 1] = (g + shift) * 0.92;
+      d[i + 2] = (b + shift) * 0.92;
+    }
+    ctx.putImageData(pixels, 0, 0);
+  } catch {}
+  board.inverted.set(src, canvas);
+  return canvas;
 }
 function boardImage(src) {
   let image = board.images.get(src);
@@ -5639,13 +5717,13 @@ function drawBoardContent(ctx, data, width, top, height, { live = null, selected
   ctx.translate(0, -top);
   for (const item of data.items) {
     const image = boardImage(item.src);
-    if (image.complete && image.naturalWidth) {
-      // Los recortes se funden con el fondo: sobre oscuro se invierten (tinta
+    const source = image.complete && image.naturalWidth ? (data.bg === "dark" ? invertedBoardImage(item.src, image) : image) : null;
+    if (source) {
+      // Los recortes se funden con el fondo: sobre oscuro van invertidos (tinta
       // clara) y el papel blanco deja ver la cuadrícula en ambos fondos.
       ctx.save();
-      ctx.filter = data.bg === "dark" ? "invert(1) hue-rotate(180deg) brightness(.92)" : "none";
       ctx.globalCompositeOperation = data.bg === "dark" ? "lighten" : "multiply";
-      ctx.drawImage(image, item.x * width, item.y * width, item.w * width, item.h * width);
+      ctx.drawImage(source, item.x * width, item.y * width, item.w * width, item.h * width);
       ctx.restore();
     }
     if (item.source && badges) {
@@ -5689,6 +5767,37 @@ function drawBoardContent(ctx, data, width, top, height, { live = null, selected
   }
   ctx.restore();
 }
+// Capa del trazo en curso: se redibuja solo ese trazo en cada movimiento del
+// lápiz (el resto de la pizarra no se toca), más los puntos que el navegador
+// predice para compensar la latencia de la pantalla.
+function paintBoardLive(predicted = null) {
+  const live = $("boardLive");
+  const scroll = $("boardScroll");
+  if (!live || !scroll || !board.data) return;
+  board.liveCtx ||= live.getContext("2d", { desynchronized: true }) || live.getContext("2d");
+  const ctx = board.liveCtx;
+  const width = scroll.clientWidth,
+    dpr = live.width / Math.max(1, width);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, live.width, live.height);
+  if (!board.stroke) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, -scroll.scrollTop * dpr);
+  const stroke = predicted?.length ? { ...board.stroke, p: board.stroke.p.concat(predicted) } : board.stroke;
+  drawInkStroke(ctx, { ...stroke, c: BOARD_COLORS[board.data.bg][stroke.c] || stroke.c }, width);
+}
+// Al terminar un trazo se pinta solo ese trazo sobre el fondo, sin redibujar
+// la pizarra entera.
+function stampBoardStroke(stroke) {
+  const canvas = $("boardCanvas");
+  const scroll = $("boardScroll");
+  const width = scroll.clientWidth,
+    dpr = canvas.width / Math.max(1, width);
+  const ctx = canvas.getContext("2d");
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, -scroll.scrollTop * dpr);
+  drawInkStroke(ctx, { ...stroke, c: BOARD_COLORS[board.data.bg][stroke.c] || stroke.c }, width);
+  ctx.restore();
+}
 function schedulePaintBoard() {
   if (!board.frame) board.frame = requestAnimationFrame(paintBoard);
 }
@@ -5703,11 +5812,13 @@ function paintBoard() {
     height = scroll.clientHeight,
     dpr = Math.min(window.devicePixelRatio || 1, 3);
   if (!width || !height) return;
-  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
+  for (const layer of [canvas, $("boardLive")]) {
+    if (layer.width !== Math.round(width * dpr) || layer.height !== Math.round(height * dpr)) {
+      layer.width = Math.round(width * dpr);
+      layer.height = Math.round(height * dpr);
+      layer.style.width = `${width}px`;
+      layer.style.height = `${height}px`;
+    }
   }
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -5715,7 +5826,8 @@ function paintBoard() {
   ctx.fillRect(0, 0, width, height);
   drawBoardGrid(ctx, width, height, scroll.scrollTop, data);
   board.badges = [];
-  drawBoardContent(ctx, data, width, scroll.scrollTop, height, { live: board.stroke, selected: board.selected, badges: board.badges, labels: boardFollowOn() });
+  drawBoardContent(ctx, data, width, scroll.scrollTop, height, { selected: board.selected, badges: board.badges, labels: boardFollowOn() });
+  paintBoardLive();
   $("boardPane").dataset.bg = data.bg;
   $("boardEmpty").hidden = Boolean(data.strokes.length || data.items.length || board.stroke);
 }
@@ -5725,7 +5837,7 @@ function renderBoardTools() {
   const palette = BOARD_COLORS[board.data.bg];
   const button = (attrs, icon, title, pressed = null) =>
     `<button type="button" class="btn icon" ${attrs} title="${title}" aria-label="${title}"${pressed === null ? "" : ` aria-pressed="${pressed}"`}>${iconSvg(icon)}</button>`;
-  tools.innerHTML = `<div class="bd-group">${button('data-board-mode="pen"', "pen", "Lápiz", boardTool.mode === "pen")}${button('data-board-mode="eraser"', "eraser", "Goma (borra trazos enteros)", boardTool.mode === "eraser")}${button(
+  tools.innerHTML = `<div class="bd-group">${button("data-board-penonly", "hand", boardPenOnly() ? "Solo lápiz: el dedo desplaza y la palma no escribe (pulsa para dibujar también con el dedo)" : "Dibujas también con el dedo (pulsa para usar solo el lápiz)", boardPenOnly())}${button('data-board-mode="pen"', "pen", "Lápiz", boardTool.mode === "pen")}${button('data-board-mode="eraser"', "eraser", "Goma (borra trazos enteros)", boardTool.mode === "eraser")}${button(
     'data-board-mode="move"',
     "cursor",
     "Mover y ajustar imágenes",
@@ -5745,7 +5857,7 @@ function renderBoardTools() {
   )}</div><span class="bd-status" id="boardStatus"></span>${button("data-board-close", "close", "Cerrar la pizarra (W)")}`;
   tools.querySelector("[data-board-undo]").disabled = !board.undo.length;
   tools.querySelector("[data-board-redo]").disabled = !board.redo.length;
-  $("boardCanvas").dataset.mode = boardTool.mode;
+  $("boardLive").dataset.mode = boardTool.mode;
 }
 function setBoardTool(patch) {
   Object.assign(boardTool, patch);
@@ -5779,8 +5891,10 @@ function toggleBoard() {
   boardOpen() ? closeBoard() : openBoard();
 }
 function boardLoadDocument() {
+  flushBoardSave();
   board.data = null;
   board.images.clear();
+  board.inverted.clear();
   // Se carga siempre: las zonas del PDF enlazadas a la pizarra se marcan
   // aunque la pizarra esté cerrada.
   if (currentBook) loadBoardData();
@@ -5877,38 +5991,61 @@ function bindBoard() {
     const pressure = event.pointerType === "pen" && event.pressure > 0 ? Math.round(event.pressure * 100) / 100 : 0;
     return [Math.round(((event.clientX - box.left) / width) * 10000) / 10000, Math.round(((event.clientY - box.top + scroll.scrollTop) / width) * 10000) / 10000, pressure];
   };
-  let erasedFrom = null;
+  const live = $("boardLive");
   const eraseAt = (point) => {
     const radius = 10 / scroll.clientWidth;
     const before = board.data.strokes.length;
     const kept = board.data.strokes.filter((stroke) => !stroke.p.some((p) => Math.hypot(p[0] - point[0], p[1] - point[1]) < radius + (stroke.w / NOTE_INK_REF_WIDTH) / 2));
     if (kept.length === before) return;
-    erasedFrom ||= JSON.stringify(board.data);
+    board.erasing.from ||= boardSnapshot();
     board.data.strokes = kept;
   };
-  canvas.addEventListener("pointerdown", (event) => {
+  // Rechazo de la palma. Con «Solo lápiz» (se activa solo al usar un lápiz),
+  // el dedo desplaza y nunca dibuja; mientras el lápiz toca la pantalla se
+  // ignora cualquier otro contacto, y los contactos anchos (la mano) nunca
+  // cuentan.
+  const isPalm = (event) => event.pointerType === "touch" && (event.width > 42 || event.height > 42);
+  const cancelPan = () => {
+    if (!board.pan) return;
+    // La palma se apoyó un instante antes que el lápiz: se deshace ese desplazamiento.
+    scroll.scrollTop = board.pan.top;
+    try {
+      live.releasePointerCapture(board.pan.id);
+    } catch {}
+    board.pan = null;
+  };
+  live.addEventListener("pointerdown", (event) => {
     if (event.button > 0 || !board.data) return;
+    event.preventDefault();
+    const touch = event.pointerType === "touch";
     if (event.pointerType === "pen") {
-      lastPenInput = Date.now();
-      board.penSeen = true;
+      const firstPen = kv.getItem("paper.board-pen-only") === null;
+      registerPenInput(event);
+      board.penDown = event.pointerId;
+      cancelPan();
+      if (firstPen) renderBoardTools();
+    }
+    if (touch) {
+      if (board.penDown !== null || board.stroke || isPalm(event) || Date.now() - lastPenInput < 300) return;
+      if (boardPenOnly()) {
+        if (!board.pan) {
+          live.setPointerCapture(event.pointerId);
+          board.pan = { id: event.pointerId, y: event.clientY, top: scroll.scrollTop };
+        }
+        return;
+      }
+      if (board.pan || board.drag || board.erasing) return;
     }
     // La pastilla de un recorte enlazado lleva a su origen con cualquier herramienta.
-    const box = canvas.getBoundingClientRect();
+    const box = live.getBoundingClientRect();
     const bx = event.clientX - box.left,
       by = event.clientY - box.top + scroll.scrollTop;
     const badge = (board.badges || []).find((entry) => bx >= entry.x && bx <= entry.x + entry.w && by >= entry.y && by <= entry.y + entry.h);
     if (badge) {
-      event.preventDefault();
       goToBoardSource(badge.item);
       return;
     }
-    canvas.setPointerCapture(event.pointerId);
-    event.preventDefault();
-    // Con lápiz, el dedo desplaza la pizarra y la palma no escribe.
-    if (event.pointerType === "touch" && (board.penSeen || Date.now() - lastPenInput < 2000)) {
-      board.pan = { id: event.pointerId, y: event.clientY, top: scroll.scrollTop };
-      return;
-    }
+    live.setPointerCapture(event.pointerId);
     const point = pointFrom(event);
     if (boardTool.mode === "move") {
       const item = boardItemAt(point);
@@ -5916,30 +6053,33 @@ function bindBoard() {
       const corner = selected && Math.hypot(point[0] - (selected.x + selected.w), point[1] - (selected.y + selected.h)) < 14 / scroll.clientWidth;
       const target = corner ? selected : item;
       board.selected = target?.id || null;
-      board.drag = target ? { id: event.pointerId, item: target, start: point, from: { ...target }, resize: Boolean(corner), snapshot: JSON.stringify(board.data), moved: false } : null;
+      board.drag = target ? { id: event.pointerId, item: target, start: point, from: { ...target }, resize: Boolean(corner), snapshot: boardSnapshot(), moved: false } : null;
       if (!target) board.pan = { id: event.pointerId, y: event.clientY, top: scroll.scrollTop };
       renderBoardTools();
       paintBoard();
       return;
     }
     if (boardTool.mode === "eraser") {
-      erasedFrom = null;
+      board.erasing = { id: event.pointerId, from: null };
       eraseAt(point);
-      paintBoard();
+      schedulePaintBoard();
       return;
     }
     const width = scroll.clientWidth;
     // `pg`: la página que se estaba leyendo, para que la pizarra la siga.
     board.stroke = { t: "pen", c: boardTool.color, w: (BOARD_WIDTHS[boardTool.width] * NOTE_INK_REF_WIDTH) / width, p: [point], ...(pdfDoc ? { pg: currentPage } : {}) };
-    schedulePaintBoard();
+    board.strokePointer = event.pointerId;
+    $("boardEmpty").hidden = true;
+    paintBoardLive();
   });
-  canvas.addEventListener("pointermove", (event) => {
-    if (!canvas.hasPointerCapture(event.pointerId) || !board.data) return;
-    if (board.pan?.id === event.pointerId) {
+  live.addEventListener("pointermove", (event) => {
+    if (!board.data) return;
+    const id = event.pointerId;
+    if (board.pan?.id === id) {
       scroll.scrollTop = board.pan.top - (event.clientY - board.pan.y);
       return;
     }
-    if (board.drag?.id === event.pointerId) {
+    if (board.drag?.id === id) {
       const point = pointFrom(event);
       const { item, from, start } = board.drag;
       const dx = point[0] - start[0],
@@ -5955,59 +6095,85 @@ function bindBoard() {
       schedulePaintBoard();
       return;
     }
-    const events = event.getCoalescedEvents?.() || [event];
-    if (boardTool.mode === "eraser") {
+    const events = event.getCoalescedEvents?.() || [];
+    if (!events.length) events.push(event);
+    if (board.erasing?.id === id) {
       for (const item of events) eraseAt(pointFrom(item));
       schedulePaintBoard();
       return;
     }
-    if (!board.stroke) return;
+    if (board.strokePointer !== id || !board.stroke) return;
+    const points = board.stroke.p;
     for (const item of events) {
       const point = pointFrom(item);
-      const last = board.stroke.p[board.stroke.p.length - 1];
-      if (Math.hypot(point[0] - last[0], point[1] - last[1]) > 0.0015) board.stroke.p.push(point);
+      const last = points[points.length - 1];
+      if (Math.abs(point[0] - last[0]) + Math.abs(point[1] - last[1]) > 0.0012) points.push(point);
     }
     // Al escribir cerca del final, la pizarra crece.
-    const bottom = board.stroke.p[board.stroke.p.length - 1][1];
+    const bottom = points[points.length - 1][1];
     if (bottom > board.data.h - scroll.clientHeight / scroll.clientWidth / 3) {
       board.data.h = bottom + scroll.clientHeight / scroll.clientWidth;
       refreshBoardHeight();
     }
-    schedulePaintBoard();
+    // Se dibuja en el acto (sin esperar al siguiente fotograma), con la
+    // predicción del navegador para el tramo que aún no ha llegado.
+    const predicted = (event.getPredictedEvents?.() || []).slice(0, 2).map(pointFrom);
+    paintBoardLive(predicted);
   });
   const finish = (event) => {
-    if (!canvas.hasPointerCapture(event.pointerId)) return;
-    canvas.releasePointerCapture(event.pointerId);
-    if (board.pan?.id === event.pointerId) {
+    const id = event.pointerId;
+    if (event.pointerType === "pen" && board.penDown === id) board.penDown = null;
+    try {
+      if (live.hasPointerCapture(id)) live.releasePointerCapture(id);
+    } catch {}
+    if (board.pan?.id === id) {
       board.pan = null;
       return;
     }
-    if (board.drag?.id === event.pointerId) {
+    if (board.drag?.id === id) {
       if (board.drag.moved) {
         pushBoardUndo(board.drag.snapshot);
         saveBoard();
         refreshBoardHeight();
+        renderBoardLinks();
       }
       board.drag = null;
       paintBoard();
       return;
     }
-    if (boardTool.mode === "eraser") {
-      if (erasedFrom) {
-        pushBoardUndo(erasedFrom);
+    if (board.erasing?.id === id) {
+      if (board.erasing.from) {
+        pushBoardUndo(board.erasing.from);
         saveBoard();
       }
-      erasedFrom = null;
+      board.erasing = null;
       return;
     }
-    if (board.stroke) {
+    if (board.strokePointer === id && board.stroke) {
       const stroke = board.stroke;
       board.stroke = null;
-      commitBoard((data) => data.strokes.push(stroke));
+      board.strokePointer = null;
+      pushBoardUndo();
+      board.data.strokes.push(stroke);
+      stampBoardStroke(stroke);
+      paintBoardLive();
+      saveBoard();
+      if (strokeBounds(stroke)[1] > boardContentBottom() - 0.001) refreshBoardHeight();
+      // Con «seguir la lectura», la etiqueta de página puede cambiar.
+      if (boardFollowOn()) schedulePaintBoard();
     }
   };
-  canvas.addEventListener("pointerup", finish);
-  canvas.addEventListener("pointercancel", finish);
+  live.addEventListener("pointerup", finish);
+  live.addEventListener("pointercancel", finish);
+  live.addEventListener("contextmenu", (event) => event.preventDefault());
+  // Al salir, la pizarra pendiente pasa a la cola y la cola se vuelca a disco.
+  const saveNow = () => {
+    if (!boardSavePending) return;
+    flushBoardSave();
+    kv.flush().catch(() => {});
+  };
+  window.addEventListener("pagehide", saveNow);
+  document.addEventListener("visibilitychange", () => document.visibilityState === "hidden" && saveNow());
   scroll.addEventListener("scroll", schedulePaintBoard, { passive: true });
   new ResizeObserver(() => {
     if (!boardOpen()) return;
@@ -6036,6 +6202,11 @@ function bindBoard() {
       return renderBoardTools();
     }
     if (data.boardExport !== undefined) return exportBoardPng();
+    if (data.boardPenonly !== undefined) {
+      kv.setItem("paper.board-pen-only", boardPenOnly() ? "0" : "1");
+      toast(boardPenOnly() ? "Solo lápiz: el dedo desplaza la pizarra y la mano no escribe" : "Ahora también puedes dibujar con el dedo");
+      return renderBoardTools();
+    }
     if (data.boardFollow !== undefined) {
       kv.setItem("paper.board-follow", boardFollowOn() ? "0" : "1");
       renderBoardTools();
@@ -6131,6 +6302,10 @@ function showBoardItem(id) {
   setBoardTool({ mode: "move" });
 }
 // ---- La pizarra sigue la lectura ----
+// «Solo lápiz»: el dedo desplaza y no dibuja. Se activa solo al usar un lápiz.
+function boardPenOnly() {
+  return kv.getItem("paper.board-pen-only") === "1";
+}
 function boardFollowOn() {
   return kv.getItem("paper.board-follow") === "1";
 }
@@ -10905,6 +11080,12 @@ $("markerModeBtn").onclick = () => {
 $("eraserModeBtn").onclick = () => toggleEraserMode();
 $("inkDrawingLayer").addEventListener("pointerdown", (event) => {
   if (!markerMode || !isDrawingTool() || !currentBook) return;
+  registerPenInput(event);
+  // La palma no dibuja ni sustituye el trazo que se está haciendo con el lápiz.
+  if (rejectInkTouch(event) || inkStroke) {
+    event.preventDefault();
+    return;
+  }
   const point = pageInkPoint(event);
   inkStroke = { id: event.pointerId, type: inkTool, points: inkTool === "box" || inkTool === "arrow" ? [point, point] : [point] };
   $("inkDrawingLayer").setPointerCapture(event.pointerId);
@@ -10913,11 +11094,14 @@ $("inkDrawingLayer").addEventListener("pointerdown", (event) => {
 });
 $("inkDrawingLayer").addEventListener("pointermove", (event) => {
   if (!inkStroke || inkStroke.id !== event.pointerId) return;
-  const point = pageInkPoint(event);
-  if (inkStroke.type === "box" || inkStroke.type === "arrow") inkStroke.points[1] = point;
+  if (inkStroke.type === "box" || inkStroke.type === "arrow") inkStroke.points[1] = pageInkPoint(event);
   else {
-    const last = inkStroke.points.at(-1);
-    if (Math.hypot(point.x - last.x, point.y - last.y) > 0.0015) inkStroke.points.push(point);
+    // Todos los puntos que el lápiz envía entre fotogramas, no solo el último.
+    for (const item of event.getCoalescedEvents?.().length ? event.getCoalescedEvents() : [event]) {
+      const point = pageInkPoint(item);
+      const last = inkStroke.points.at(-1);
+      if (Math.hypot(point.x - last.x, point.y - last.y) > 0.001) inkStroke.points.push(point);
+    }
   }
   paintLiveStroke();
 });
@@ -10925,7 +11109,10 @@ $("inkDrawingLayer").addEventListener("pointerup", (event) => {
   if (!inkStroke || inkStroke.id !== event.pointerId) return;
   saveInkStroke();
 });
-$("inkDrawingLayer").addEventListener("pointercancel", () => {
+$("inkDrawingLayer").addEventListener("pointercancel", (event) => {
+  if (!inkStroke || inkStroke.id !== event.pointerId) return;
+  // iPadOS cancela a veces el gesto del lápiz: se conserva lo ya dibujado.
+  if (inkStroke.points.length > 1) return saveInkStroke();
   inkStroke = null;
   paintLiveStroke();
 });

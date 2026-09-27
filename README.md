@@ -88,6 +88,13 @@ Incluye:
 - **Resultados y notación** (Contenido): lista de teoremas, lemas, definiciones…, de las ecuaciones numeradas y de los símbolos que define el texto («Let λ be…», «Sea n…», «Denotamos por…»), con vista previa y salto directo.
 - **La pizarra sigue tu lectura**: lo que escribes queda unido a la página que lees; con «Seguir la lectura» la pizarra se desplaza sola a tus apuntes de cada página y los marca con «p. N».
 
+### Novedades v11: lápiz (Apple Pencil) fluido y sin marcas de la mano
+
+- **Rechazo de la palma** en la pizarra, la tinta sobre el PDF y las notas: mientras el lápiz toca la pantalla se ignora cualquier otro contacto; los contactos anchos (la mano) nunca escriben; si la palma se apoya un instante antes que el lápiz, el desplazamiento que provocó se deshace. La palma ya no puede sustituir ni cortar el trazo del lápiz, y si iPadOS cancela el gesto se conserva lo dibujado.
+- **«Solo lápiz»** (icono de la mano en la pizarra): se activa solo la primera vez que usas un lápiz; entonces el dedo desplaza y no dibuja. Se puede desactivar para dibujar con el dedo.
+- **Trazo inmediato**: el trazo en curso va en una capa propia que se dibuja en el mismo evento del lápiz (sin esperar al siguiente fotograma), con todos los puntos intermedios y la predicción del navegador. El resto de la pizarra no se redibuja mientras escribes.
+- **Sin tirón al levantar el lápiz**: deshacer ya no copia la pizarra entera, el guardado se agrupa y nunca ocurre en mitad de un trazo, y los recortes para fondo oscuro se preparan una sola vez. En una pizarra con 300 trazos y la CPU ralentizada ×6, el trabajo por movimiento pasa de 5,3 ms a 1,2 ms y el de terminar un trazo de 27–37 ms a 2,5 ms.
+
 ### Pruebas
 
 ```bash

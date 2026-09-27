@@ -320,3 +320,11 @@ html.ui4 .assistant.is-minimized .as-spark { width: 36px; height: 36px; border-r
 /* Punto de aviso: ha llegado una respuesta mientras estaba minimizado. */
 html.ui4 .assistant.is-minimized.has-unread::after { content: ""; position: absolute; top: -3px; right: -3px; width: 12px; height: 12px; border: 2px solid var(--surface-solid); border-radius: 50%; background: #e5484d; }
 body.footer-is-minimized .assistant.is-minimized, body.reader-chrome-hidden .assistant.is-minimized { bottom: calc(max(14px, env(safe-area-inset-bottom)) + 58px) !important; }
+
+/* ---- Pizarra: lienzo de fondo + lienzo del trazo en curso (baja latencia) ---- */
+.board-pane { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.board-stage { position: sticky; top: 0; }
+.board-stage .board-canvas { position: static; }
+.board-live { position: absolute; left: 0; top: 0; display: block; touch-action: none; cursor: crosshair; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+.board-live[data-mode="eraser"] { cursor: cell; }
+.board-live[data-mode="move"] { cursor: grab; }
