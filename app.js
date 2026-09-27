@@ -1936,6 +1936,7 @@ async function renderFacingPage(token) {
       linkLayer: $("facingLinkLayer"),
       sizeTarget: wrap,
     }, token);
+    if (currentBook) renderPageAnnotations($("facingAnnotationLayer"), facingNumber);
   } catch (error) {
     if (error?.name !== "RenderingCancelledException") console.error("No se pudo renderizar la página enfrentada", error);
   }
@@ -1975,7 +1976,7 @@ async function buildContinuousView(targetPage = currentPage) {
     slot.dataset.page = String(i);
     slot.style.width = `${baseViewport.width}px`;
     slot.style.height = `${baseViewport.height}px`;
-    slot.innerHTML = `<canvas></canvas><div class="textLayer"></div><div class="link-layer"></div><span class="cont-num">${i}</span>`;
+    slot.innerHTML = `<canvas></canvas><div class="annotation-layer"></div><div class="live-highlight-layer"></div><div class="textLayer"></div><div class="link-layer"></div><svg class="ink-drawing-layer" viewBox="0 0 1 1" preserveAspectRatio="none"></svg><span class="cont-num">${i}</span>`;
     fragment.append(slot);
   }
   container.append(fragment);
@@ -2046,6 +2047,7 @@ async function renderContinuousSlot(slot) {
       sizeTarget: slot,
     });
     if (viewMode !== "continuous") return;
+    if (currentBook) renderPageAnnotations(slot.querySelector(".annotation-layer"), pageNumber);
     if (captureAreas().some((area) => area.page === pageNumber)) renderAreaMarks();
     if (board.data?.items.some((item) => item.source?.page === pageNumber)) renderBoardLinks();
     // Si la página salió de la vista mientras se dibujaba, se libera ya: si no,
@@ -2169,8 +2171,9 @@ async function setViewMode(mode, options = {}) {
     button.classList.toggle("active", button.dataset.viewMode === mode),
   );
   $("viewer").classList.toggle("double-mode", mode === "double");
-  // La tinta usa el motor de página única; se desactiva en scroll continuo.
-  const inkDisabled = mode === "continuous" || reflowMode;
+  // Cada página (también en scroll continuo y doble página) tiene sus capas de
+  // anotación y dibujo; la tinta solo se desactiva en el modo lectura.
+  const inkDisabled = reflowMode;
   if (inkDisabled && markerMode) toggleMarkerMode();
   if (inkDisabled && eraserMode) toggleEraserMode(false);
   $("markerModeBtn").disabled = inkDisabled;
@@ -7518,13 +7521,45 @@ function openAnnotationEditor(id, anchorRect = null) {
   }
   editor.querySelector("[data-editor-note]").onchange = (event) => updateAnnotation(id, { note: event.target.value.trim().slice(0, 2000) });
 }
+// ---- Superficies de página ----
+// Cada página dibujada —en la vista de una página, en doble página o en el
+// scroll continuo— tiene su capa de anotaciones, su capa de resaltado en vivo
+// y su capa de dibujo. Crear, pintar y borrar anotaciones trabaja sobre la
+// superficie de la página, no solo sobre la vista de una página.
+function surfacePage(host) {
+  if (!host) return 0;
+  if (host.id === "canvasWrap") return currentPage;
+  if (host.id === "facingWrap") return currentPage + 1;
+  return Number(host.dataset.page) || 0;
+}
+function surfaceHostOf(node) {
+  const element = node?.nodeType === 1 ? node : node?.parentElement;
+  return element?.closest?.("#canvasWrap, #facingWrap, .cont-page") || null;
+}
+// Páginas visibles con su contenedor, en el diseño actual.
+function renderedSurfaces() {
+  const surfaces = [];
+  if (!$("continuousView").hidden) {
+    for (const slot of $("continuousView").querySelectorAll(".cont-page")) if (continuousRendered.has(Number(slot.dataset.page))) surfaces.push({ host: slot, page: Number(slot.dataset.page) });
+    return surfaces;
+  }
+  if (!$("canvasWrap").hidden) surfaces.push({ host: $("canvasWrap"), page: currentPage });
+  if (!$("facingWrap").hidden) surfaces.push({ host: $("facingWrap"), page: currentPage + 1 });
+  return surfaces;
+}
 function renderAnnotations() {
-  const layer = $("annotationLayer");
-  layer.innerHTML = "";
   renderAreaMarks();
   renderBoardLinks();
+  document.querySelectorAll(".annotation-layer").forEach((layer) => layer.replaceChildren());
   if (!currentBook) return;
-  for (const mark of annotations().filter((a) => a.page === currentPage)) {
+  const marks = annotations();
+  for (const { host, page } of renderedSurfaces()) renderPageAnnotations(host.querySelector(".annotation-layer"), page, marks);
+  renderStickyNotes();
+}
+function renderPageAnnotations(layer, pageNumber, marks = annotations()) {
+  if (!layer) return;
+  layer.replaceChildren();
+  for (const mark of marks.filter((a) => a.page === pageNumber)) {
     if (mark.type === "sticky") continue;
     if ((mark.type === "pen" || mark.type === "arrow") && mark.points?.length) {
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -7569,7 +7604,6 @@ function renderAnnotations() {
       layer.appendChild(el);
     }
   }
-  renderStickyNotes();
 }
 function renderAnnotationList() {
   const list = $("annotationList");
@@ -7624,17 +7658,22 @@ function renderAnnotationList() {
   updateThumbNoteBadges();
   if (!suppressNotebookRender && !$("notebookPanel").hidden && !$("notebookPanel").contains(document.activeElement)) renderNotebook();
 }
+// Página de la selección de texto actual (en cualquier vista). Una selección
+// que cruza de una página a otra no se puede anotar.
+function selectionSurface() {
+  const sel = window.getSelection();
+  if (!sel?.rangeCount || sel.isCollapsed) return null;
+  const host = surfaceHostOf(sel.anchorNode);
+  if (!host || host !== surfaceHostOf(sel.focusNode)) return null;
+  const layer = host.querySelector(".textLayer");
+  if (!layer?.contains(sel.anchorNode) || !layer.contains(sel.focusNode)) return null;
+  return { host, page: surfacePage(host) };
+}
 function selectedRects() {
   const sel = window.getSelection(),
-    layer = $("textLayer");
-  if (
-    !sel?.rangeCount ||
-    sel.isCollapsed ||
-    !layer.contains(sel.anchorNode) ||
-    !layer.contains(sel.focusNode)
-  )
-    return null;
-  const pageBox = $("canvasWrap").getBoundingClientRect();
+    surface = selectionSurface();
+  if (!surface) return null;
+  const pageBox = surface.host.getBoundingClientRect();
   const rects = [...sel.getRangeAt(0).getClientRects()]
     .map((r) => ({
       x: (r.left - pageBox.left) / pageBox.width,
@@ -7671,10 +7710,10 @@ async function copySelectionText() {
   hideAnnotationActions();
 }
 function paintLiveHighlight() {
-  const layer = $("liveHighlightLayer"),
-    rects = selectedRects();
-  layer.innerHTML = "";
-  if (!markerMode || !rects) return;
+  clearLiveHighlight();
+  const rects = selectedRects(),
+    layer = selectionSurface()?.host.querySelector(".live-highlight-layer");
+  if (!markerMode || !rects || !layer) return;
   for (const rect of rects) {
     const el = document.createElement("i");
     el.className = `live-highlight ${inkTool}`;
@@ -7689,7 +7728,7 @@ function paintLiveHighlight() {
   }
 }
 function clearLiveHighlight() {
-  $("liveHighlightLayer").innerHTML = "";
+  document.querySelectorAll(".live-highlight-layer").forEach((layer) => layer.childElementCount && layer.replaceChildren());
 }
 function isDrawingTool(tool = inkTool) {
   return tool === "pen" || tool === "box" || tool === "arrow";
@@ -7700,16 +7739,17 @@ function syncInkInteractionMode() {
   $("inkDrawingLayer").style.setProperty("--draw-color", annotationStyle(annotationColor, inkOpacity));
   $("inkDrawingLayer").style.setProperty("--draw-width", String(inkWidth));
 }
-function pageInkPoint(event) {
-  const box = $("canvasWrap").getBoundingClientRect();
+function pageInkPoint(event, box = (inkStroke?.host || $("canvasWrap")).getBoundingClientRect()) {
   return {
     x: Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)),
     y: Math.max(0, Math.min(1, (event.clientY - box.top) / box.height)),
   };
 }
 function paintLiveStroke() {
-  const layer = $("inkDrawingLayer");
+  const layer = inkStroke?.layer || lastInkLayer || $("inkDrawingLayer");
+  if (lastInkLayer && lastInkLayer !== layer) lastInkLayer.replaceChildren();
   layer.replaceChildren();
+  lastInkLayer = layer;
   if (!inkStroke) return;
   const color = annotationStyle(annotationColor, inkOpacity);
   if (inkStroke.type === "box") {
@@ -7761,7 +7801,7 @@ function saveInkStroke() {
   }
   const mark = {
     id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
-    page: currentPage,
+    page: inkStroke.page || currentPage,
     type: inkStroke.type,
     color: annotationColor,
     opacity: inkOpacity,
@@ -7803,12 +7843,13 @@ function showAnnotationActions() {
 }
 function saveAnnotation(type, quiet = false) {
   const rects = selectedRects(),
+    page = selectionSurface()?.page,
     text = window.getSelection()?.toString().trim();
-  if (!rects || !currentBook) return false;
+  if (!rects || !page || !currentBook) return false;
   const items = annotations();
   items.push({
     id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
-    page: currentPage,
+    page,
     type,
     color: annotationColor,
     opacity: inkOpacity,
@@ -8069,11 +8110,12 @@ function selectionOverlaps(annotation, rects) {
   );
 }
 function eraseSelectedAnnotations(quiet = false) {
-  const rects = selectedRects();
-  if (!rects || !currentBook) return false;
+  const rects = selectedRects(),
+    page = selectionSurface()?.page;
+  if (!rects || !page || !currentBook) return false;
   const all = annotations();
   const kept = all.filter(
-    (annotation) => annotation.page !== currentPage || !selectionOverlaps(annotation, rects),
+    (annotation) => annotation.page !== page || !annotation.rects?.length || !selectionOverlaps(annotation, rects),
   );
   const erased = all.length - kept.length;
   if (!erased) return false;
@@ -8116,7 +8158,7 @@ function openNotePanel() {
   const rects = selectedRects(),
     text = window.getSelection()?.toString().trim();
   if (!rects || !text) return toast("Selecciona texto para añadir una nota");
-  pendingNote = { rects, text: text.slice(0, 500) };
+  pendingNote = { rects, page: selectionSurface()?.page || currentPage, text: text.slice(0, 500) };
   $("noteQuote").textContent = pendingNote.text;
   $("noteText").value = "";
   $("notePanel").hidden = false;
@@ -8134,7 +8176,7 @@ function saveNote() {
   const items = annotations();
   items.push({
     id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
-    page: currentPage,
+    page: pendingNote.page || currentPage,
     type: "note",
     text: pendingNote.text,
     note: note.slice(0, 1000),
@@ -11101,46 +11143,74 @@ $("markerModeBtn").onclick = () => {
   document.body.classList.toggle("ink-toolbar-open", !strip.hidden);
 };
 $("eraserModeBtn").onclick = () => toggleEraserMode();
-$("inkDrawingLayer").addEventListener("pointerdown", (event) => {
-  if (!markerMode || !isDrawingTool() || !currentBook) return;
+// Dibujo sobre cualquier página (vista de una página, doble página o scroll
+// continuo): cada página tiene su capa de dibujo y el trazo se guarda en la
+// página donde empezó. Con «Solo lápiz», el dedo desplaza el documento.
+let inkPan = null;
+let lastInkLayer = null;
+$("viewer").addEventListener("pointerdown", (event) => {
+  const layer = event.target.closest?.(".ink-drawing-layer");
+  if (!layer || !markerMode || !isDrawingTool() || !currentBook) return;
   registerPenInput(event);
-  // La palma no dibuja ni sustituye el trazo que se está haciendo con el lápiz.
-  if (rejectInkTouch(event) || inkStroke) {
-    event.preventDefault();
+  event.preventDefault();
+  if (event.pointerType === "touch") {
+    // La palma no dibuja ni sustituye el trazo del lápiz; con «Solo lápiz» el
+    // dedo desplaza la página.
+    const palm = event.width > 42 || event.height > 42;
+    if (!palm && !inkStroke && !inkPan && inkPenActive === null && inkPenOnly()) {
+      const viewer = $("viewer");
+      inkPan = { id: event.pointerId, x: event.clientX, y: event.clientY, left: viewer.scrollLeft, top: viewer.scrollTop, layer };
+      layer.setPointerCapture(event.pointerId);
+      return;
+    }
+    if (rejectInkTouch(event)) return;
+  }
+  if (inkStroke) return;
+  const host = surfaceHostOf(layer);
+  inkStroke = { id: event.pointerId, type: inkTool, layer, host, page: surfacePage(host), points: [] };
+  const point = pageInkPoint(event);
+  inkStroke.points = inkTool === "box" || inkTool === "arrow" ? [point, point] : [point];
+  layer.setPointerCapture(event.pointerId);
+  paintLiveStroke();
+});
+$("viewer").addEventListener("pointermove", (event) => {
+  if (inkPan?.id === event.pointerId) {
+    const viewer = $("viewer");
+    viewer.scrollLeft = inkPan.left - (event.clientX - inkPan.x);
+    viewer.scrollTop = inkPan.top - (event.clientY - inkPan.y);
     return;
   }
-  const point = pageInkPoint(event);
-  inkStroke = { id: event.pointerId, type: inkTool, points: inkTool === "box" || inkTool === "arrow" ? [point, point] : [point] };
-  $("inkDrawingLayer").setPointerCapture(event.pointerId);
-  paintLiveStroke();
-  event.preventDefault();
-});
-$("inkDrawingLayer").addEventListener("pointermove", (event) => {
   if (!inkStroke || inkStroke.id !== event.pointerId) return;
   if (inkStroke.type === "box" || inkStroke.type === "arrow") inkStroke.points[1] = pageInkPoint(event);
   else {
     // Todos los puntos que el lápiz envía entre fotogramas, no solo el último.
+    const box = inkStroke.host.getBoundingClientRect();
     for (const item of event.getCoalescedEvents?.().length ? event.getCoalescedEvents() : [event]) {
-      const point = pageInkPoint(item);
+      const point = pageInkPoint(item, box);
       const last = inkStroke.points.at(-1);
       if (Math.hypot(point.x - last.x, point.y - last.y) > 0.001) inkStroke.points.push(point);
     }
   }
   paintLiveStroke();
 });
-$("inkDrawingLayer").addEventListener("pointerup", (event) => {
+$("viewer").addEventListener("pointerup", (event) => {
+  if (inkPan?.id === event.pointerId) {
+    inkPan = null;
+    return;
+  }
   if (!inkStroke || inkStroke.id !== event.pointerId) return;
   saveInkStroke();
 });
-$("inkDrawingLayer").addEventListener("pointercancel", (event) => {
+$("viewer").addEventListener("pointercancel", (event) => {
+  if (inkPan?.id === event.pointerId) inkPan = null;
   if (!inkStroke || inkStroke.id !== event.pointerId) return;
   // iPadOS cancela a veces el gesto del lápiz: se conserva lo ya dibujado.
   if (inkStroke.points.length > 1) return saveInkStroke();
   inkStroke = null;
   paintLiveStroke();
 });
-$("annotationLayer").addEventListener("click", (event) => {
-  const id = event.target.closest("[data-annotation-id]")?.dataset.annotationId;
+$("viewer").addEventListener("click", (event) => {
+  const id = event.target.closest(".annotation-layer [data-annotation-id]")?.dataset.annotationId;
   if (!id) return;
   if (eraserMode) {
     deleteAnnotation(id);
