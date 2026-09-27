@@ -5621,8 +5621,9 @@ function flushBoardSave({ idle = false } = {}) {
   boardSavePending = null;
   if (!pending) return;
   setJSON(pending.key, pending.data);
+  // Siguiendo la lectura, el estado muestra la página (más útil que «Guardado»).
   const status = $("boardStatus");
-  if (status) status.textContent = "Guardado";
+  if (status && !boardFollowOn()) status.textContent = "Guardado";
 }
 // Copia para deshacer sin serializar: los trazos no cambian una vez hechos
 // (se comparten) y las imágenes, que sí se mueven, se copian por encima.

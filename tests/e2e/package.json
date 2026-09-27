@@ -1,0 +1,19 @@
+{
+  "name": "paper-reader-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Pruebas de navegador de Paper Reader (Playwright).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "@tesseract.js-data/eng": "1.0.0",
+    "@tesseract.js-data/spa": "1.0.0",
+    "katex": "0.16.22",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "4.10.38",
+    "tesseract.js": "5.1.1",
+    "tesseract.js-core": "5.1.1"
+  }
+}
