@@ -80,16 +80,16 @@ test("doble página muestra las anotaciones de la página derecha", async ({ pag
 
 test("PDF anotado: anotaciones estándar con apariencia y la pizarra al final", async ({ page }) => {
   await openDoc(page, "refs.pdf");
+  // La nota se añade desde el menú de selección, antes de entrar en modo Ink
+  // (el modo Ink sigue activo aunque se oculte su barra).
+  await selectWord(page, "#canvasWrap", "hook length");
+  await page.click("#noteBtn");
+  await page.fill("#noteText", "Longitud del gancho");
+  await page.click("#saveNote");
   await selectInkTool(page, "underline");
   await selectWord(page, "#canvasWrap", "pairwise");
   await selectInkTool(page, "strike");
   await selectWord(page, "#canvasWrap", "Standard");
-  await page.click("#markerModeBtn");
-  const r = await wordRect(page, "#canvasWrap", "hook length");
-  await drag(page, r.x + 1, r.y + r.height / 2, r.x + r.width - 1, r.y + r.height / 2);
-  await page.click("#noteBtn");
-  await page.fill("#noteText", "Longitud del gancho");
-  await page.click("#saveNote");
   await page.keyboard.press("w");
   const b = await page.locator("#boardLive").boundingBox();
   await page.click('[data-board-mode="pen"]');
