@@ -55,8 +55,8 @@ export async function mockBuiltinAi(context, answer, { delay = 5 } = {}) {
   );
 }
 
-export async function openDoc(page, name) {
-  await page.goto("/");
+export async function openDoc(page, name, base = "/") {
+  await page.goto(base);
   await page.waitForSelector("#fileInput", { state: "attached" });
   await page.setInputFiles("#fileInput", `${FIXTURES}/${name}`);
   await page.waitForSelector("#canvasWrap:not([hidden]) canvas, #continuousView:not([hidden]) .cont-page canvas");

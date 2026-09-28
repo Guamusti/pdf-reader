@@ -10154,7 +10154,7 @@ async function getWebLlmAi() {
     aiStatus("Preparando motor de IA local…");
     const webllm = await import("https://esm.run/@mlc-ai/web-llm@0.2.84");
     const model = chooseWebLlmModel(webllm);
-    localAiWorker = new Worker("/ai-worker.js?v=1", { type: "module" });
+    localAiWorker = new Worker(new URL("ai-worker.js?v=1", import.meta.url), { type: "module" });
     localAiEngine = await webllm.CreateWebWorkerMLCEngine(
       localAiWorker,
       model,
@@ -10184,7 +10184,7 @@ async function getVisionAi() {
     aiStatus("Descargando modelo visual local (aprox. 4 GB)…");
     const webllm = await import("https://esm.run/@mlc-ai/web-llm@0.2.84");
     const model = chooseWebLlmModel(webllm, true);
-    visionAiWorker = new Worker("/ai-worker.js?v=1", { type: "module" });
+    visionAiWorker = new Worker(new URL("ai-worker.js?v=1", import.meta.url), { type: "module" });
     visionAiEngine = await webllm.CreateWebWorkerMLCEngine(
       visionAiWorker,
       model,
@@ -11684,7 +11684,7 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
   startBackgroundSync();
   consumeSharedFiles();
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
+    navigator.serviceWorker.register("sw.js").catch(() => {});
     // La app arranca desde la copia guardada; si en segundo plano se instala
     // una versión nueva, se avisa de que se verá al volver a abrirla.
     const hadController = Boolean(navigator.serviceWorker.controller);

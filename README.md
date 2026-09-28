@@ -4,6 +4,13 @@ PWA local para leer, estudiar y anotar PDFs con una experiencia limpia en escrit
 
 Los PDF se guardan en IndexedDB del navegador. La aplicación no los sube a ningún servidor.
 
+Dónde abrirla:
+
+- **GitHub Pages:** https://guamusti.github.io/pdf-reader/ (se publica sola con cada cambio en `main`).
+- **Vercel:** https://pdf-reader-beta-orcin.vercel.app. En España, algunas operadoras bloquean las direcciones de Vercel durante los partidos de LaLiga y la web no carga (`ERR_CONNECTION_TIMED_OUT`); entonces usa la de GitHub Pages.
+
+La app usa rutas relativas, así que funciona igual en la raíz de un dominio que en una subcarpeta. Los documentos se guardan por dirección: cada sitio tiene su propia biblioteca.
+
 Incluye:
 
 - Biblioteca local, búsqueda de texto, marcadores y reanudación automática.

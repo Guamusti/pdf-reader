@@ -9,7 +9,8 @@ const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", "
 
 http
   .createServer(async (request, response) => {
-    const path = decodeURIComponent(new URL(request.url, "http://x").pathname);
+    // También bajo /pdf-reader/, como la publica GitHub Pages.
+    const path = decodeURIComponent(new URL(request.url, "http://x").pathname).replace(/^\/pdf-reader(?=\/)/, "");
     const file = normalize(join(root, path === "/" ? "index.html" : path));
     if (!file.startsWith(root) || file.includes("node_modules")) return response.writeHead(403).end();
     try {
