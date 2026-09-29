@@ -112,3 +112,11 @@ test("cifrado de bytes: ida y vuelta", async () => {
   const encrypted = await encryptBytes(key, data);
   assert.equal(new TextDecoder().decode(await decryptBytes(key, encrypted)), "datos privados");
 });
+
+test("mergeValue combina carpetas creadas en dos dispositivos a la vez", () => {
+  const base = JSON.stringify([{ id: "a", name: "Álgebra", parent: "", updatedAt: 1 }]);
+  const local = JSON.stringify([{ id: "a", name: "Álgebra lineal", parent: "", updatedAt: 5 }, { id: "b", name: "Topología", parent: "", updatedAt: 3 }]);
+  const remote = JSON.stringify([{ id: "a", name: "Álgebra", parent: "", updatedAt: 1 }, { id: "c", name: "Grupos", parent: "a", updatedAt: 4 }]);
+  const merged = JSON.parse(mergeValue("paper.folders", base, local, remote, 10, 20));
+  assert.deepEqual(merged.map((folder) => `${folder.id}:${folder.name}`).sort(), ["a:Álgebra lineal", "b:Topología", "c:Grupos"]);
+});

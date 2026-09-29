@@ -377,7 +377,7 @@ export async function decryptBackupBlob(blob, passphrase) {
 // Combina un valor local y otro remoto. Con `base` (el último estado común)
 // la fusión es a tres bandas: se sabe qué lado cambió y los borrados se
 // propagan. Sin base (restaurar una copia) se hace la unión de ambos lados.
-const ITEM_ARRAY_KEY = /\.(annotations|cards)$/;
+const ITEM_ARRAY_KEY = /\.(annotations|cards|folders)$/;
 const SET_ARRAY_KEY = /\.bookmarks$/;
 const STATS_KEY = /\.reading-stats$/;
 function parseJson(value, fallback) {

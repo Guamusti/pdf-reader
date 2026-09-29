@@ -102,6 +102,11 @@ Incluye:
 - **Trazo inmediato**: el trazo en curso va en una capa propia que se dibuja en el mismo evento del lápiz (sin esperar al siguiente fotograma), con todos los puntos intermedios y la predicción del navegador. El resto de la pizarra no se redibuja mientras escribes.
 - **Sin tirón al levantar el lápiz**: deshacer ya no copia la pizarra entera, el guardado se agrupa y nunca ocurre en mitad de un trazo, y los recortes para fondo oscuro se preparan una sola vez. En una pizarra con 300 trazos y la CPU ralentizada ×6, el trabajo por movimiento pasa de 5,3 ms a 1,2 ms y el de terminar un trazo de 27–37 ms a 2,5 ms.
 
+### Novedades v12: enlaces internos y carpetas
+
+- **Vista previa de enlaces internos** («[2.1]», «(3.4)», «[12]», como los de hyperref): dice qué hay en el destino («Teorema 2.1 · página 5», «Ecuación (3.4)», «Referencia [12]», «Sección 3.2 · Título») y muestra la página entera, desplazable y ampliada a la columna de texto, empezando en el destino y con él marcado. En iPad, el primer toque abre la vista previa y el segundo (o «Ir») salta. El salto va al punto exacto, lo resalta y ofrece «Volver a la p. N».
+- **Carpetas en la biblioteca**, con subcarpetas: «Nueva carpeta», el botón de carpeta de cada documento («Mover a…»), o arrastrar el documento hasta una carpeta o hasta la ruta de arriba. Lo que añades estando dentro de una carpeta se queda en ella. Al buscar o filtrar se ve en qué carpeta está cada documento. Eliminar una carpeta nunca borra documentos: suben a la carpeta de arriba. Las carpetas viajan en la copia de seguridad y la sincronización.
+
 ### Pruebas
 
 ```bash

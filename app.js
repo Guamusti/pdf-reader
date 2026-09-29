@@ -15,8 +15,8 @@ import {
   backupKind,
   encryptBackupBlob,
   decryptBackupBlob,
-} from "./storage.js?v=1";
-import { folderSyncSupported, openSyncFolder, syncFolder } from "./sync.js?v=1";
+} from "./storage.js?v=2";
+import { folderSyncSupported, openSyncFolder, syncFolder } from "./sync.js?v=2";
 import {
   buildLines,
   extractReferences,
@@ -586,7 +586,7 @@ function formatBytes(bytes) {
 // Un único archivo .paperbackup con la biblioteca (opcionalmente sin los PDFs),
 // todas las notas, anotaciones, tarjetas y ajustes. Puede cifrarse con una
 // contraseña. Restaurar combina: no borra nada de lo que ya tengas.
-const DEVICE_ONLY_KEYS = /^paper\.(notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|ai-profile|ai-server|ai-webllm-consent|ai-vision-consent|sync-[\w-]+|__[\w-]+)$/;
+const DEVICE_ONLY_KEYS = /^paper\.(library-folder|notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|ai-profile|ai-server|ai-webllm-consent|ai-vision-consent|sync-[\w-]+|__[\w-]+)$/;
 async function exportFullBackup({ includeFiles = true, passphrase = "" } = {}) {
   if (!db) return toast("El almacenamiento local no está disponible");
   await kv.flush().catch(() => {});
@@ -1110,6 +1110,233 @@ function libraryCoverHtml(book, url, large = false) {
     url ? `<img src="${url}" alt="" loading="lazy">` : ""
   }<span class="lib-cover-fallback"><b>${escapeHtml(name.slice(0, 80))}</b></span><span class="lib-badge">${isMarkdown ? "MD" : "PDF"}</span></span>`;
 }
+// ---- Carpetas de la biblioteca ----
+// `paper.folders` guarda la lista de carpetas ({ id, name, parent }) y cada
+// documento su carpeta en `paper.<id>.folder`: así se copian y sincronizan con
+// el resto de datos, y al borrar un documento su carpeta se olvida sola.
+let libraryFolder = kv.getItem("paper.library-folder") || "";
+function libraryFolders() {
+  return getJSON("paper.folders", []).filter((folder) => folder?.id && folder.name);
+}
+function saveLibraryFolders(folders) {
+  setJSON("paper.folders", folders);
+}
+function folderById(id) {
+  return id ? libraryFolders().find((folder) => folder.id === id) || null : null;
+}
+function bookFolder(id) {
+  const folder = kv.getItem(key(id, "folder")) || "";
+  return folderById(folder) ? folder : "";
+}
+function setBookFolder(id, folder) {
+  if (folder) kv.setItem(key(id, "folder"), folder);
+  else kv.removeItem(key(id, "folder"));
+}
+function folderChildren(parent, folders = libraryFolders()) {
+  return folders.filter((folder) => (folder.parent || "") === (parent || "")).sort((a, b) => a.name.localeCompare(b.name, "es", { sensitivity: "base", numeric: true }));
+}
+// Carpeta y todas las que cuelgan de ella.
+function folderSubtree(id, folders = libraryFolders()) {
+  const out = new Set(id ? [id] : folders.map((folder) => folder.id));
+  if (!id) return out;
+  let grown = true;
+  while (grown) {
+    grown = false;
+    for (const folder of folders) if (folder.parent && out.has(folder.parent) && !out.has(folder.id)) out.add(folder.id), (grown = true);
+  }
+  return out;
+}
+function folderPath(id, folders = libraryFolders()) {
+  const path = [];
+  const seen = new Set();
+  for (let folder = folders.find((f) => f.id === id); folder && !seen.has(folder.id); folder = folders.find((f) => f.id === folder.parent)) {
+    seen.add(folder.id);
+    path.unshift(folder);
+  }
+  return path;
+}
+function currentLibraryFolder() {
+  if (libraryFolder && !folderById(libraryFolder)) libraryFolder = "";
+  return libraryFolder;
+}
+function openLibraryFolder(id) {
+  libraryFolder = id && folderById(id) ? id : "";
+  kv.setItem("paper.library-folder", libraryFolder);
+  // Al entrar en una carpeta se ve su contenido, no un filtro anterior.
+  if ($("librarySearch")) $("librarySearch").value = "";
+  libraryFilter = "all";
+  renderLibrary();
+}
+function uniqueFolderName(name, parent, except = "") {
+  const taken = new Set(folderChildren(parent).filter((folder) => folder.id !== except).map((folder) => folder.name.toLocaleLowerCase()));
+  let candidate = name;
+  for (let n = 2; taken.has(candidate.toLocaleLowerCase()); n++) candidate = `${name} (${n})`;
+  return candidate;
+}
+function createFolder(name, parent = "") {
+  const now = Date.now();
+  const folder = { id: `f-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`, name: uniqueFolderName(name, parent), parent: parent || "", createdAt: now, updatedAt: now };
+  saveLibraryFolders([...libraryFolders(), folder]);
+  return folder;
+}
+function renameFolder(id, name) {
+  saveLibraryFolders(libraryFolders().map((folder) => (folder.id === id ? { ...folder, name: uniqueFolderName(name, folder.parent, id), updatedAt: Date.now() } : folder)));
+}
+function moveFolder(id, parent) {
+  if (folderSubtree(id).has(parent)) return false;
+  saveLibraryFolders(libraryFolders().map((folder) => (folder.id === id ? { ...folder, parent: parent || "", name: uniqueFolderName(folder.name, parent, id), updatedAt: Date.now() } : folder)));
+  return true;
+}
+// Al eliminar una carpeta no se borra ningún documento: su contenido
+// (documentos y subcarpetas) pasa a la carpeta que la contenía.
+async function deleteFolder(id) {
+  const folder = folderById(id);
+  if (!folder) return;
+  const books = await dbAll();
+  const inside = books.filter((book) => bookFolder(book.id) === id);
+  const subfolders = folderChildren(id);
+  const where = folder.parent ? `«${folderById(folder.parent)?.name}»` : "la biblioteca";
+  const contents = [inside.length ? `${inside.length} documento${inside.length === 1 ? "" : "s"}` : "", subfolders.length ? `${subfolders.length} subcarpeta${subfolders.length === 1 ? "" : "s"}` : ""].filter(Boolean).join(" y ");
+  if (contents && !confirm(`¿Eliminar la carpeta «${folder.name}»? Sus ${contents} pasan a ${where}; no se borra ningún documento.`)) return;
+  inside.forEach((book) => setBookFolder(book.id, folder.parent));
+  saveLibraryFolders(libraryFolders().filter((item) => item.id !== id).map((item) => (item.parent === id ? { ...item, parent: folder.parent || "", updatedAt: Date.now() } : item)));
+  if (libraryFolder === id) libraryFolder = folder.parent || "";
+  kv.setItem("paper.library-folder", libraryFolder);
+  toast(`Carpeta «${folder.name}» eliminada`);
+  renderLibrary();
+}
+// Pequeño diálogo para escribir un nombre (el prompt() nativo se ve fuera de
+// lugar y en algunas vistas de iPad no aparece).
+function askName({ title, value = "", action = "Crear" }) {
+  return new Promise((resolve) => {
+    const host = $("libraryPanel");
+    host.querySelector(".lib-dialog")?.remove();
+    const dialog = document.createElement("form");
+    dialog.className = "lib-dialog";
+    dialog.innerHTML = `<div class="lib-dialog-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><strong>${escapeHtml(title)}</strong><input type="text" maxlength="80" autocomplete="off" enterkeyhint="done" /><div class="lib-dialog-actions"><button type="button" data-dialog-cancel>Cancelar</button><button type="submit" class="is-primary">${escapeHtml(action)}</button></div></div>`;
+    const input = dialog.querySelector("input");
+    input.value = value;
+    const finish = (result) => {
+      dialog.remove();
+      resolve(result);
+    };
+    dialog.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = input.value.replace(/\s+/g, " ").trim();
+      if (name) finish(name);
+      else input.focus();
+    });
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog || event.target.closest("[data-dialog-cancel]")) finish(null);
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      finish(null);
+    });
+    host.append(dialog);
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  });
+}
+// Menú contextual de la biblioteca (mover, renombrar…), junto al botón.
+function closeLibraryMenu() {
+  $("libraryMenu")?.remove();
+}
+function openLibraryMenu(anchor, items) {
+  closeLibraryMenu();
+  const menu = document.createElement("div");
+  menu.id = "libraryMenu";
+  menu.className = "lib-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = items
+    .map((item, index) =>
+      item.heading
+        ? `<div class="lib-menu-heading">${escapeHtml(item.heading)}</div>`
+        : `<button type="button" role="menuitem" data-menu-index="${index}"${item.disabled ? " disabled" : ""} class="${item.danger ? "is-danger" : ""}${item.checked ? " is-checked" : ""}" style="--depth:${item.depth || 0}">${item.icon ? iconSvg(item.icon) : ""}<span>${escapeHtml(item.label)}</span>${item.checked ? iconSvg("check") : ""}</button>`,
+    )
+    .join("");
+  menu.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-menu-index]");
+    if (!button) return;
+    closeLibraryMenu();
+    items[Number(button.dataset.menuIndex)].run?.();
+  });
+  $("libraryPanel").append(menu);
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth,
+    height = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width))}px`;
+  menu.style.top = `${rect.bottom + 6 + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : rect.bottom + 6}px`;
+  menu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+}
+// Lista de destinos (biblioteca y carpetas, sangradas por nivel).
+function folderTargets(checked, exclude = new Set()) {
+  const folders = libraryFolders();
+  const out = [];
+  const walk = (parent, depth) => {
+    for (const folder of folderChildren(parent, folders)) {
+      if (exclude.has(folder.id)) continue;
+      out.push({ id: folder.id, label: folder.name, depth });
+      walk(folder.id, depth + 1);
+    }
+  };
+  walk("", 1);
+  return [{ id: "", label: "Biblioteca (sin carpeta)", depth: 0 }, ...out].map((target) => ({ ...target, checked: target.id === checked }));
+}
+async function openMoveBookMenu(anchor, id) {
+  const book = await dbGet(id);
+  if (!book) return;
+  const current = bookFolder(id);
+  const move = (folder) => {
+    setBookFolder(id, folder);
+    toast(folder ? `«${libraryDisplayName(book.name)}» → ${folderPath(folder).map((f) => f.name).join(" › ")}` : `«${libraryDisplayName(book.name)}» está ahora fuera de las carpetas`);
+    renderLibrary();
+  };
+  openLibraryMenu(anchor, [
+    { heading: "Mover a" },
+    ...folderTargets(current).map((target) => ({ label: target.label, icon: target.id ? "folder" : "library", depth: target.depth, checked: target.checked, run: () => target.id !== current && move(target.id) })),
+    { label: "Nueva carpeta…", icon: "plus", run: async () => {
+      const name = await askName({ title: "Nueva carpeta", action: "Crear y mover" });
+      if (name) move(createFolder(name, currentLibraryFolder()).id);
+    } },
+  ]);
+}
+function openFolderMenu(anchor, id) {
+  const folder = folderById(id);
+  if (!folder) return;
+  openLibraryMenu(anchor, [
+    { label: "Renombrar…", icon: "pen", run: async () => {
+      const name = await askName({ title: "Renombrar carpeta", value: folder.name, action: "Guardar" });
+      if (name && name !== folder.name) renameFolder(id, name), renderLibrary();
+    } },
+    { label: "Nueva subcarpeta…", icon: "plus", run: async () => {
+      const name = await askName({ title: `Nueva carpeta en «${folder.name}»` });
+      if (name) createFolder(name, id), renderLibrary();
+    } },
+    { heading: "Mover a" },
+    ...folderTargets(folder.parent || "", folderSubtree(id)).map((target) => ({ label: target.label, icon: target.id ? "folder" : "library", depth: target.depth, checked: target.checked, run: () => {
+      if (target.id !== (folder.parent || "") && moveFolder(id, target.id)) renderLibrary();
+    } })),
+    { label: "Eliminar carpeta", icon: "trash", danger: true, run: () => deleteFolder(id) },
+  ]);
+}
+function folderTileHtml(folder, books, coverUrl) {
+  const subtree = folderSubtree(folder.id);
+  const inside = books.filter((book) => subtree.has(bookFolder(book.id)));
+  const direct = books.filter((book) => bookFolder(book.id) === folder.id).length;
+  const subfolders = folderChildren(folder.id).length;
+  const thumbs = inside
+    .map((book) => coverUrl(book))
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((url) => `<img src="${url}" alt="" loading="lazy">`)
+    .join("");
+  const meta = [`${inside.length} documento${inside.length === 1 ? "" : "s"}`, subfolders ? `${subfolders} carpeta${subfolders === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+  return `<article class="lib-folder" data-folder-drop="${escapeHtml(folder.id)}"><button class="lib-folder-open" data-folder-open="${escapeHtml(folder.id)}" title="${escapeHtml(folder.name)}"><span class="lib-folder-art"><span class="lib-folder-tab"></span><span class="lib-folder-body">${thumbs ? `<span class="lib-folder-thumbs">${thumbs}</span>` : iconSvg("folder")}</span></span><span class="lib-info"><strong class="lib-name">${escapeHtml(folder.name)}</strong><span class="lib-meta">${meta}</span>${direct && direct !== inside.length ? `<span class="lib-detail">${direct} aquí</span>` : ""}</span></button><button class="lib-more" data-folder-menu="${escapeHtml(folder.id)}" aria-label="Opciones de la carpeta ${escapeHtml(folder.name)}" title="Opciones de la carpeta">${iconSvg("more")}</button></article>`;
+}
 async function renderLibrary() {
   flushReadingSession(false);
   const books = await dbAll();
@@ -1126,15 +1353,23 @@ async function renderLibrary() {
   const view = kv.getItem("paper.library-view") || "grid";
   const estimates = new Map(books.map((book) => [book.id, readingEstimate(book)]));
   const status = new Map(books.map((book) => [book.id, libraryStatus(book, estimates.get(book.id))]));
-  const counts = { all: books.length, reading: 0, new: 0, done: 0, markdown: 0 };
-  books.forEach((book) => {
+  // Carpeta abierta: sin búsqueda ni filtro se ve su contenido (subcarpetas y
+  // documentos); al buscar o filtrar, todo lo que cuelga de ella.
+  const folders = libraryFolders();
+  const folder = currentLibraryFolder();
+  const scope = folderSubtree(folder, folders);
+  const inScope = (book) => !folder || scope.has(bookFolder(book.id));
+  const scoped = books.filter(inScope);
+  const counts = { all: scoped.length, reading: 0, new: 0, done: 0, markdown: 0 };
+  scoped.forEach((book) => {
     counts[status.get(book.id)]++;
     if (book.kind === "markdown") counts.markdown++;
   });
   if (libraryFilter !== "all" && !counts[libraryFilter]) libraryFilter = "all";
   const matchesFilter = (book) => libraryFilter === "all" || (libraryFilter === "markdown" ? book.kind === "markdown" : status.get(book.id) === libraryFilter);
-  const visibleBooks = books
-    .filter((book) => (!query || book.name.toLocaleLowerCase().includes(query) || libraryDisplayName(book.name).toLocaleLowerCase().includes(query)) && matchesFilter(book))
+  const browsing = !query && libraryFilter === "all";
+  const visibleBooks = scoped
+    .filter((book) => (!browsing || bookFolder(book.id) === folder) && (!query || book.name.toLocaleLowerCase().includes(query) || libraryDisplayName(book.name).toLocaleLowerCase().includes(query)) && matchesFilter(book))
     .sort((a, b) => {
       if (sort === "name") return libraryDisplayName(a.name).localeCompare(libraryDisplayName(b.name), "es", { sensitivity: "base", numeric: true });
       if (sort === "progress") return estimates.get(b.id).progress - estimates.get(a.id).progress;
@@ -1148,7 +1383,7 @@ async function renderLibrary() {
     ? [`${books.length} documento${books.length === 1 ? "" : "s"}`, totalMs >= 60000 ? `${formatReadingDuration(totalMs, true)} leídos` : "", remainingMs >= 60000 ? `≈ ${formatReadingDuration(remainingMs, true)} por leer` : ""].filter(Boolean).join(" · ")
     : "Tus PDFs, privados y siempre a mano";
   // Continuar leyendo: el documento en curso más reciente.
-  const resume = !query && libraryFilter === "all" ? [...books].filter((book) => status.get(book.id) === "reading").sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0))[0] : null;
+  const resume = !query && libraryFilter === "all" && !folder ? [...books].filter((book) => status.get(book.id) === "reading").sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0))[0] : null;
   const continueBox = $("libraryContinue");
   if (resume) {
     const stats = estimates.get(resume.id);
@@ -1165,6 +1400,13 @@ async function renderLibrary() {
     ["done", "Terminados"],
     ...(counts.markdown ? [["markdown", "Markdown"]] : []),
   ];
+  // Ruta de carpetas («Biblioteca › Álgebra › Grupos») y «Nueva carpeta».
+  const path = folderPath(folder, folders);
+  const crumb = (id, label, current) => `<button type="button" class="lib-crumb${current ? " is-current" : ""}" data-folder-open="${escapeHtml(id)}" data-folder-drop="${escapeHtml(id)}"${current ? ' aria-current="page"' : ""}>${id ? iconSvg("folder") : iconSvg("library")}<span>${escapeHtml(label)}</span></button>`;
+  setHtml($("libraryPath"), books.length || folders.length
+    ? `<nav class="lib-crumbs" aria-label="Carpetas">${[crumb("", "Biblioteca", !folder), ...path.map((item, index) => crumb(item.id, item.name, index === path.length - 1))].join('<span class="lib-crumb-sep" aria-hidden="true">›</span>')}</nav><button type="button" class="lib-new-folder" data-folder-new>${iconSvg("plus")}<span>Nueva carpeta</span></button>`
+    : "");
+  $("libraryPath").hidden = !(books.length || folders.length);
   setHtml($("libraryFilters"), books.length
     ? filters.map(([id, label]) => `<button type="button" role="radio" data-library-filter="${id}" aria-checked="${libraryFilter === id}" ${id !== "all" && !counts[id] ? "disabled" : ""}>${label}<span>${counts[id]}</span></button>`).join("")
     : "");
@@ -1173,19 +1415,24 @@ async function renderLibrary() {
   $("libraryPanel").classList.toggle("is-empty", !books.length);
   const grid = $("library");
   grid.dataset.view = view;
-  setHtml(grid, visibleBooks.length
-    ? visibleBooks
+  const folderTiles = browsing ? folderChildren(folder, folders).map((item) => folderTileHtml(item, books, coverUrl)).join("") : "";
+  setHtml(grid, visibleBooks.length || folderTiles
+    ? folderTiles + visibleBooks
         .map((book) => {
           const stats = estimates.get(book.id);
           const state = status.get(book.id);
           const isCurrent = currentBook?.id === book.id;
           const pageInfo = book.kind === "markdown" ? "Markdown" : book.pages ? `p. ${stats.page} de ${book.pages}` : "PDF";
           const detail = state === "done" ? "Terminado" : state === "new" ? `Sin empezar · ≈ ${formatReadingDuration(stats.remainingMs, true)}` : `≈ ${formatReadingDuration(stats.remainingMs, true)} restantes`;
-          return `<article class="lib-book${isCurrent ? " is-current" : ""} is-${state}"><button class="lib-open" data-id="${encodeURIComponent(book.id)}" title="${escapeHtml(book.name)}">${libraryCoverHtml(book, coverUrl(book))}<span class="lib-info"><strong class="lib-name">${escapeHtml(libraryDisplayName(book.name))}</strong><span class="lib-meta">${pageInfo}${state === "reading" ? ` · ${stats.progress}%` : ""}</span><span class="lib-detail">${isCurrent ? "Abierto ahora" : detail}</span><span class="lib-when">${relativeTime(book.openedAt)}</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i></span></button><button class="lib-remove" data-remove-book="${encodeURIComponent(book.id)}" aria-label="Eliminar ${escapeHtml(book.name)}" title="Eliminar de la biblioteca">${iconSvg("trash")}</button></article>`;
+          // Al buscar o filtrar se mezclan carpetas: se indica dónde está cada uno.
+          const where = !browsing && bookFolder(book.id) && bookFolder(book.id) !== folder ? `<span class="lib-where">${iconSvg("folder")}${escapeHtml(folderPath(bookFolder(book.id), folders).map((item) => item.name).join(" › "))}</span>` : "";
+          return `<article class="lib-book${isCurrent ? " is-current" : ""} is-${state}" draggable="true" data-book-drag="${encodeURIComponent(book.id)}"><button class="lib-open" data-id="${encodeURIComponent(book.id)}" title="${escapeHtml(book.name)}">${libraryCoverHtml(book, coverUrl(book))}<span class="lib-info"><strong class="lib-name">${escapeHtml(libraryDisplayName(book.name))}</strong>${where}<span class="lib-meta">${pageInfo}${state === "reading" ? ` · ${stats.progress}%` : ""}</span><span class="lib-detail">${isCurrent ? "Abierto ahora" : detail}</span><span class="lib-when">${relativeTime(book.openedAt)}</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i></span></button><button class="lib-move" data-move-book="${encodeURIComponent(book.id)}" aria-label="Mover ${escapeHtml(book.name)} a una carpeta" title="Mover a una carpeta">${iconSvg("folder")}</button><button class="lib-remove" data-remove-book="${encodeURIComponent(book.id)}" aria-label="Eliminar ${escapeHtml(book.name)}" title="Eliminar de la biblioteca">${iconSvg("trash")}</button></article>`;
         })
         .join("")
+    : folder && browsing
+      ? `<div class="lib-empty"><span>${iconSvg("folder")}</span><strong>Carpeta vacía</strong><p>Añade un documento estando aquí o muévelo con el botón de carpeta de cada documento${window.matchMedia("(hover: hover)").matches ? " (o arrástralo hasta esta carpeta)" : ""}.</p></div>`
     : books.length
-      ? `<div class="lib-empty"><strong>Nada por aquí</strong><p>${query ? `Ningún documento coincide con «${escapeHtml(query)}».` : "No hay documentos con este filtro."}</p></div>`
+      ? `<div class="lib-empty"><strong>Nada por aquí</strong><p>${query ? `Ningún documento coincide con «${escapeHtml(query)}»${folder ? " en esta carpeta" : ""}.` : "No hay documentos con este filtro."}</p></div>`
       : `<div class="lib-empty is-first"><span>${iconSvg("library")}</span><strong>Tu biblioteca está vacía</strong><p>Añade un PDF o un Markdown para empezar. Se guardan solo en este dispositivo.</p><label class="lib-add" for="fileInput">${iconSvg("plus")}<span>Añadir documento</span></label></div>`);
   books.filter((book) => book.kind !== "markdown" && !book.cover).forEach((book) => ensureBookCover(book));
 }
@@ -1225,6 +1472,18 @@ function bindLibrary() {
   });
   const panel = $("libraryPanel");
   panel.addEventListener("click", (event) => {
+    if (!event.target.closest("#libraryMenu")) closeLibraryMenu();
+    const move = event.target.closest("[data-move-book]");
+    if (move) return openMoveBookMenu(move, decodeURIComponent(move.dataset.moveBook));
+    const folderMenu = event.target.closest("[data-folder-menu]");
+    if (folderMenu) return openFolderMenu(folderMenu, folderMenu.dataset.folderMenu);
+    const folderOpen = event.target.closest("[data-folder-open]");
+    if (folderOpen) return openLibraryFolder(folderOpen.dataset.folderOpen);
+    if (event.target.closest("[data-folder-new]")) {
+      return askName({ title: currentLibraryFolder() ? `Nueva carpeta en «${folderById(currentLibraryFolder()).name}»` : "Nueva carpeta" }).then((name) => {
+        if (name) createFolder(name, currentLibraryFolder()), renderLibrary();
+      });
+    }
     const remove = event.target.closest("[data-remove-book]");
     if (remove) return deleteBook(decodeURIComponent(remove.dataset.removeBook));
     const open = event.target.closest("[data-id]");
@@ -1247,10 +1506,50 @@ function bindLibrary() {
     }
   });
   panel.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && $("libraryMenu")) {
+      event.stopPropagation();
+      return closeLibraryMenu();
+    }
     if (event.key !== "Escape" || !currentBook) return;
     if (event.target === $("librarySearch") && $("librarySearch").value) return;
     event.stopPropagation();
     closeLibrary();
+  });
+  // Arrastrar un documento hasta una carpeta (o a la ruta de arriba) lo mueve.
+  let draggedBook = "";
+  panel.addEventListener("dragstart", (event) => {
+    const card = event.target.closest?.("[data-book-drag]");
+    if (!card) return;
+    draggedBook = decodeURIComponent(card.dataset.bookDrag);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-paper-book", draggedBook);
+    card.classList.add("is-dragging");
+  });
+  panel.addEventListener("dragend", () => {
+    draggedBook = "";
+    panel.querySelectorAll(".is-dragging, .is-drop-target").forEach((node) => node.classList.remove("is-dragging", "is-drop-target"));
+  });
+  panel.addEventListener("dragover", (event) => {
+    const target = draggedBook && event.target.closest?.("[data-folder-drop]");
+    panel.querySelectorAll(".is-drop-target").forEach((node) => node !== target && node.classList.remove("is-drop-target"));
+    if (!target) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    target.classList.add("is-drop-target");
+  });
+  panel.addEventListener("drop", async (event) => {
+    const target = draggedBook && event.target.closest?.("[data-folder-drop]");
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const id = draggedBook;
+    draggedBook = "";
+    const folder = target.dataset.folderDrop;
+    if (bookFolder(id) === folder) return renderLibrary();
+    setBookFolder(id, folder);
+    const book = await dbGet(id);
+    toast(`«${libraryDisplayName(book?.name)}» → ${folder ? folderPath(folder).map((item) => item.name).join(" › ") : "Biblioteca"}`);
+    renderLibrary();
   });
   // Arrastrar archivos a cualquier parte de la aplicación.
   let dragDepth = 0;
@@ -1311,6 +1610,7 @@ async function addFile(file, open = true) {
       pages: isMarkdown ? 1 : existing?.pages || null,
     };
     await dbPut(record);
+    if (!existing && !$("libraryPanel").hidden && currentLibraryFolder()) setBookFolder(id, currentLibraryFolder());
     if (existing) toast(existing.name === file.name ? "Ya estaba en tu biblioteca: se conservan sus notas" : `Es el mismo documento que «${libraryDisplayName(existing.name)}»: se conservan sus notas`, 3200);
     requestPersistentStorage();
     if (open) await openStored(id);
@@ -3426,6 +3726,7 @@ function bindReadingTools() {
 // Iconos de trazo (estilo Lucide) para que toda la interfaz hable el mismo
 // lenguaje visual en lugar de mezclar caracteres Unicode sueltos.
 const ICONS = {
+  folder: '<path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5v8.3A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"/>',
   scan: '<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M8 9.5h8M8 12.5h8M8 15.5h5"/>',
   panelLeft: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/>',
   library: '<path d="M4 4.5v15"/><path d="M8 6.5v13"/><path d="M12 6.5v13"/><path d="m15.5 6.8 4.3 12.6"/>',

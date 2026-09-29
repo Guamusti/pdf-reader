@@ -18,7 +18,7 @@ import {
   sha256Hex,
   isContentId,
   mergeSnapshots,
-} from "./storage.js?v=1";
+} from "./storage.js?v=2";
 
 const FOLDER = "Paper Reader";
 const CHECK_TEXT = "paper-sync-ok";
