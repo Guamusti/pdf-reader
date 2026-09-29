@@ -275,6 +275,29 @@ export function anchorProbe(citation) {
   return new RegExp(`${number}\\.?\\s+\\p{Lu}`, "u");
 }
 
+// Nombre del destino de un enlace interno a partir de las primeras líneas que
+// hay en él: «Theorem 2.1. Let…» → Teorema 2.1; «3.2 Hook lengths» → Sección
+// 3.2; «[12] A. Smith…» → Referencia [12]; «… (6.1)» → Ecuación (6.1). Si nada
+// encaja, se usa el texto del propio enlace («[2.1]»). Devuelve { kind, label }.
+export function describeDestination(lines, linkText = "") {
+  const clean = (lines || []).map((line) => String(line || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 3);
+  for (const line of clean) {
+    const statement = line.match(new RegExp(`^(${STATEMENT_ALTERNATION})\\.?\\s*(${NUMBER})(?![\\d.]\\d)`));
+    if (statement) return { kind: "statement", label: `${STATEMENT_LABELS[canonicalStatement(statement[1])]} ${statement[2]}` };
+    const caption = line.match(/^(Figure|Fig\.|Figura|Table|Tabla|Cuadro)\s*(\d+(?:\.\d+)?)/i);
+    if (caption) return { kind: "caption", label: `${/^(tab|cuad)/i.test(caption[1]) ? "Tabla" : "Figura"} ${caption[2]}` };
+    const entry = line.match(/^\[([\w.+-]{1,12})\]\s+\S/);
+    if (entry) return { kind: "reference", label: `Referencia [${entry[1]}]` };
+    const equation = line.match(new RegExp(`\\((${NUMBER})\\)$`));
+    if (equation && line.length < 140) return { kind: "equation", label: `Ecuación (${equation[1]})` };
+    const section = line.match(new RegExp(`^(?:(?:Section|Sección|Chapter|Capítulo|Appendix|Apéndice)\\s+|§\\s*)?(${NUMBER}|[A-Z](?:\\.\\d{1,2})*)\\.?\\s+(\\p{Lu}[^.]{1,70})$`, "u"));
+    if (section && line.length < 90) return { kind: "section", label: `Sección ${section[1]} · ${section[2].trim()}` };
+  }
+  const text = String(linkText || "").replace(/\s+/g, " ").trim();
+  if (text && text.length <= 40) return { kind: "link", label: `«${text}»` };
+  return { kind: "link", label: "Destino del enlace" };
+}
+
 // ---- Estructura de un artículo: enunciados, ecuaciones y notación ----
 // A partir de las líneas de cada página ([{ page, lines }]) reúne los
 // enunciados numerados («Theorem 2.3 (Frobenius). …»), las ecuaciones con

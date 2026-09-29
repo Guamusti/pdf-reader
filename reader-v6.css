@@ -405,3 +405,10 @@ html { height: 100%; overflow: hidden; overscroll-behavior: none; }
   body.board-open .ink-strip-inner { max-width: 100%; overflow-x: auto !important; overflow-y: hidden; scrollbar-width: none; }
   body.board-open .ink-strip-inner::-webkit-scrollbar { display: none; }
 }
+
+/* ---- Vista previa de enlaces internos: página desplazable con el destino marcado ---- */
+.hp-page.hp-scroll { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.hp-sheet { position: relative; overflow: hidden; }
+.hp-sheet canvas { display: block; }
+.hp-target { position: absolute; left: 0; width: 4px; height: 26px; border-radius: 0 3px 3px 0; background: #3b7cff; box-shadow: 0 0 0 3px rgba(59, 124, 255, .18); pointer-events: none; }
+@media (pointer: coarse) { .hp-actions button { min-height: 34px; padding: 0 12px; } }

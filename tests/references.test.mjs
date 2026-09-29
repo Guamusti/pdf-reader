@@ -145,3 +145,19 @@ test("estructura del artículo: enunciados, ecuaciones y notación", async () =>
   assert.equal(symbols["n"], "un entero positivo");
   assert.ok(!("us" in symbols));
 });
+
+test("describeDestination nombra el destino de un enlace interno", async () => {
+  const { describeDestination } = await import("../references.js");
+  assert.deepEqual(describeDestination(["Theorem 2.1. Let λ be a partition."], "[2.1]"), { kind: "statement", label: "Teorema 2.1" });
+  assert.equal(describeDestination(["Lema 3.4 (Hook)."]).label, "Lema 3.4");
+  assert.equal(describeDestination(["3.2 Hook lengths"]).label, "Sección 3.2 · Hook lengths");
+  assert.equal(describeDestination(["A.1 Proof of the main theorem"]).label, "Sección A.1 · Proof of the main theorem");
+  assert.equal(describeDestination(["[12] A. Smith, Symmetric groups, 2001."], "[12]").label, "Referencia [12]");
+  assert.equal(describeDestination(["dim(V) = n! / ∏ h(i,j) (6.1)"]).label, "Ecuación (6.1)");
+  assert.equal(describeDestination(["Table 2. Results"]).label, "Tabla 2");
+  // Prosa: no se inventa un nombre; se usa el texto del enlace.
+  assert.equal(describeDestination(["and so by the previous argument we have that"], "[2.1]").label, "«[2.1]»");
+  assert.equal(describeDestination([], "").label, "Destino del enlace");
+  // «by Theorem 2.3 we» no es el comienzo del enunciado.
+  assert.equal(describeDestination(["by Theorem 2.3 we obtain the claim"], "[5]").label, "«[5]»");
+});

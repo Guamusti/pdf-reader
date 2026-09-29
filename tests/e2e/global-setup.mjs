@@ -19,6 +19,13 @@ const REFS = `<style>body{font-family:serif;font-size:15px;padding:30px 50px} .p
 <div class="pg"><h3>3.2 Hook lengths</h3><p>The hook of a box consists of the box itself, the boxes to its right and the boxes below it.</p></div>
 <div class="pg"><p>Combining Theorem 2.3 with (6.1) gives the dimension of every irreducible module; the combinatorics is explained in Section 3.2 of this paper.</p></div>`;
 
+// Artículo con enlaces internos (como los de hyperref en LaTeX): «[2.1]» lleva
+// a un teorema a media página, «[12]» a la bibliografía, «(3.4)» a una ecuación.
+const LINKS = `<style>body{font-family:serif;font-size:15px;padding:30px 50px} .pg{height:1000px;page-break-after:always} a{color:#1a4fd0;text-decoration:none} .eq{display:flex;justify-content:space-between;padding:0 120px;font-size:17px}</style>
+<div class="pg"><h2>1. Introduction</h2><p>The main result is Theorem <a href="#thm21">[2.1]</a>, which follows from the hook formula <a href="#eq34">(3.4)</a> and the classical work <a href="#ref12">[12]</a>. See also <a href="#intro">the start of this page</a>.</p><p id="intro">Nothing else here.</p></div>
+<div class="pg"><p>Some preliminary text that fills the upper part of the second page before the statement appears.</p><p style="margin-top:380px" id="thm21"><b>Theorem 2.1.</b> Every irreducible representation of the symmetric group is a Specht module S<sup>λ</sup>.</p><p>Proof. Combine the hook formula with the branching rule.</p><div class="eq" id="eq34"><span>f<sup>λ</sup> = n! / ∏ h(i,j)</span><span>(3.4)</span></div></div>
+<div class="pg"><h3>References</h3><p>[11] G. James, The representation theory of the symmetric groups, 1978.</p><p id="ref12">[12] J. S. Frame, G. Robinson, R. M. Thrall, The hook graphs of the symmetric group, 1954.</p></div>`;
+
 export default async function globalSetup() {
   await mkdir(FIXTURES, { recursive: true });
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
@@ -27,6 +34,8 @@ export default async function globalSetup() {
   await writeFile(`${FIXTURES}/paper.pdf`, await page.pdf({ format: "A4" }));
   await page.setContent(REFS);
   await writeFile(`${FIXTURES}/refs.pdf`, await page.pdf({ format: "A4" }));
+  await page.setContent(LINKS);
+  await writeFile(`${FIXTURES}/links.pdf`, await page.pdf({ format: "A4" }));
   // Página escaneada: el texto es una imagen, sin capa de texto.
   const image = await page.evaluate(() => {
     const canvas = document.createElement("canvas");

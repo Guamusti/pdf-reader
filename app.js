@@ -28,13 +28,14 @@ import {
   toBibtex,
   toRis,
   bibKey,
+  describeDestination,
   formatCitation,
   metaFromCsl,
   anchorScore,
   anchorProbe,
   STATEMENT_LABELS,
   extractStructure,
-} from "./references.js?v=4";
+} from "./references.js?v=5";
 
 const $ = (id) => document.getElementById(id);
 const STORE = "pdfs";
@@ -4684,19 +4685,35 @@ async function renderLinkLayerInto(layer, page, viewport, token) {
     } else {
       anchor.href = "#";
       anchor.setAttribute("aria-label", "Ir al destino del enlace");
-      // Vista previa del destino (cita, figura, sección) sin salir de la página.
+      const previewKey = `dest:${JSON.stringify(link.dest)}`;
+      const showDestPreview = (delay) => requestPreview(anchor.getBoundingClientRect(), previewKey, () => destPreview(link.dest, { page: page.pageNumber, rect: link.rect }), delay);
+      // Vista previa del destino (teorema, ecuación, sección, cita) sin salir
+      // de la página: al pasar el ratón o el lápiz; con el dedo, el primer
+      // toque la abre y el segundo (o «Ir») salta.
+      let tapKind = "mouse",
+        previewWasOpen = false;
       anchor.addEventListener("pointerenter", (event) => {
         if (event.pointerType === "touch") return;
-        requestPreview(anchor.getBoundingClientRect(), `dest:${JSON.stringify(link.dest)}`, () => destPreview(link.dest));
+        showDestPreview();
       });
-      anchor.addEventListener("pointerleave", scheduleHidePreview);
+      anchor.addEventListener("pointerleave", (event) => {
+        if (event.pointerType !== "touch") scheduleHidePreview();
+      });
+      anchor.addEventListener("pointerdown", (event) => {
+        tapKind = event.pointerType || "mouse";
+        previewWasOpen = hoverPreview.key === previewKey && hoverPreview.el && !hoverPreview.el.hidden;
+      });
       anchor.addEventListener("click", async (event) => {
-        hidePreview();
         event.preventDefault();
+        if (tapKind === "touch" && !previewWasOpen) {
+          showDestPreview(0);
+          return;
+        }
+        hidePreview();
         try {
-          const page = await resolveDestPage(link.dest);
-          if (!page) throw new Error("Destino no válido");
-          jumpToPage(page);
+          const target = await resolveLinkTarget(link.dest);
+          if (!target) throw new Error("Destino no válido");
+          await goToDestination(target);
         } catch {
           toast("No se pudo abrir el enlace");
         }
@@ -4784,6 +4801,7 @@ function requestPreview(rect, key, loader, delay = 260) {
     };
     el.querySelector(".hp-body").replaceChildren(content.node);
     el.hidden = false;
+    el.querySelectorAll("[data-scroll-top]").forEach((node) => (node.scrollTop = Number(node.dataset.scrollTop) || 0));
     hoverPreview.key = key;
     positionPreview(el, rect);
   }, delay);
@@ -4815,13 +4833,43 @@ function hideReturnChip() {
 }
 // Recorte de una página: `focusY` en coordenadas PDF; "above" deja el punto
 // abajo (figuras, cuyo pie va debajo), "top" lo deja arriba.
-async function pageCropNode(pageNumber, { focusY = null, align = "top", height = 230 } = {}) {
+// Columna de texto de una página (coordenadas PDF): sin los márgenes, para que
+// la vista previa se lea a buen tamaño. Percentiles para ignorar cabeceras o
+// números de página sueltos.
+const textExtentCache = new Map();
+async function pageTextExtent(page) {
+  const cacheKey = `${currentBook.id}:${page.pageNumber}`;
+  if (textExtentCache.has(cacheKey)) return textExtentCache.get(cacheKey);
+  let extent = null;
+  try {
+    const items = (await page.getTextContent()).items.filter((item) => item.str?.trim() && item.width > 0);
+    if (items.length >= 3) {
+      const starts = items.map((item) => item.transform[4]).sort((a, b) => a - b);
+      const ends = items.map((item) => item.transform[4] + item.width).sort((a, b) => a - b);
+      const pick = (list, q) => list[Math.min(list.length - 1, Math.max(0, Math.round(q * (list.length - 1))))];
+      extent = { x0: pick(starts, 0.03), x1: pick(ends, 0.97) };
+    }
+  } catch {}
+  touchCache(textExtentCache, cacheKey, extent, 64);
+  return extent;
+}
+async function pageCropNode(pageNumber, { focusY = null, align = "top", height = 230, scroll = false, mark = false, fitText = false } = {}) {
   const page = await pdfDoc.getPage(pageNumber);
   const base = page.getViewport({ scale: 1, rotation });
   // En el móvil la vista previa es más estrecha que 460 px.
   const width = Math.min(460, window.innerWidth - 22);
-  const viewport = page.getViewport({ scale: width / base.width, rotation });
-  const cacheKey = `${currentBook.id}:${pageNumber}:${rotation}:${width}`;
+  // Con `fitText`, la columna de texto ocupa todo el ancho (hasta ×2).
+  let zoom = 1,
+    shiftX = 0;
+  const extent = fitText && rotation === 0 ? await pageTextExtent(page) : null;
+  if (extent && extent.x1 - extent.x0 > base.width * 0.25) {
+    const x0 = Math.max(page.view[0], extent.x0 - 10),
+      x1 = Math.min(page.view[2], extent.x1 + 10);
+    zoom = Math.min(2, base.width / (x1 - x0));
+    shiftX = (x0 - page.view[0]) * (width / base.width) * zoom;
+  }
+  const viewport = page.getViewport({ scale: (width / base.width) * zoom, rotation });
+  const cacheKey = `${currentBook.id}:${pageNumber}:${rotation}:${width}:${zoom.toFixed(3)}`;
   let canvas = previewCanvasCache.get(cacheKey);
   if (!canvas) {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -4846,22 +4894,102 @@ async function pageCropNode(pageNumber, { focusY = null, align = "top", height =
   const frame = document.createElement("div");
   frame.className = "hp-page";
   frame.style.height = `${visible}px`;
-  canvas.style.transform = `translateY(${-top}px)`;
-  frame.append(canvas);
+  if (!scroll) {
+    canvas.style.transform = `translate(${-shiftX}px, ${-top}px)`;
+    frame.append(canvas);
+    return frame;
+  }
+  // Página entera dentro de la ventanita: se puede desplazar para leer el
+  // contexto; `data-scroll-top` la deja situada en el destino al mostrarla.
+  canvas.style.transform = shiftX ? `translateX(${-shiftX}px)` : "";
+  frame.classList.add("hp-scroll");
+  frame.dataset.scrollTop = String(Math.round(top));
+  const sheet = document.createElement("div");
+  sheet.className = "hp-sheet";
+  sheet.style.height = `${viewport.height}px`;
+  sheet.append(canvas);
+  if (mark && Number.isFinite(focusY)) {
+    const [, y] = viewport.convertToViewportPoint(0, focusY);
+    const marker = document.createElement("span");
+    marker.className = "hp-target";
+    marker.style.top = `${Math.max(0, y - 4)}px`;
+    sheet.append(marker);
+  }
+  frame.append(sheet);
   return frame;
 }
-async function destPreview(dest) {
+// Página y posición (coordenadas PDF) a las que apunta un destino interno.
+async function resolveLinkTarget(dest) {
   if (!pdfDoc) return null;
   const explicit = typeof dest === "string" ? await pdfDoc.getDestination(dest) : dest;
   const page = await resolveDestPage(explicit);
   if (!page) return null;
   const mode = explicit?.[1]?.name;
   const top = mode === "XYZ" ? explicit[3] : mode === "FitH" || mode === "FitBH" ? explicit[2] : mode === "FitR" ? explicit[5] : null;
+  const left = mode === "XYZ" ? explicit[2] : mode === "FitR" ? explicit[2] : null;
+  return { page, top: typeof top === "number" ? top : null, left: typeof left === "number" ? left : null };
+}
+// Texto que hay bajo el rectángulo de un enlace («[2.1]», «Theorem 3»).
+async function linkTextAt(pageNumber, rect) {
+  try {
+    const page = await pdfDoc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const [x1, y1, x2, y2] = [Math.min(rect[0], rect[2]), Math.min(rect[1], rect[3]), Math.max(rect[0], rect[2]), Math.max(rect[1], rect[3])];
+    let text = "";
+    for (const item of content.items) {
+      if (!item.str) continue;
+      const x = item.transform[4],
+        y = item.transform[5],
+        width = item.width || 0;
+      if (y < y1 - 3 || y > y2 + 1 || x > x2 || x + width < x1 || !width) continue;
+      // Solo los caracteres que caen dentro del enlace (anchura media).
+      const per = width / item.str.length;
+      const from = Math.max(0, Math.floor((x1 - x) / per + 0.3));
+      const to = Math.min(item.str.length, Math.ceil((x2 - x) / per - 0.3));
+      text += item.str.slice(from, to);
+    }
+    return text.replace(/\s+/g, " ").trim();
+  } catch {
+    return "";
+  }
+}
+// Primeras líneas a partir del punto de destino (en su misma columna).
+async function destinationLines(target) {
+  if (!Number.isFinite(target.top)) return [];
+  const lines = await pageLines(pdfDoc, target.page);
+  return lines
+    .filter((line) => line.y <= target.top + 3 && line.y >= target.top - 160 && (!Number.isFinite(target.left) || line.x >= target.left - 40))
+    .sort((a, b) => b.y - a.y)
+    .slice(0, 3)
+    .map((line) => line.text);
+}
+// Salto a un destino: la página y, dentro de ella, el punto exacto, que se
+// resalta un momento. Si cambia de página, aparece «Volver a la p. N».
+async function goToDestination(target) {
+  const from = currentPage;
+  if (reflowMode) await setReadingMode("pdf");
+  await jumpToPage(target.page);
+  if (Number.isFinite(target.top)) {
+    const page = await pdfDoc.getPage(target.page);
+    const viewport = page.getViewport({ scale: 1, rotation });
+    const [, y] = viewport.convertToViewportPoint(0, target.top);
+    const top = Math.max(0, Math.min(0.95, y / viewport.height));
+    flashPdfRegion(target.page, { x: 0.04, y: top, w: 0.92, h: Math.min(0.07, 1 - top) });
+  }
+  if (currentPage !== from) showReturnChip(from);
+}
+async function destPreview(dest, source = null) {
+  if (!pdfDoc) return null;
+  const target = await resolveLinkTarget(dest);
+  if (!target) return null;
+  const [lines, linkText] = await Promise.all([destinationLines(target), source ? linkTextAt(source.page, source.rect) : ""]);
+  const { label } = describeDestination(lines, linkText);
   return {
-    label: `Destino del enlace · página ${page}`,
-    page,
-    node: await pageCropNode(page, { focusY: typeof top === "number" ? top : null, height: 210 }),
-    go: () => jumpToPage(page),
+    label: `${label} · página ${target.page}`,
+    page: target.page,
+    // Toda la página, desplazable, empezando en el destino y con él marcado.
+    node: await pageCropNode(target.page, { focusY: target.top, height: 250, scroll: true, mark: true, fitText: true }),
+    go: () => goToDestination(target),
   };
 }
 // Líneas de una página respetando las columnas (ver references.js).
