@@ -43,7 +43,7 @@ test.describe("service worker en la subcarpeta", () => {
       const cache = await caches.open(names.find((name) => name.startsWith("paper-reader-")));
       return (await cache.keys()).map((request) => new URL(request.url).pathname);
     });
-    for (const path of ["", "index.html", "app.js", "references.js", "manifest.json"]) expect(cached).toContain(`${BASE}${path}`);
+    for (const path of ["", "index.html", "app.js", "pdf-engine.js", "references.js", "manifest.json"]) expect(cached).toContain(`${BASE}${path}`);
     const response = await page.reload();
     expect(response.fromServiceWorker()).toBe(true);
     await expect(page.locator("#fileInput")).toBeAttached();

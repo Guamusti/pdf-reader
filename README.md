@@ -107,8 +107,24 @@ Incluye:
 - **Vista previa de enlaces internos** («[2.1]», «(3.4)», «[12]», como los de hyperref): dice qué hay en el destino («Teorema 2.1 · página 5», «Ecuación (3.4)», «Referencia [12]», «Sección 3.2 · Título») y muestra la página entera, desplazable y ampliada a la columna de texto, empezando en el destino y con él marcado. En iPad, el primer toque abre la vista previa y el segundo (o «Ir») salta. El salto va al punto exacto, lo resalta y ofrece «Volver a la p. N».
 - **Carpetas en la biblioteca**, con subcarpetas: «Nueva carpeta», el botón de carpeta de cada documento («Mover a…»), o arrastrar el documento hasta una carpeta o hasta la ruta de arriba. Lo que añades estando dentro de una carpeta se queda en ella. Al buscar o filtrar se ve en qué carpeta está cada documento. Eliminar una carpeta nunca borra documentos: suben a la carpeta de arriba. Las carpetas viajan en la copia de seguridad y la sincronización.
 
+### Rendimiento
+
+- El motor PDF se importa bajo demanda: la biblioteca y los documentos Markdown funcionan sin esperar a PDF.js. La PWA conserva el precaché del motor para abrir PDFs sin conexión.
+- Mientras lees, la biblioteca oculta no reconstruye tarjetas ni inicia la generación de sus portadas. Al abrirla se consultan los datos actuales.
+- La comprobación de migraciones lee solo los identificadores; el arranque de una biblioteca ya migrada hace una sola lectura completa de documentos.
+- Buscar por nombre agrupa las pulsaciones durante 120 ms y descarta renders obsoletos para evitar consultas y reconstrucciones repetidas.
+
 ### Pruebas
 
 ```bash
 node --test tests/storage.test.mjs tests/sync.test.mjs tests/references.test.mjs
+```
+
+Pruebas de navegador (incluyen arranque sin el CDN de PDF.js y una biblioteca de 81 documentos):
+
+```bash
+cd tests/e2e
+npm ci
+npx playwright install chromium
+npx playwright test
 ```

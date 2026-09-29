@@ -1,6 +1,4 @@
-import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs";
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
+import { pdfjsLib, openPdfBlob } from "./pdf-engine.js?v=1";
 
 import {
   openDatabase,
@@ -520,8 +518,12 @@ function moveDocumentData(oldId, newId) {
 }
 async function migrateLegacyDocumentIds() {
   if (!db || !globalThis.crypto?.subtle) return 0;
-  const legacy = (await dbAll()).filter((record) => !isContentId(record.id) && record.blob);
-  if (!legacy.length) return 0;
+  // En bibliotecas ya migradas basta leer las claves, sin clonar todos los
+  // registros con sus PDF y portadas en cada arranque.
+  const ids = await idbRequest(db.transaction(STORE).objectStore(STORE).getAllKeys());
+  const legacyIds = ids.filter((id) => !isContentId(id));
+  if (!legacyIds.length) return 0;
+  const legacy = (await Promise.all(legacyIds.map(dbGet))).filter((record) => record?.blob);
   showLoader(true, "Actualizando la biblioteca…", "Identificando cada documento por su contenido");
   let migrated = 0;
   try {
@@ -1080,7 +1082,7 @@ async function ensureBookCover(rec, doc = null) {
   libraryCoverQueue = libraryCoverQueue.then(async () => {
     let own = null;
     try {
-      const source = doc || (own = await pdfjsLib.getDocument({ data: new Uint8Array(await rec.blob.arrayBuffer()) }).promise);
+      const source = doc || (own = await openPdfBlob(rec.blob));
       const cover = await renderPdfCover(source);
       if (!cover) return;
       const fresh = (await dbGet(rec.id)) || rec;
@@ -1337,9 +1339,17 @@ function folderTileHtml(folder, books, coverUrl) {
   const meta = [`${inside.length} documento${inside.length === 1 ? "" : "s"}`, subfolders ? `${subfolders} carpeta${subfolders === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
   return `<article class="lib-folder" data-folder-drop="${escapeHtml(folder.id)}"><button class="lib-folder-open" data-folder-open="${escapeHtml(folder.id)}" title="${escapeHtml(folder.name)}"><span class="lib-folder-art"><span class="lib-folder-tab"></span><span class="lib-folder-body">${thumbs ? `<span class="lib-folder-thumbs">${thumbs}</span>` : iconSvg("folder")}</span></span><span class="lib-info"><strong class="lib-name">${escapeHtml(folder.name)}</strong><span class="lib-meta">${meta}</span>${direct && direct !== inside.length ? `<span class="lib-detail">${direct} aquí</span>` : ""}</span></button><button class="lib-more" data-folder-menu="${escapeHtml(folder.id)}" aria-label="Opciones de la carpeta ${escapeHtml(folder.name)}" title="Opciones de la carpeta">${iconSvg("more")}</button></article>`;
 }
+let libraryRenderToken = 0;
+let librarySearchTimer = 0;
 async function renderLibrary() {
+  const token = ++libraryRenderToken;
+  clearTimeout(librarySearchTimer);
+  // Al abrirse se vuelve a leer IndexedDB; no hace falta reconstruir cientos
+  // de tarjetas ni generar portadas mientras el usuario está leyendo.
+  if ($("libraryPanel").hidden) return;
   flushReadingSession(false);
   const books = await dbAll();
+  if (token !== libraryRenderToken || $("libraryPanel").hidden) return;
   const present = new Set(books.map((book) => book.id));
   for (const [id, entry] of libraryCoverCache) {
     if (!present.has(id)) {
@@ -1434,7 +1444,8 @@ async function renderLibrary() {
     : books.length
       ? `<div class="lib-empty"><strong>Nada por aquí</strong><p>${query ? `Ningún documento coincide con «${escapeHtml(query)}»${folder ? " en esta carpeta" : ""}.` : "No hay documentos con este filtro."}</p></div>`
       : `<div class="lib-empty is-first"><span>${iconSvg("library")}</span><strong>Tu biblioteca está vacía</strong><p>Añade un PDF o un Markdown para empezar. Se guardan solo en este dispositivo.</p><label class="lib-add" for="fileInput">${iconSvg("plus")}<span>Añadir documento</span></label></div>`);
-  books.filter((book) => book.kind !== "markdown" && !book.cover).forEach((book) => ensureBookCover(book));
+  visibleBooks.filter((book) => book.kind !== "markdown" && !book.cover).forEach((book) => ensureBookCover(book));
+  if (resume && !resume.cover) ensureBookCover(resume);
 }
 function openLibrary() {
   flushReadingSession(true);
@@ -1465,7 +1476,11 @@ function bindLibrary() {
   $("homeBtn").onclick = openLibrary;
   $("emptyLibraryBtn").onclick = openLibrary;
   $("closeLibrary").onclick = closeLibrary;
-  $("librarySearch").addEventListener("input", renderLibrary);
+  $("librarySearch").addEventListener("input", () => {
+    ++libraryRenderToken;
+    clearTimeout(librarySearchTimer);
+    librarySearchTimer = setTimeout(renderLibrary, 120);
+  });
   $("librarySort").addEventListener("change", () => {
     kv.setItem("paper.library-sort", $("librarySort").value);
     renderLibrary();
@@ -1748,8 +1763,7 @@ async function openStored(id) {
       button.classList.toggle("active", button.dataset.readingMode === (reflowMode ? "reflow" : "pdf")),
     );
     resetRenderEngine();
-    const bytes = new Uint8Array(await rec.blob.arrayBuffer());
-    const loadedDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+    const loadedDoc = await openPdfBlob(rec.blob);
     rec.pages = loadedDoc.numPages;
     rec.openedAt = Date.now();
     if (!superseded()) await dbPut(rec);
@@ -5796,7 +5810,7 @@ async function loadSplitDocument(id, page = 1) {
   else {
     const record = await dbGet(id);
     if (!record || record.kind === "markdown") return toast("La vista dividida solo admite PDFs");
-    doc = await pdfjsLib.getDocument({ data: new Uint8Array(await record.blob.arrayBuffer()) }).promise;
+    doc = await openPdfBlob(record.blob);
     own = true;
   }
   if (token !== split.token) {
@@ -10797,7 +10811,7 @@ async function searchLibrary(raw) {
           const doc =
             currentBook?.id === record.id && pdfDoc
               ? pdfDoc
-              : await pdfjsLib.getDocument({ data: new Uint8Array(await record.blob.arrayBuffer()) }).promise;
+              : await openPdfBlob(record.blob);
           try {
             pages = await extractDocumentText(doc, {
               isCancelled: cancelled,
