@@ -140,4 +140,18 @@ test.describe("iPad", () => {
     }
     expect(problems).toEqual([]);
   });
+
+  test("la página no se desplaza entera ni deja ver paneles ocultos por debajo", async ({ page }) => {
+    await openDoc(page, "refs.pdf");
+    // Restos del antiguo panel de IA quedaban sueltos bajo el visor.
+    await expect(page.locator("#aiQuestion, #askAiSubmit")).toHaveCount(0);
+    for (const [width, height] of [[820, 1180], [1180, 820], [744, 1133]]) {
+      await page.setViewportSize({ width, height });
+      await page.waitForTimeout(150);
+      const size = await page.evaluate(() => ({ height: document.scrollingElement.scrollHeight, width: document.scrollingElement.scrollWidth }));
+      expect(size).toEqual({ height, width });
+    }
+    await page.mouse.wheel(0, 600);
+    expect(await page.evaluate(() => document.scrollingElement.scrollTop)).toBe(0);
+  });
 });

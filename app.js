@@ -6027,6 +6027,12 @@ function boardItemAt(point) {
   return null;
 }
 function bindBoard() {
+  // La barra Ink se centra sobre el PDF, no sobre toda la ventana: con la
+  // pizarra abierta tapaba sus herramientas.
+  new ResizeObserver(() => {
+    const width = boardOpen() ? $("boardPane").getBoundingClientRect().width : 0;
+    document.documentElement.style.setProperty("--board-w", `${Math.round(width)}px`);
+  }).observe($("boardPane"));
   const pane = $("boardPane"),
     scroll = $("boardScroll"),
     canvas = $("boardCanvas");

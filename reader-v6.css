@@ -388,3 +388,20 @@ html[data-page-tone="night-warm"] :is(.canvas-wrap, .cont-page, .split-page)::af
 @media (min-width: 701px) and (max-width: 729px) {
   html.ui4 .toolbar #bookmarkBtn { display: none !important; }
 }
+
+/* La página nunca se desplaza entera: solo el visor y los paneles. En iPad,
+   si algo asomaba por debajo (el lienzo auxiliar de pdf.js o restos de
+   paneles), se podía arrastrar la página y verlo. */
+html { height: 100%; overflow: hidden; overscroll-behavior: none; }
+.hiddenCanvasElement { position: absolute; top: 0; left: 0; width: 0; height: 0; display: none; }
+
+/* Con la pizarra abierta (a la derecha), la barra Ink se centra sobre el PDF
+   y, si no cabe, se desplaza de lado como en el móvil. */
+@media (min-width: 760px) {
+  body.board-open .ink-strip:not(.ink-positioned) {
+    left: calc(var(--paper-sidebar) + (100vw - var(--paper-sidebar) - var(--board-w, 0px)) / 2) !important;
+    max-width: calc(100vw - var(--paper-sidebar) - var(--board-w, 0px) - 24px) !important;
+  }
+  body.board-open .ink-strip-inner { max-width: 100%; overflow-x: auto !important; overflow-y: hidden; scrollbar-width: none; }
+  body.board-open .ink-strip-inner::-webkit-scrollbar { display: none; }
+}
