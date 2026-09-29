@@ -3425,6 +3425,7 @@ function bindReadingTools() {
 // Iconos de trazo (estilo Lucide) para que toda la interfaz hable el mismo
 // lenguaje visual en lugar de mezclar caracteres Unicode sueltos.
 const ICONS = {
+  scan: '<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M8 9.5h8M8 12.5h8M8 15.5h5"/>',
   panelLeft: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/>',
   library: '<path d="M4 4.5v15"/><path d="M8 6.5v13"/><path d="M12 6.5v13"/><path d="m15.5 6.8 4.3 12.6"/>',
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
@@ -10653,24 +10654,34 @@ function setTheme(theme) {
 // ---- Menú «Más» del móvil ----
 // La cabecera del móvil solo muestra buscar, IA, Ink y Vista; el resto de
 // herramientas que en escritorio están en la barra se abren desde aquí.
+// Un botón de la barra superior que se ve en pantalla: lo que ya está a mano no
+// se repite en el menú «Más».
+function toolbarButtonShown(id) {
+  const button = $(id);
+  if (!button || button.hidden) return false;
+  const r = button.getBoundingClientRect();
+  return r.width > 0 && r.height > 0 && r.left >= 0 && r.right <= window.innerWidth + 1 && getComputedStyle(button).visibility !== "hidden";
+}
 function mobileMoreItems() {
   const hasDoc = Boolean(currentBook);
   const hasPdf = Boolean(pdfDoc);
   const marked = hasDoc && getJSON(key(currentBook.id, "bookmarks"), []).includes(currentPage);
   return [
-    { id: "library", icon: "library", label: "Biblioteca", run: () => $("homeBtn").click() },
-    { id: "notes", icon: "notebook", label: "Cuaderno", when: hasDoc, run: toggleNotebook },
-    { id: "board", icon: "board", label: "Pizarra", when: hasDoc, active: boardOpen(), run: toggleBoard },
-    { id: "crop", icon: "crop", label: "Recortar para IA", when: hasPdf, run: () => openCapture() },
-    { id: "sticky", icon: "sticky", label: "Nota en la página", when: hasPdf, run: () => setStickyPlacement(true) },
-    { id: "bookmark", icon: "bookmark", label: marked ? "Quitar marcador" : "Marcar página", when: hasDoc, active: marked, run: toggleBookmark },
-    { id: "read", icon: "volume", label: "Leer en voz alta", when: hasDoc, run: () => $("readAloudBtn").click() },
+    { id: "library", icon: "library", label: "Biblioteca", toolbar: "homeBtn", run: () => $("homeBtn").click() },
+    { id: "notes", icon: "notebook", label: "Cuaderno", toolbar: "notebookBtn", when: hasDoc, run: toggleNotebook },
+    { id: "board", icon: "board", label: "Pizarra", toolbar: "boardBtn", when: hasDoc, active: boardOpen(), run: toggleBoard },
+    { id: "crop", icon: "crop", label: "Recortar para IA", toolbar: "captureBtn", when: hasPdf, run: () => openCapture() },
+    { id: "sticky", icon: "sticky", label: "Nota en la página", toolbar: "stickyNoteBtn", when: hasPdf, run: () => setStickyPlacement(true) },
+    { id: "bookmark", icon: "bookmark", label: marked ? "Quitar marcador" : "Marcar página", toolbar: "bookmarkBtn", when: hasDoc, active: marked, run: toggleBookmark },
+    { id: "read", icon: "volume", label: "Leer en voz alta", toolbar: "readAloudBtn", when: hasDoc, run: () => $("readAloudBtn").click() },
     { id: "study", icon: "check", label: "Estudiar", when: hasDoc, run: () => openStudy() },
     { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
     { id: "pdf", icon: "download", label: "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
-    { id: "ocr", icon: "type", label: "Reconocer texto (OCR)", when: hasPdf, run: () => runOcr("all") },
-    { id: "focus", icon: "maximize", label: "Pantalla completa", when: hasDoc, run: toggleFocusMode },
-  ].filter((item) => item.when !== false);
+    { id: "ocr", icon: "scan", label: "Reconocer texto (OCR)", when: hasPdf, run: () => runOcr("all") },
+    { id: "markdown", icon: "copy", label: "Exportar notas", when: hasDoc, run: exportMarkdown },
+    { id: "backup", icon: "database", label: "Copia y sincronización", run: openDataPanel },
+    { id: "focus", icon: "maximize", label: "Pantalla completa", toolbar: "focusBtn", when: hasDoc, run: toggleFocusMode },
+  ].filter((item) => item.when !== false && !(item.toolbar && toolbarButtonShown(item.toolbar)));
 }
 function openMobileMore() {
   let sheet = $("mobileMore");
@@ -10688,6 +10699,16 @@ function openMobileMore() {
   sheet.innerHTML = `<div class="mm-backdrop" data-mm-close></div><section class="mm-sheet" role="menu" aria-label="Más herramientas"><div class="mm-grip" aria-hidden="true"></div><div class="mm-grid">${mobileMoreItems()
     .map((item) => `<button type="button" role="menuitem" data-mm="${item.id}"${item.active ? ' aria-pressed="true"' : ""}>${iconSvg(item.icon)}<span>${item.label}</span></button>`)
     .join("")}</div></section>`;
+  // En iPad y escritorio, desplegable bajo el botón; en el móvil, hoja inferior.
+  // Se decide antes de mostrarlo para que no arranque como hoja inferior.
+  const anchor = $("mobileMoreBtn")?.getBoundingClientRect();
+  const popover = window.innerWidth > 700 && anchor?.width > 0;
+  sheet.classList.toggle("is-popover", popover);
+  const panel = sheet.querySelector(".mm-sheet");
+  if (popover) {
+    panel.style.top = `${Math.round(anchor.bottom + 8)}px`;
+    panel.style.right = `${Math.max(8, Math.round(window.innerWidth - anchor.right))}px`;
+  }
   sheet.hidden = false;
   requestAnimationFrame(() => sheet.classList.add("is-open"));
   $("mobileMoreBtn")?.setAttribute("aria-expanded", "true");
@@ -10714,6 +10735,8 @@ function configureMobileMore() {
   setIcon(button, "more");
   button.onclick = () => ($("mobileMore") && !$("mobileMore").hidden ? closeMobileMore() : openMobileMore());
   actions.append(button);
+  // Al girar el iPad o cambiar el tamaño, el menú abierto ya no encaja.
+  window.addEventListener("resize", () => closeMobileMore());
 }
 // La barra de estado del móvil toma el color de la cabecera del tema activo.
 function syncThemeColor() {

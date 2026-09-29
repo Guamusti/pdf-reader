@@ -93,3 +93,51 @@ test.describe("móvil", () => {
     await expect(page.locator(".mm-grid button")).toContainText(["Biblioteca", "Cuaderno", "Pizarra"]);
   });
 });
+
+test.describe("iPad", () => {
+  test.use({ viewport: { width: 820, height: 1180 }, hasTouch: true });
+
+  test("el menú «Más» da acceso a lo que no está en la barra (OCR, estudiar, PDF anotado…)", async ({ page }) => {
+    await openDoc(page, "scan.pdf");
+    await expect(page.locator("#mobileMoreBtn")).toBeVisible();
+    await page.click("#mobileMoreBtn");
+    const menu = page.locator("#mobileMore .mm-grid button");
+    await expect(menu).toHaveText(["Estudiar", "Modo lectura", "PDF anotado", "Reconocer texto (OCR)", "Exportar notas", "Copia y sincronización", "Pantalla completa"]);
+    // Desplegable bajo el botón, no hoja inferior.
+    await page.waitForTimeout(250);
+    const [button, sheet] = await Promise.all([page.locator("#mobileMoreBtn").boundingBox(), page.locator(".mm-sheet").boundingBox()]);
+    expect(sheet.y).toBeGreaterThan(button.y + button.height);
+    expect(sheet.y).toBeLessThan(button.y + button.height + 20);
+    expect(Math.abs(sheet.x + sheet.width - (button.x + button.width))).toBeLessThan(2);
+    await page.click('[data-mm="ocr"]');
+    await expect(page.locator("#mobileMore")).toBeHidden();
+    await expect(page.locator("#textLayer.ocr-layer span").first()).toBeAttached({ timeout: 60_000 });
+    await expect(page.locator("#textLayer")).toContainText("Tablas de Young");
+  });
+
+  test("la barra superior no se solapa en ningún ancho de tableta", async ({ page }) => {
+    await openDoc(page, "refs.pdf");
+    const problems = [];
+    for (let width = 701; width <= 1440; width += 13) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.waitForTimeout(40);
+      problems.push(
+        ...(await page.evaluate((width) => {
+          const box = (el) => el.getBoundingClientRect();
+          const items = [...document.querySelectorAll(".toolbar button, .toolbar input"), document.querySelector(".toolbar-nav")].filter((el) => box(el).width > 0);
+          const out = [];
+          for (let i = 0; i < items.length; i++) {
+            if (box(items[i]).right > innerWidth + 1) out.push(`${width}: ${items[i].id} se sale`);
+            for (let j = i + 1; j < items.length; j++) {
+              if (items[i].contains(items[j]) || items[j].contains(items[i])) continue;
+              const a = box(items[i]), b = box(items[j]);
+              if (a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1) out.push(`${width}: ${items[i].id || items[i].className} ~ ${items[j].id || items[j].className}`);
+            }
+          }
+          return out;
+        }, width)),
+      );
+    }
+    expect(problems).toEqual([]);
+  });
+});

@@ -202,8 +202,10 @@ html.ui4 .footer.footer-minimized .footer-collapse { width: auto !important; min
 .footer-mini-page { display: none; }
 html.ui4 .footer.footer-minimized .footer-mini-page:not(:empty) { display: inline; }
 
-/* Botón «Más» y su hoja de herramientas: solo en móvil. */
-html.ui4 .toolbar .mobile-more-btn { display: none !important; }
+/* Botón «Más» y sus herramientas: hoja inferior en el móvil; en iPad y
+   escritorio, desplegable bajo el botón con lo que no cabe en la barra. */
+html.ui4 .toolbar .mobile-more-btn { display: grid !important; place-items: center; }
+body:not(.has-doc) .toolbar .mobile-more-btn { display: none !important; }
 .mobile-more[hidden] { display: none; }
 .mobile-more { position: fixed; z-index: 180; inset: 0; }
 .mm-backdrop { position: absolute; inset: 0; background: rgba(12, 15, 22, .38); }
@@ -215,6 +217,13 @@ html.ui4 .toolbar .mobile-more-btn { display: none !important; }
 .mm-grid button:active { background: var(--soft); }
 .mm-grid button .ui-icon { width: 22px; height: 22px; }
 .mm-grid button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft, var(--soft)); }
+.mobile-more.is-popover .mm-backdrop { background: transparent; }
+.mobile-more.is-popover .mm-sheet { left: auto; bottom: auto; width: min(372px, calc(100vw - 16px)); max-height: calc(100dvh - 90px); overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 18px 50px rgba(0, 0, 0, .2); transform: translateY(-6px); opacity: 0; transition: transform .14s ease, opacity .14s ease; }
+.mobile-more.is-popover.is-open .mm-sheet { transform: none; opacity: 1; }
+.mobile-more.is-popover .mm-grip { display: none; }
+.mobile-more.is-popover .mm-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.mobile-more.is-popover .mm-grid button { min-height: 70px; }
+@media (hover: hover) { .mm-grid button:hover { background: var(--soft); } }
 
 @media (max-width: 700px) {
   html.ui4 { --paper-topbar: calc(54px + var(--safe-top)); }
@@ -361,3 +370,21 @@ html:is([data-page-tone="graphite"], [data-page-tone="night"], [data-page-tone="
 html:is([data-page-tone="graphite"], [data-page-tone="night"], [data-page-tone="night-warm"]) :is(.annotation, .live-highlight, .source-flash) { mix-blend-mode: screen; }
 /* «Noche cálida»: el sepia no tiñe el negro; una capa en trama lo vuelve marrón muy oscuro. */
 html[data-page-tone="night-warm"] :is(.canvas-wrap, .cont-page, .split-page)::after { mix-blend-mode: screen; background: rgb(36, 26, 13); }
+
+/* iPad: la barra no cabe entera. La columna izquierda (panel y biblioteca) no
+   se encoge por debajo de sus botones, para que la pastilla de páginas no se
+   monte encima, y lo menos usado pasa al menú «Más» (que muestra solo lo que
+   no se ve en la barra). Con la barra lateral fija (≥1180px) la barra también
+   es estrecha. */
+@media (min-width: 701px) {
+  html.ui4 .toolbar { grid-template-columns: minmax(92px, 1fr) auto auto !important; }
+}
+@media (min-width: 701px) and (max-width: 1099px), (min-width: 1180px) and (max-width: 1299px) {
+  html.ui4 .toolbar #focusBtn { display: none !important; }
+}
+@media (min-width: 701px) and (max-width: 939px), (min-width: 1180px) and (max-width: 1239px) {
+  html.ui4 .toolbar .nav-history, html.ui4 .toolbar .nav-history + .nav-divider { display: none !important; }
+}
+@media (min-width: 701px) and (max-width: 729px) {
+  html.ui4 .toolbar #bookmarkBtn { display: none !important; }
+}
