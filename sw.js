@@ -1,8 +1,8 @@
-const CACHE = 'paper-reader-v116';
+const CACHE = 'paper-reader-v117';
 const SHARE_CACHE = 'paper-share';
 // Rutas relativas al propio service worker: la app funciona igual en la raíz
 // de un dominio (Vercel) que en una subcarpeta (GitHub Pages: /pdf-reader/).
-const CORE = ['./', 'index.html', 'reader-ui.css?v=32', 'reader-v3.css?v=8', 'reader-v6.css?v=20', 'app.js?v=102', 'pdf-engine.js?v=1', 'storage.js?v=2', 'sync.js?v=2', 'references.js?v=5', 'epub.js?v=1', 'ai-worker.js?v=1', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png'];
+const CORE = ['./', 'index.html', 'reader-ui.css?v=32', 'reader-v3.css?v=8', 'reader-v6.css?v=21', 'app.js?v=103', 'pdf-engine.js?v=1', 'storage.js?v=2', 'sync.js?v=2', 'references.js?v=5', 'epub.js?v=1', 'ai-worker.js?v=1', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 const INDEX = new URL('index.html', self.location).href;
 const appUrl = (path) => new URL(path, self.registration.scope).href;
 const PDFJS = ['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs', 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs'];

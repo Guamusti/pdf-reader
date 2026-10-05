@@ -11774,25 +11774,38 @@ function restoreReflowAnchor(anchor) {
 // ---- Temas y ajustes de lectura (como en Libros de Apple) ----
 // Se aplican al Modo lectura de los PDF, a los Markdown y a los EPUB. Los
 // temas predefinidos cambian también el color de página de los PDF.
+// Las tipografías de Libros de Apple vienen con iPadOS/macOS; en otros
+// sistemas se usa la más parecida. (Comillas simples: van dentro de atributos.)
 const READER_FONTS = [
-  { id: "sans", label: "Sistema", stack: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif' },
-  { id: "serif", label: "Charter", stack: 'Charter, "Iowan Old Style", Georgia, "Times New Roman", serif' },
-  { id: "palatino", label: "Palatino", stack: 'Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif' },
-  { id: "avenir", label: "Avenir", stack: '"Avenir Next", Avenir, "Segoe UI", "Helvetica Neue", sans-serif' },
-  { id: "humanist", label: "Humanista", stack: '"Trebuchet MS", Verdana, "Segoe UI", sans-serif' },
-  { id: "mono", label: "Mono", stack: '"SF Mono", SFMono-Regular, Menlo, Consolas, monospace' },
+  { id: "sans", label: "Sistema", stack: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif" },
+  { id: "newyork", label: "New York", stack: "ui-serif, 'New York', 'Iowan Old Style', Georgia, serif" },
+  { id: "serif", label: "Charter", stack: "Charter, 'Bitstream Charter', 'Iowan Old Style', Georgia, serif" },
+  { id: "georgia", label: "Georgia", stack: "Georgia, 'Times New Roman', serif" },
+  { id: "iowan", label: "Iowan", stack: "'Iowan Old Style', 'Palatino Linotype', Georgia, serif" },
+  { id: "palatino", label: "Palatino", stack: "Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" },
+  { id: "athelas", label: "Athelas", stack: "Athelas, Charter, Georgia, serif" },
+  { id: "times", label: "Times", stack: "'Times New Roman', Times, serif" },
+  { id: "seravek", label: "Seravek", stack: "Seravek, 'Gill Sans', 'Gill Sans MT', 'Segoe UI', sans-serif" },
+  { id: "avenir", label: "Avenir", stack: "'Avenir Next', Avenir, 'Segoe UI', 'Helvetica Neue', sans-serif" },
+  { id: "humanist", label: "Humanista", stack: "'Trebuchet MS', Verdana, 'Segoe UI', sans-serif" },
+  { id: "mono", label: "Mono", stack: "'SF Mono', SFMono-Regular, Menlo, Consolas, monospace" },
 ];
-const READER_PAPERS = [
-  { id: "paper", label: "Blanco" },
-  { id: "warm", label: "Crema" },
-  { id: "sepia", label: "Sepia" },
-  { id: "gray", label: "Gris" },
-  { id: "quiet", label: "Silencio" },
-  { id: "night", label: "Noche" },
-];
+// Un solo color de página para el PDF y para el Modo lectura / EPUB: cada tono
+// tiene su papel de lectura equivalente.
+const READER_THEME_FOR_TONE = { paper: "paper", cream: "warm", sepia: "sepia", mint: "mint", gray: "gray", quiet: "quiet", graphite: "graphite", night: "night", "night-warm": "night-warm", custom: "custom" };
+const TONE_FOR_READER_THEME = Object.fromEntries(Object.entries(READER_THEME_FOR_TONE).map(([tone, theme]) => [theme, tone]));
+const CUSTOM_PAPER_DEFAULT = { bg: "#f3ead7", fg: "#2b2118" };
+function customPaper() {
+  const valid = (value, fallback) => (/^#[0-9a-f]{6}$/i.test(value || "") ? value : fallback);
+  return { bg: valid(kv.getItem("paper.custom-bg"), CUSTOM_PAPER_DEFAULT.bg), fg: valid(kv.getItem("paper.custom-fg"), CUSTOM_PAPER_DEFAULT.fg) };
+}
+function colorIsDark(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.18;
+}
 const READER_PRESETS = [
   { id: "original", label: "Original", theme: "paper", font: "sans", bold: false, tone: "paper" },
-  { id: "quiet", label: "Silencio", theme: "quiet", font: "sans", bold: false, tone: "graphite" },
+  { id: "quiet", label: "Silencio", theme: "quiet", font: "sans", bold: false, tone: "quiet" },
   { id: "paper", label: "Papel", theme: "warm", font: "serif", bold: false, tone: "cream" },
   { id: "bold", label: "Negrita", theme: "paper", font: "sans", bold: true, tone: "paper" },
   { id: "calm", label: "Calma", theme: "sepia", font: "palatino", bold: false, tone: "sepia" },
@@ -11823,7 +11836,7 @@ function readerPrefs() {
     alignment: get("alignment") === "justify" ? "justify" : "left",
     hyphens: get("hyphens") === "1",
     columns: ["1", "2"].includes(get("columns")) ? get("columns") : "auto",
-    theme: READER_PAPERS.some((item) => item.id === get("theme")) ? get("theme") : READER_DEFAULTS.theme,
+    theme: READER_THEME_FOR_TONE[currentPageTone()] || READER_DEFAULTS.theme,
   };
 }
 function setReaderPref(name, value) {
@@ -11836,7 +11849,6 @@ function activeReaderPreset(prefs = readerPrefs()) {
 function applyReaderPreset(id) {
   const preset = READER_PRESETS.find((item) => item.id === id);
   if (!preset) return;
-  kv.setItem("paper.reflow-theme", preset.theme);
   kv.setItem("paper.reflow-font", preset.font);
   kv.setItem("paper.reflow-bold", preset.bold ? "1" : "");
   setPageColor(preset.tone, { quiet: true });
@@ -11858,6 +11870,11 @@ function styleReader(element, prefs = readerPrefs()) {
   element.classList.toggle("is-bold", prefs.bold);
   element.classList.toggle("hyphenate", prefs.hyphens);
   element.dataset.readerTheme = prefs.theme;
+  const custom = customPaper();
+  element.style.setProperty("--reader-bg", custom.bg);
+  element.style.setProperty("--reader-fg", custom.fg);
+  const dark = ["quiet", "graphite", "night", "night-warm"].includes(prefs.theme) || (prefs.theme === "custom" && colorIsDark(custom.bg));
+  element.toggleAttribute("data-reader-dark", dark);
 }
 function applyReflowPreferences() {
   const anchor = reflowReadingAnchor();
@@ -11920,7 +11937,7 @@ function themeSheetHtml() {
   const range = (name, label, min, max, step, minLabel, maxLabel) => `<label class="ts-range"><span class="ts-range-head"><span>${label}</span><output data-ts-output="${name}"></output></span><span class="ts-range-row"><small>${minLabel}</small><input type="range" data-ts-range="${name}" min="${min}" max="${max}" step="${step}" aria-label="${label}"><small>${maxLabel}</small></span></label>`;
   const toggle = (name, label, hint = "") => `<button type="button" class="ts-toggle" data-ts-toggle="${name}" role="switch" aria-checked="false"><span><strong>${label}</strong>${hint ? `<small>${hint}</small>` : ""}</span><i aria-hidden="true"></i></button>`;
   const segmented = (name, label, options) => `<div class="ts-row"><span class="ts-row-label">${label}</span><div class="ts-segmented" role="radiogroup" aria-label="${label}">${options.map(([value, text]) => `<button type="button" role="radio" data-ts-choice="${name}" data-value="${value}">${text}</button>`).join("")}</div></div>`;
-  return `<div class="ts-backdrop" data-ts-close></div><section class="ts-card" role="dialog" aria-modal="true" aria-labelledby="themeSheetTitle"><header class="ts-head"><strong id="themeSheetTitle">Temas y ajustes</strong><button type="button" class="ts-close" data-ts-close aria-label="Cerrar">${iconSvg("close")}</button></header><div class="ts-preview" id="themePreview" aria-label="Vista previa"></div><div class="ts-scroll"><div class="ts-presets" role="radiogroup" aria-label="Temas">${READER_PRESETS.map((preset) => `<button type="button" role="radio" class="ts-preset" data-ts-preset="${preset.id}" data-reader-theme="${preset.theme}"><span class="ts-preset-aa font-${preset.font}${preset.bold ? " is-bold" : ""}" style="font-family:${escapeHtml(READER_FONTS.find((font) => font.id === preset.font).stack)}">Aa</span><span class="ts-preset-name">${preset.label}</span></button>`).join("")}</div><div class="ts-section-title">Texto</div><p class="ts-note" id="themePdfNote" hidden>Letra, tamaño y espaciado se aplican en el Modo lectura, los Markdown y los EPUB. <button type="button" data-ts-reflow>Leer este PDF en Modo lectura</button></p><div class="ts-size"><button type="button" data-ts-size="-1" aria-label="Letra más pequeña">A</button><input type="range" data-ts-range="size" min="12" max="40" step="1" aria-label="Tamaño de letra"><button type="button" data-ts-size="1" aria-label="Letra más grande">A</button><output class="ts-size-value" data-ts-output="size"></output></div><div class="ts-fonts" role="radiogroup" aria-label="Tipo de letra">${READER_FONTS.map((font) => `<button type="button" role="radio" data-ts-choice="font" data-value="${font.id}"><span style="font-family:${escapeHtml(font.stack)}">Aa</span><small>${font.label}</small></button>`).join("")}</div>${toggle("bold", "Texto en negrita")}${range("leading", "Interlineado", 1.1, 2.4, 0.05, "Junto", "Amplio")}${range("letter", "Espacio entre letras", 0, 0.15, 0.005, "Normal", "Abierto")}${range("word", "Espacio entre palabras", 0, 0.5, 0.02, "Normal", "Abierto")}${range("measure", "Ancho de línea", 480, 1280, 20, "Estrecho", "Ancho")}${segmented("alignment", "Alineación", [["left", "Izquierda"], ["justify", "Justificado"]])}${toggle("hyphens", "Separar palabras", "Guiones al final de línea")}${segmented("columns", "Columnas", [["auto", "Auto"], ["1", "Una"], ["2", "Dos"]])}<div class="ts-section-title">Papel</div><div class="ts-papers" role="radiogroup" aria-label="Color del papel de lectura">${READER_PAPERS.map((paper) => `<button type="button" role="radio" data-ts-choice="theme" data-value="${paper.id}" data-reader-theme="${paper.id}"><i></i><small>${paper.label}</small></button>`).join("")}</div><div class="ts-section-title">Páginas del PDF</div><div class="page-colors ts-tones">${PAGE_TONES.map((tone) => `<button type="button" data-page-color="${tone.id}" title="${tone.label}" aria-label="${tone.label}" aria-pressed="false"></button>`).join("")}</div><div class="ts-section-title">Interfaz</div><div class="ts-segmented ts-ui" role="radiogroup" aria-label="Tema de la interfaz"><button type="button" role="radio" data-ts-ui="light">Claro</button><button type="button" role="radio" data-ts-ui="sepia">Sepia</button><button type="button" role="radio" data-ts-ui="dark">Oscuro</button></div><button type="button" class="ts-reset" data-ts-reset>Restablecer ajustes de lectura</button></div></section>`;
+  return `<div class="ts-backdrop" data-ts-close></div><section class="ts-card" role="dialog" aria-modal="true" aria-labelledby="themeSheetTitle"><header class="ts-head"><strong id="themeSheetTitle">Temas y ajustes</strong><button type="button" class="ts-close" data-ts-close aria-label="Cerrar">${iconSvg("close")}</button></header><div class="ts-preview" id="themePreview" aria-label="Vista previa"></div><div class="ts-scroll"><div class="ts-presets" role="radiogroup" aria-label="Temas">${READER_PRESETS.map((preset) => `<button type="button" role="radio" class="ts-preset" data-ts-preset="${preset.id}" data-reader-theme="${preset.theme}"><span class="ts-preset-aa${preset.bold ? " is-bold" : ""}" data-font-sample="${preset.font}">Aa</span><span class="ts-preset-name">${preset.label}</span></button>`).join("")}</div><div class="ts-section-title">Texto</div><p class="ts-note" id="themePdfNote" hidden>Letra, tamaño y espaciado se aplican en el Modo lectura, los Markdown y los EPUB. <button type="button" data-ts-reflow>Leer este PDF en Modo lectura</button></p><div class="ts-size"><button type="button" data-ts-size="-1" aria-label="Letra más pequeña">A</button><input type="range" data-ts-range="size" min="12" max="40" step="1" aria-label="Tamaño de letra"><button type="button" data-ts-size="1" aria-label="Letra más grande">A</button><output class="ts-size-value" data-ts-output="size"></output></div><div class="ts-fonts" role="radiogroup" aria-label="Tipo de letra">${READER_FONTS.map((font) => `<button type="button" role="radio" data-ts-choice="font" data-value="${font.id}"><span data-font-sample="${font.id}">Aa</span><small>${font.label}</small></button>`).join("")}</div>${toggle("bold", "Texto en negrita")}${range("leading", "Interlineado", 1.1, 2.4, 0.05, "Junto", "Amplio")}${range("letter", "Espacio entre letras", 0, 0.15, 0.005, "Normal", "Abierto")}${range("word", "Espacio entre palabras", 0, 0.5, 0.02, "Normal", "Abierto")}${range("measure", "Ancho de línea", 480, 1280, 20, "Estrecho", "Ancho")}${segmented("alignment", "Alineación", [["left", "Izquierda"], ["justify", "Justificado"]])}${toggle("hyphens", "Separar palabras", "Guiones al final de línea")}${segmented("columns", "Columnas", [["auto", "Auto"], ["1", "Una"], ["2", "Dos"]])}<div class="ts-section-title">Color de página</div><div class="ts-tones" role="radiogroup" aria-label="Color de página">${PAGE_TONES.map((tone) => `<button type="button" role="radio" data-page-color="${tone.id}" aria-label="${tone.label}"><i></i><small>${tone.label}</small></button>`).join("")}</div><div class="ts-custom" id="themeCustom" hidden><label><input type="color" data-ts-color="bg" aria-label="Color del fondo"><span><strong>Fondo</strong><small data-ts-color-value="bg"></small></span></label><label><input type="color" data-ts-color="fg" aria-label="Color del texto"><span><strong>Texto</strong><small data-ts-color-value="fg"></small></span></label><p>El fondo se aplica también a las páginas del PDF; el color del texto, al Modo lectura y los EPUB.</p></div><p class="ts-hint">Se aplica a los PDF y al Modo lectura (también a los EPUB).</p><div class="ts-section-title">Interfaz</div><div class="ts-segmented ts-ui" role="radiogroup" aria-label="Tema de la interfaz"><button type="button" role="radio" data-ts-ui="light">Claro</button><button type="button" role="radio" data-ts-ui="sepia">Sepia</button><button type="button" role="radio" data-ts-ui="dark">Oscuro</button></div><button type="button" class="ts-reset" data-ts-reset>Restablecer ajustes de lectura</button></div></section>`;
 }
 let themePreviewToken = 0;
 function refreshThemeSheet({ sample = false } = {}) {
@@ -11941,8 +11958,14 @@ function refreshThemeSheet({ sample = false } = {}) {
   const tone = currentPageTone();
   sheet.querySelectorAll("[data-page-color]").forEach((button) => {
     button.classList.toggle("active", button.dataset.pageColor === tone);
-    button.setAttribute("aria-pressed", String(button.dataset.pageColor === tone));
+    button.setAttribute("aria-checked", String(button.dataset.pageColor === tone));
   });
+  const custom = customPaper();
+  $("themeCustom").hidden = tone !== "custom";
+  sheet.querySelectorAll("[data-ts-color]").forEach((input) => {
+    if (document.activeElement !== input) input.value = custom[input.dataset.tsColor];
+  });
+  sheet.querySelectorAll("[data-ts-color-value]").forEach((label) => (label.textContent = custom[label.dataset.tsColorValue].toUpperCase()));
   const pdfPage = Boolean(pdfDoc && !reflowMode);
   $("themePdfNote").hidden = !pdfPage;
   sheet.classList.toggle("is-pdf", pdfPage);
@@ -11975,6 +11998,11 @@ function openThemeSheet() {
     sheet.className = "theme-sheet";
     sheet.hidden = true;
     sheet.innerHTML = themeSheetHtml();
+    // Cada «Aa» con su tipografía (se asigna desde aquí: los nombres llevan
+    // comillas y no pueden ir dentro del atributo style del HTML).
+    sheet.querySelectorAll("[data-font-sample]").forEach((sample) => {
+      sample.style.fontFamily = READER_FONTS.find((font) => font.id === sample.dataset.fontSample)?.stack || "";
+    });
     document.body.append(sheet);
     sheet.addEventListener("click", (event) => {
       const target = event.target.closest("button, [data-ts-close]");
@@ -12004,6 +12032,8 @@ function openThemeSheet() {
     sheet.addEventListener("input", (event) => {
       const input = event.target.closest("[data-ts-range]");
       if (input) setReaderPref(input.dataset.tsRange, input.value);
+      const color = event.target.closest("[data-ts-color]");
+      if (color) setCustomPaper(color.dataset.tsColor, color.value);
     });
     sheet.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
@@ -12078,32 +12108,47 @@ const PAGE_TONES = [
   { id: "sepia", label: "Sepia" },
   { id: "mint", label: "Menta" },
   { id: "gray", label: "Gris" },
+  { id: "quiet", label: "Silencio" },
   { id: "graphite", label: "Grafito" },
   { id: "night", label: "Noche" },
   { id: "night-warm", label: "Noche cálida" },
+  { id: "custom", label: "Personalizado" },
 ];
 // Nombres antiguos de la versión con color por página.
 const LEGACY_PAGE_TONES = { warm: "cream" };
 function currentPageTone() {
-  const stored = kv.getItem("paper.page-tone") || kv.getItem("paper.page-color") || "paper";
+  // Antes el papel del Modo lectura se elegía aparte: si solo había ese, se usa.
+  const stored = kv.getItem("paper.page-tone") || kv.getItem("paper.page-color") || TONE_FOR_READER_THEME[kv.getItem("paper.reflow-theme")] || "paper";
   const tone = LEGACY_PAGE_TONES[stored] || stored;
   return PAGE_TONES.some((item) => item.id === tone) ? tone : "paper";
 }
 function updatePageColor() {
   pageColor = currentPageTone();
-  if (pageColor === "paper") delete document.documentElement.dataset.pageTone;
-  else document.documentElement.dataset.pageTone = pageColor;
+  const root = document.documentElement;
+  if (pageColor === "paper") delete root.dataset.pageTone;
+  else root.dataset.pageTone = pageColor;
+  // Tonos oscuros: la página se invierte. El personalizado lo es si su fondo es oscuro.
+  const custom = customPaper();
+  root.style.setProperty("--custom-page-color", custom.bg);
+  root.toggleAttribute("data-page-dark", ["quiet", "graphite", "night", "night-warm"].includes(pageColor) || (pageColor === "custom" && colorIsDark(custom.bg)));
   document.querySelectorAll("[data-page-color]").forEach((button) => {
     button.classList.toggle("active", button.dataset.pageColor === pageColor);
     button.setAttribute("aria-pressed", String(button.dataset.pageColor === pageColor));
   });
+}
+function setCustomPaper(part, value) {
+  if (!/^#[0-9a-f]{6}$/i.test(value)) return;
+  kv.setItem(`paper.custom-${part}`, value);
+  if (currentPageTone() !== "custom") kv.setItem("paper.page-tone", "custom");
+  updatePageColor();
+  applyReflowPreferences();
 }
 function setPageColor(color, { quiet = false } = {}) {
   kv.setItem("paper.page-tone", color);
   updatePageColor();
   const tone = PAGE_TONES.find((item) => item.id === color);
   if (tone && !quiet) toast(`Páginas en ${tone.label.toLowerCase()}`);
-  refreshThemeSheet();
+  applyReflowPreferences();
 }
 function buildPageColorControls() {
   const popover = $("appearancePopover");

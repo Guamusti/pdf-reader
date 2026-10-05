@@ -44,7 +44,7 @@ test.describe("referencias matemáticas", () => {
 
   test("color de página en todas las páginas y vistas", async ({ page }) => {
     await openDoc(page, "refs.pdf");
-    await expect(page.locator("[data-page-color]")).toHaveCount(8);
+    await expect(page.locator("#appearancePopover [data-page-color]")).toHaveCount(10);
     await page.evaluate(() => document.querySelector('[data-page-color="sepia"]').click());
     const tint = (selector) => page.evaluate((selector) => getComputedStyle(document.querySelector(selector), "::after").backgroundColor, selector);
     expect(await tint("#canvasWrap")).toBe("rgba(196, 160, 96, 0.42)");

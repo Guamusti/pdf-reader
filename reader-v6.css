@@ -349,10 +349,15 @@ html[data-page-tone="gray"] { --page-tint: rgba(120, 120, 120, .2); }
 html[data-page-tone="graphite"] { --page-filter: invert(.86) hue-rotate(180deg); --page-bg: #242424; }
 html[data-page-tone="night"] { --page-filter: invert(1) hue-rotate(180deg) brightness(.94); --page-bg: #0f0f0f; }
 html[data-page-tone="night-warm"] { --page-filter: invert(1) hue-rotate(180deg) sepia(.45) brightness(.88); --page-bg: #17130d; }
-html:is([data-page-tone="graphite"], [data-page-tone="night"], [data-page-tone="night-warm"]) :is(.canvas-wrap, .cont-page, .split-page, .ts-page) { background: var(--page-bg) !important; }
-html:is([data-page-tone="graphite"], [data-page-tone="night"], [data-page-tone="night-warm"]) :is(.canvas-wrap, .cont-page, .split-page, .ts-page) > canvas { filter: var(--page-filter); }
+html[data-page-tone="quiet"] { --page-filter: invert(1) hue-rotate(180deg) brightness(.94); --page-bg: #3d3d40; }
+/* Personalizado: claro, el papel toma el color («multiplicar»); oscuro, se
+   invierte la página y una capa en trama le da ese fondo. */
+html[data-page-tone="custom"]:not([data-page-dark]) { --page-tint: var(--custom-page-color); }
+html[data-page-tone="custom"][data-page-dark] { --page-filter: invert(1) hue-rotate(180deg) brightness(.94); --page-bg: var(--custom-page-color); }
+html[data-page-dark] :is(.canvas-wrap, .cont-page, .split-page, .ts-page) { background: var(--page-bg) !important; }
+html[data-page-dark] :is(.canvas-wrap, .cont-page, .split-page, .ts-page) > canvas { filter: var(--page-filter); }
 /* Los números de página del scroll continuo siguen legibles sobre fondo oscuro. */
-html:is([data-page-tone="graphite"], [data-page-tone="night"], [data-page-tone="night-warm"]) .cont-num { color: rgba(255, 255, 255, .55); }
+html[data-page-dark] .cont-num { color: rgba(255, 255, 255, .55); }
 
 /* Muestras del selector */
 .page-colors { flex-wrap: wrap; gap: 8px !important; }
@@ -365,11 +370,16 @@ html:is([data-page-tone="graphite"], [data-page-tone="night"], [data-page-tone="
 .page-colors [data-page-color="graphite"] { background: #2b2b2b; }
 .page-colors [data-page-color="night"] { background: #0f0f0f; }
 .page-colors [data-page-color="night-warm"] { background: linear-gradient(135deg, #17130d 55%, #6b5536); }
+.page-colors [data-page-color="quiet"] { background: #3d3d40; }
+.page-colors [data-page-color="custom"] { background: conic-gradient(from 200deg, #f3d9a6, #f6b7b7, #c9b7f2, #a9d3f5, #b7ead0, #f3d9a6); }
+html[data-page-tone="custom"] .page-colors [data-page-color="custom"] { background: var(--custom-page-color); }
 .page-colors [data-page-color].active { outline: 2px solid var(--accent, var(--text)); outline-offset: 2px; }
 /* Sobre páginas oscuras, «multiplicar» haría invisibles los resaltados. */
-html:is([data-page-tone="graphite"], [data-page-tone="night"], [data-page-tone="night-warm"]) :is(.annotation, .live-highlight, .source-flash) { mix-blend-mode: screen; }
+html[data-page-dark] :is(.annotation, .live-highlight, .source-flash) { mix-blend-mode: screen; }
 /* «Noche cálida»: el sepia no tiñe el negro; una capa en trama lo vuelve marrón muy oscuro. */
 html[data-page-tone="night-warm"] :is(.canvas-wrap, .cont-page, .split-page, .ts-page)::after { mix-blend-mode: screen; background: rgb(36, 26, 13); }
+html[data-page-tone="quiet"] :is(.canvas-wrap, .cont-page, .split-page, .ts-page)::after { mix-blend-mode: screen; background: rgb(61, 61, 64); }
+html[data-page-tone="custom"][data-page-dark] :is(.canvas-wrap, .cont-page, .split-page, .ts-page)::after { mix-blend-mode: screen; background: var(--custom-page-color); }
 
 /* iPad: la barra no cabe entera. La columna izquierda (panel y biblioteca) no
    se encoge por debajo de sus botones, para que la pastilla de páginas no se
@@ -605,3 +615,40 @@ html { height: 100%; overflow: hidden; overscroll-behavior: none; }
 .lib-cover.is-epub { background: linear-gradient(150deg, #9a5b3c, #5a2f1f); }
 .hp-text { width: auto !important; max-width: none !important; min-height: 0 !important; margin: 0 !important; padding: 12px 16px !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; column-count: 1 !important; font-size: min(var(--reflow-size, 20px), 17px) !important; }
 .hp-text img { max-width: 100%; }
+
+/* ---- Color de página único (PDF y Modo lectura) y color personalizado ---- */
+.reflow-reader[data-reader-theme="mint"] { background: #e3f0e6 !important; color: #1b2a20; }
+.reflow-reader[data-reader-theme="graphite"] { background: #242424 !important; color: #e8e8e8; border-color: #333 !important; }
+.reflow-reader[data-reader-theme="night-warm"] { background: #17130d !important; color: #eadcc4; border-color: #2a2218 !important; }
+.reflow-reader[data-reader-theme="custom"] { background: var(--reader-bg) !important; color: var(--reader-fg); }
+.reflow-reader[data-reader-dark] a { color: #8fb3ff; }
+.reflow-reader[data-reader-dark] { border-color: rgba(255, 255, 255, .08) !important; }
+.ts-tones { display: grid !important; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px 6px !important; }
+.ts-tones button { display: grid; justify-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 11px; line-height: 1.2; text-align: center; cursor: pointer; }
+.ts-tones i { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; background: #fff; }
+.ts-tones [data-page-color="cream"] i { background: #f5ead2; }
+.ts-tones [data-page-color="sepia"] i { background: #e2cfa2; }
+.ts-tones [data-page-color="mint"] i { background: #d7ecdc; }
+.ts-tones [data-page-color="gray"] i { background: #d6d6d6; }
+.ts-tones [data-page-color="quiet"] i { background: #3d3d40; }
+.ts-tones [data-page-color="graphite"] i { background: #242424; }
+.ts-tones [data-page-color="night"] i { background: #0f0f0f; }
+.ts-tones [data-page-color="night-warm"] i { background: linear-gradient(135deg, #17130d 55%, #6b5536); }
+.ts-tones [data-page-color="custom"] i { background: conic-gradient(from 200deg, #f3d9a6, #f6b7b7, #c9b7f2, #a9d3f5, #b7ead0, #f3d9a6); }
+html[data-page-tone="custom"] .ts-tones [data-page-color="custom"] i { background: var(--custom-page-color); }
+.ts-tones button[aria-checked="true"] { color: var(--text); font-weight: 650; }
+.ts-tones button[aria-checked="true"] i { outline: 2.5px solid var(--accent); outline-offset: 2px; }
+.ts-custom { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.ts-custom[hidden] { display: none; }
+.ts-custom label { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 12px; background: var(--soft); cursor: pointer; }
+.ts-custom input[type="color"] { flex: 0 0 auto; width: 40px; height: 40px; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: none; cursor: pointer; }
+.ts-custom input[type="color"]::-webkit-color-swatch-wrapper { padding: 3px; }
+.ts-custom input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 7px; }
+.ts-custom strong { display: block; font-size: 13.5px; }
+.ts-custom small { display: block; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.ts-custom p, .ts-hint { grid-column: 1 / -1; margin: 6px 2px 0; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.ts-preset[data-reader-theme="quiet"] { background: #3d3d40; color: #e4e2de; }
+.ts-fonts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ts-fonts button small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+@media (max-width: 700px) { .ts-fonts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.ts-custom:not([hidden]) + .ts-hint { display: none; }
