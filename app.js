@@ -1980,6 +1980,7 @@ function updateNavHistoryButtons() {
 }
 function jumpToPage(page, options = {}) {
   if (!pdfDoc) return Promise.resolve(false);
+  stopAxisInertia();
   const target = Math.max(1, Math.min(pdfDoc.numPages, Number(page) || 1));
   if (target === currentPage) return Promise.resolve(false);
   navBackStack.push(currentPage);
@@ -12081,6 +12082,104 @@ document.addEventListener("touchcancel", () => {
   swipeStart = null;
   resetPinchPreview();
 });
+// ---- Bloqueo de eje al desplazar con el dedo ----
+// Con la página ampliada (más ancha que la pantalla) un gesto casi vertical
+// también movía la página de lado. Como UIScrollView con «directionalLock»:
+// en los primeros píxeles se decide la intención — casi vertical (±28°) solo
+// desplaza en vertical, casi horizontal solo en horizontal y en diagonal se
+// mueve libre — y al soltar sigue con inercia en ese mismo eje. Si la página
+// cabe a lo ancho no se toca nada: el desplazamiento es el nativo.
+const AXIS_LOCK_DEGREES = 28;
+let axisPan = null;
+let axisInertia = 0;
+function stopAxisInertia() {
+  cancelAnimationFrame(axisInertia);
+  axisInertia = 0;
+}
+function axisPanAllowed(event) {
+  const viewer = $("viewer");
+  if (event.touches.length !== 1 || !currentBook || pinchGesture) return false;
+  if (viewer.scrollWidth <= viewer.clientWidth + 2) return false;
+  const touch = event.touches[0];
+  // El Apple Pencil, la tinta y los controles tienen sus propios gestos.
+  if (touch.touchType === "stylus" || markerMode || document.body.classList.contains("ink-drawing-mode")) return false;
+  return !event.target.closest?.("input, textarea, select, [contenteditable], .hover-preview, .sticky-pin, .annotation-editor, .annotation-actions") && Boolean(event.target.closest?.("#viewer"));
+}
+$("viewer").addEventListener("touchstart", (event) => {
+  stopAxisInertia();
+  if (!axisPanAllowed(event)) {
+    axisPan = null;
+    return;
+  }
+  const touch = event.touches[0];
+  const viewer = $("viewer");
+  axisPan = { id: touch.identifier, x: touch.clientX, y: touch.clientY, left: viewer.scrollLeft, top: viewer.scrollTop, time: performance.now(), axis: "", samples: [] };
+}, { passive: true });
+$("viewer").addEventListener("touchmove", (event) => {
+  if (!axisPan) return;
+  const touch = [...event.touches].find((item) => item.identifier === axisPan.id);
+  if (!touch || event.touches.length !== 1 || pinchGesture) {
+    axisPan = null;
+    return;
+  }
+  const dx = touch.clientX - axisPan.x,
+    dy = touch.clientY - axisPan.y;
+  if (!axisPan.axis) {
+    // Una pulsación larga es para seleccionar texto: se deja al sistema.
+    if (performance.now() - axisPan.time > 450 && Math.hypot(dx, dy) < 10) {
+      axisPan = null;
+      return;
+    }
+    if (event.cancelable) event.preventDefault();
+    if (Math.hypot(dx, dy) < 10) return;
+    const angle = (Math.atan2(Math.abs(dy), Math.abs(dx)) * 180) / Math.PI;
+    axisPan.axis = angle >= 90 - AXIS_LOCK_DEGREES ? "y" : angle <= AXIS_LOCK_DEGREES ? "x" : "free";
+  }
+  if (event.cancelable) event.preventDefault();
+  const viewer = $("viewer");
+  if (axisPan.axis !== "x") viewer.scrollTop = axisPan.top - dy;
+  if (axisPan.axis !== "y") viewer.scrollLeft = axisPan.left - dx;
+  const now = performance.now();
+  axisPan.samples.push({ t: now, x: touch.clientX, y: touch.clientY });
+  while (axisPan.samples.length > 2 && now - axisPan.samples[0].t > 90) axisPan.samples.shift();
+}, { passive: false });
+function endAxisPan() {
+  const pan = axisPan;
+  axisPan = null;
+  if (!pan?.axis || pan.samples.length < 2) return;
+  const first = pan.samples[0],
+    last = pan.samples[pan.samples.length - 1];
+  const dt = Math.max(16, last.t - first.t);
+  if (performance.now() - last.t > 80) return;
+  let vx = pan.axis === "y" ? 0 : -(last.x - first.x) / dt,
+    vy = pan.axis === "x" ? 0 : -(last.y - first.y) / dt;
+  if (Math.hypot(vx, vy) < 0.15) return;
+  // Inercia con la deceleración habitual de iOS (≈0,998 por milisegundo).
+  const viewer = $("viewer");
+  let previous = performance.now();
+  const step = (now) => {
+    const elapsed = Math.min(40, now - previous);
+    previous = now;
+    const decay = Math.pow(0.998, elapsed);
+    vx *= decay;
+    vy *= decay;
+    const beforeLeft = viewer.scrollLeft,
+      beforeTop = viewer.scrollTop;
+    if (vx) viewer.scrollLeft += vx * elapsed;
+    if (vy) viewer.scrollTop += vy * elapsed;
+    const stuck = viewer.scrollLeft === beforeLeft && viewer.scrollTop === beforeTop;
+    if (Math.hypot(vx, vy) < 0.02 || stuck) return stopAxisInertia();
+    axisInertia = requestAnimationFrame(step);
+  };
+  axisInertia = requestAnimationFrame(step);
+}
+$("viewer").addEventListener("touchend", (event) => {
+  if (axisPan && !event.touches.length) endAxisPan();
+}, { passive: true });
+$("viewer").addEventListener("touchcancel", () => {
+  axisPan = null;
+}, { passive: true });
+$("viewer").addEventListener("wheel", stopAxisInertia, { passive: true });
 let resizeTimer = null;
 let lastViewportSize = { width: window.innerWidth, height: window.innerHeight };
 window.addEventListener("resize", () => {
