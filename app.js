@@ -2772,6 +2772,7 @@ function paletteActions() {
     { icon: "▯", title: "Diseño: una página", keys: "vista simple", when: hasPdf, run: () => setViewMode("single") },
     { icon: "▯▯", title: "Diseño: doble página (libro)", keys: "vista libro spread dos paginas", when: hasPdf, run: () => setViewMode("double") },
     { icon: "↕", title: "Diseño: scroll continuo", keys: "vista desplazamiento vertical", when: hasPdf, run: () => setViewMode("continuous") },
+    { icon: "Aa", title: "Temas y ajustes de lectura", keys: "tema fuente letra tamaño interlineado espaciado margen negrita apariencia personalizar libros", when: hasDoc, run: openThemeSheet },
     { icon: "¶", title: reflowMode ? "Volver al PDF original" : "Modo lectura (texto adaptable)", keys: "reflow lectura maquetado texto fuente", shortcut: ["L"], when: hasPdf, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
     { icon: "▶", title: "Presentación a pantalla completa", keys: "diapositivas slides", shortcut: ["P"], when: hasPdf, run: enterPresentation },
     { icon: "🔊", title: ttsActive ? "Detener lectura en voz alta" : "Leer en voz alta", keys: "tts voz audio escuchar", when: hasPdf && speechSupported, run: toggleReadAloud },
@@ -3741,6 +3742,7 @@ function bindReadingTools() {
 // Iconos de trazo (estilo Lucide) para que toda la interfaz hable el mismo
 // lenguaje visual en lugar de mezclar caracteres Unicode sueltos.
 const ICONS = {
+  textSize: '<path d="M3.5 18 8.5 6l5 12M5.3 14h6.4"/><path d="M14.5 18l3.5-8 3.5 8M15.6 15.6h4.8"/>',
   folder: '<path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5v8.3A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"/>',
   scan: '<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M8 9.5h8M8 12.5h8M8 15.5h5"/>',
   panelLeft: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/>',
@@ -11126,6 +11128,7 @@ function mobileMoreItems() {
     { id: "read", icon: "volume", label: "Leer en voz alta", toolbar: "readAloudBtn", when: hasDoc, run: () => $("readAloudBtn").click() },
     { id: "study", icon: "check", label: "Estudiar", when: hasDoc, run: () => openStudy() },
     { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
+    { id: "themes", icon: "textSize", label: "Temas y ajustes", when: hasDoc, run: openThemeSheet },
     { id: "pdf", icon: "download", label: "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
     { id: "ocr", icon: "scan", label: "Reconocer texto (OCR)", when: hasPdf, run: () => runOcr("all") },
     { id: "markdown", icon: "copy", label: "Exportar notas", when: hasDoc, run: exportMarkdown },
@@ -11425,40 +11428,259 @@ function restoreReflowAnchor(anchor) {
   const section = $("reflowReader").querySelector(`.reflow-page[data-page="${anchor.page}"]`);
   if (section) $("viewer").scrollTop = section.offsetTop + anchor.ratio * section.offsetHeight;
 }
+// ---- Temas y ajustes de lectura (como en Libros de Apple) ----
+// Se aplican al Modo lectura de los PDF, a los Markdown y a los EPUB. Los
+// temas predefinidos cambian también el color de página de los PDF.
+const READER_FONTS = [
+  { id: "sans", label: "Sistema", stack: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif' },
+  { id: "serif", label: "Charter", stack: 'Charter, "Iowan Old Style", Georgia, "Times New Roman", serif' },
+  { id: "palatino", label: "Palatino", stack: 'Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif' },
+  { id: "avenir", label: "Avenir", stack: '"Avenir Next", Avenir, "Segoe UI", "Helvetica Neue", sans-serif' },
+  { id: "humanist", label: "Humanista", stack: '"Trebuchet MS", Verdana, "Segoe UI", sans-serif' },
+  { id: "mono", label: "Mono", stack: '"SF Mono", SFMono-Regular, Menlo, Consolas, monospace' },
+];
+const READER_PAPERS = [
+  { id: "paper", label: "Blanco" },
+  { id: "warm", label: "Crema" },
+  { id: "sepia", label: "Sepia" },
+  { id: "gray", label: "Gris" },
+  { id: "quiet", label: "Silencio" },
+  { id: "night", label: "Noche" },
+];
+const READER_PRESETS = [
+  { id: "original", label: "Original", theme: "paper", font: "sans", bold: false, tone: "paper" },
+  { id: "quiet", label: "Silencio", theme: "quiet", font: "sans", bold: false, tone: "graphite" },
+  { id: "paper", label: "Papel", theme: "warm", font: "serif", bold: false, tone: "cream" },
+  { id: "bold", label: "Negrita", theme: "paper", font: "sans", bold: true, tone: "paper" },
+  { id: "calm", label: "Calma", theme: "sepia", font: "palatino", bold: false, tone: "sepia" },
+  { id: "focus", label: "Enfoque", theme: "night", font: "serif", bold: false, tone: "night" },
+];
+const READER_DEFAULTS = { size: 20, font: "sans", bold: false, leading: 1.65, letter: 0, word: 0, measure: 760, alignment: "left", hyphens: false, columns: "auto", theme: "paper" };
+const clampPref = (value, min, max, fallback) => {
+  // Sin valor guardado (null o "") se usa el predeterminado, no el mínimo.
+  if (value === null || value === undefined || value === "") return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
+};
+// Preferencias actuales; las versiones anteriores guardaban preajustes
+// («compacto», «amplio», «estrecho»…) que se traducen a valores.
+function readerPrefs() {
+  const get = (name) => kv.getItem(`paper.reflow-${name}`);
+  const spacing = get("spacing");
+  const width = get("width");
+  const font = get("font");
+  return {
+    size: clampPref(get("size"), 12, 40, READER_DEFAULTS.size),
+    font: READER_FONTS.some((item) => item.id === font) ? font : READER_DEFAULTS.font,
+    bold: get("bold") === "1",
+    leading: clampPref(get("leading"), 1.1, 2.4, spacing === "compact" ? 1.35 : spacing === "relaxed" ? 1.95 : READER_DEFAULTS.leading),
+    letter: clampPref(get("letter"), 0, 0.15, get("tracking") === "open" ? 0.025 : 0),
+    word: clampPref(get("word"), 0, 0.5, 0),
+    measure: clampPref(get("measure"), 480, 1280, ({ narrow: 680, normal: 760, wide: 1040, fluid: 1280 })[width] || READER_DEFAULTS.measure),
+    alignment: get("alignment") === "justify" ? "justify" : "left",
+    hyphens: get("hyphens") === "1",
+    columns: ["1", "2"].includes(get("columns")) ? get("columns") : "auto",
+    theme: READER_PAPERS.some((item) => item.id === get("theme")) ? get("theme") : READER_DEFAULTS.theme,
+  };
+}
+function setReaderPref(name, value) {
+  kv.setItem(`paper.reflow-${name}`, typeof value === "boolean" ? (value ? "1" : "") : String(value));
+  applyReflowPreferences();
+}
+function activeReaderPreset(prefs = readerPrefs()) {
+  return READER_PRESETS.find((preset) => preset.theme === prefs.theme && preset.font === prefs.font && preset.bold === prefs.bold)?.id || "";
+}
+function applyReaderPreset(id) {
+  const preset = READER_PRESETS.find((item) => item.id === id);
+  if (!preset) return;
+  kv.setItem("paper.reflow-theme", preset.theme);
+  kv.setItem("paper.reflow-font", preset.font);
+  kv.setItem("paper.reflow-bold", preset.bold ? "1" : "");
+  setPageColor(preset.tone, { quiet: true });
+  applyReflowPreferences();
+}
+// Aplica el aspecto de lectura a un lector (el real o la vista previa).
+function styleReader(element, prefs = readerPrefs()) {
+  const font = READER_FONTS.find((item) => item.id === prefs.font) || READER_FONTS[0];
+  element.style.setProperty("--reflow-size", `${prefs.size}px`);
+  element.style.setProperty("--reflow-leading", String(prefs.leading));
+  element.style.setProperty("--reflow-width", `${prefs.measure}px`);
+  element.style.setProperty("--reflow-tracking", prefs.letter ? `${prefs.letter}em` : "normal");
+  element.style.setProperty("word-spacing", prefs.word ? `${prefs.word}em` : "normal");
+  element.style.setProperty("font-family", font.stack, "important");
+  element.classList.remove("font-serif", "font-humanist", "font-mono", "font-palatino", "font-avenir", "columns-1", "columns-2", "columns-auto", "align-justify");
+  if (prefs.font !== "sans") element.classList.add(`font-${prefs.font}`);
+  element.classList.add(`columns-${prefs.columns}`);
+  element.classList.toggle("align-justify", prefs.alignment === "justify");
+  element.classList.toggle("is-bold", prefs.bold);
+  element.classList.toggle("hyphenate", prefs.hyphens);
+  element.dataset.readerTheme = prefs.theme;
+}
 function applyReflowPreferences() {
   const anchor = reflowReadingAnchor();
-  const reader = $("reflowReader");
-  const size = Number(kv.getItem("paper.reflow-size") || 20);
-  const spacing = kv.getItem("paper.reflow-spacing") || "normal";
-  const font = kv.getItem("paper.reflow-font") || "sans";
-  const columns = kv.getItem("paper.reflow-columns") || "auto";
-  const width = kv.getItem("paper.reflow-width") || "normal";
-  const tracking = kv.getItem("paper.reflow-tracking") || "normal";
-  const alignment = kv.getItem("paper.reflow-alignment") || "left";
-  const theme = kv.getItem("paper.reflow-theme") || "paper";
-  reader.style.setProperty("--reflow-size", `${size}px`);
-  reader.style.setProperty("--reflow-leading", spacing === "compact" ? "1.35" : spacing === "relaxed" ? "1.95" : "1.65");
-  reader.style.setProperty("--reflow-width", ({ narrow: "680px", normal: "840px", wide: "1040px", fluid: "1280px" })[width] || "840px");
-  reader.style.setProperty("--reflow-tracking", tracking === "open" ? ".025em" : "normal");
-  reader.classList.remove("font-serif", "font-humanist", "font-mono", "columns-1", "columns-2", "columns-auto", "align-justify");
-  if (font !== "sans") reader.classList.add(`font-${font}`);
-  reader.classList.add(`columns-${columns}`);
-  reader.classList.toggle("align-justify", alignment === "justify");
-  reader.dataset.readerTheme = theme;
-  $("reflowFont").value = font;
-  $("reflowSize").value = String(size);
-  $("reflowSizeOutput").textContent = `${size}px`;
+  const prefs = readerPrefs();
+  styleReader($("reflowReader"), prefs);
   if (reflowMode && $("zoomLabel")) {
-    $("zoomLabel").textContent = `${size}px`;
-    $("zoomLabel").title = `Tamaño de lectura ${size}px`;
+    $("zoomLabel").textContent = `${prefs.size}px`;
+    $("zoomLabel").title = `Tamaño de lectura ${prefs.size}px`;
   }
-  document.querySelectorAll("[data-reflow-spacing]").forEach((button) => button.classList.toggle("active", button.dataset.reflowSpacing === spacing));
-  document.querySelectorAll("[data-reflow-columns]").forEach((button) => button.classList.toggle("active", button.dataset.reflowColumns === columns));
-  document.querySelectorAll("[data-reflow-width]").forEach((button) => button.classList.toggle("active", button.dataset.reflowWidth === width));
-  document.querySelectorAll("[data-reflow-tracking]").forEach((button) => button.classList.toggle("active", button.dataset.reflowTracking === tracking));
-  document.querySelectorAll("[data-reflow-alignment]").forEach((button) => button.classList.toggle("active", button.dataset.reflowAlignment === alignment));
-  document.querySelectorAll("[data-reflow-theme]").forEach((button) => button.classList.toggle("active", button.dataset.reflowTheme === theme));
+  refreshThemeSheet();
   if (anchor) requestAnimationFrame(() => restoreReflowAnchor(anchor));
+}
+// Texto de muestra para la vista previa: lo que se está leyendo, si hay.
+function themeSampleNodes() {
+  const reader = $("reflowReader");
+  const viewer = $("viewer");
+  if (reflowMode && !reader.hidden) {
+    const top = viewer.getBoundingClientRect().top;
+    const blocks = [...reader.querySelectorAll("h1, h2, h3, p")].filter((node) => node.textContent.trim().length > 2);
+    const start = Math.max(0, blocks.findIndex((node) => node.getBoundingClientRect().bottom > top + 40));
+    const picked = [];
+    let chars = 0;
+    for (const node of blocks.slice(start)) {
+      if (chars > 520) break;
+      const clone = document.createElement(/^H/.test(node.tagName) ? "h3" : "p");
+      const text = node.textContent.replace(/\s+/g, " ").trim();
+      clone.textContent = text.length > 600 - chars ? `${text.slice(0, 600 - chars).replace(/\s+\S*$/, "")}…` : text;
+      picked.push(clone);
+      chars += text.length;
+    }
+    if (picked.length) return picked;
+  }
+  const heading = document.createElement("h3");
+  heading.textContent = "Capítulo 1";
+  const paragraph = document.createElement("p");
+  paragraph.textContent = "Era un día luminoso y frío de abril, y los relojes daban las trece. La lectura se adapta a ti: elige la letra, el tamaño y el espacio entre líneas, y mira aquí cómo quedará antes de volver a la página.";
+  return [heading, paragraph];
+}
+async function themePagePreview() {
+  if (!pdfDoc || reflowMode) return null;
+  const page = await pdfDoc.getPage(currentPage);
+  const base = page.getViewport({ scale: 1, rotation });
+  const viewport = page.getViewport({ scale: 220 / base.width, rotation });
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width * dpr);
+  canvas.height = Math.floor(viewport.height * dpr);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: context, viewport, transform: [dpr, 0, 0, dpr, 0, 0] }).promise;
+  const frame = document.createElement("div");
+  frame.className = "ts-page";
+  frame.append(canvas);
+  return frame;
+}
+function themeSheetHtml() {
+  const range = (name, label, min, max, step, minLabel, maxLabel) => `<label class="ts-range"><span class="ts-range-head"><span>${label}</span><output data-ts-output="${name}"></output></span><span class="ts-range-row"><small>${minLabel}</small><input type="range" data-ts-range="${name}" min="${min}" max="${max}" step="${step}" aria-label="${label}"><small>${maxLabel}</small></span></label>`;
+  const toggle = (name, label, hint = "") => `<button type="button" class="ts-toggle" data-ts-toggle="${name}" role="switch" aria-checked="false"><span><strong>${label}</strong>${hint ? `<small>${hint}</small>` : ""}</span><i aria-hidden="true"></i></button>`;
+  const segmented = (name, label, options) => `<div class="ts-row"><span class="ts-row-label">${label}</span><div class="ts-segmented" role="radiogroup" aria-label="${label}">${options.map(([value, text]) => `<button type="button" role="radio" data-ts-choice="${name}" data-value="${value}">${text}</button>`).join("")}</div></div>`;
+  return `<div class="ts-backdrop" data-ts-close></div><section class="ts-card" role="dialog" aria-modal="true" aria-labelledby="themeSheetTitle"><header class="ts-head"><strong id="themeSheetTitle">Temas y ajustes</strong><button type="button" class="ts-close" data-ts-close aria-label="Cerrar">${iconSvg("close")}</button></header><div class="ts-preview" id="themePreview" aria-label="Vista previa"></div><div class="ts-scroll"><div class="ts-presets" role="radiogroup" aria-label="Temas">${READER_PRESETS.map((preset) => `<button type="button" role="radio" class="ts-preset" data-ts-preset="${preset.id}" data-reader-theme="${preset.theme}"><span class="ts-preset-aa font-${preset.font}${preset.bold ? " is-bold" : ""}" style="font-family:${escapeHtml(READER_FONTS.find((font) => font.id === preset.font).stack)}">Aa</span><span class="ts-preset-name">${preset.label}</span></button>`).join("")}</div><div class="ts-section-title">Texto</div><p class="ts-note" id="themePdfNote" hidden>Letra, tamaño y espaciado se aplican en el Modo lectura, los Markdown y los EPUB. <button type="button" data-ts-reflow>Leer este PDF en Modo lectura</button></p><div class="ts-size"><button type="button" data-ts-size="-1" aria-label="Letra más pequeña">A</button><input type="range" data-ts-range="size" min="12" max="40" step="1" aria-label="Tamaño de letra"><button type="button" data-ts-size="1" aria-label="Letra más grande">A</button><output class="ts-size-value" data-ts-output="size"></output></div><div class="ts-fonts" role="radiogroup" aria-label="Tipo de letra">${READER_FONTS.map((font) => `<button type="button" role="radio" data-ts-choice="font" data-value="${font.id}"><span style="font-family:${escapeHtml(font.stack)}">Aa</span><small>${font.label}</small></button>`).join("")}</div>${toggle("bold", "Texto en negrita")}${range("leading", "Interlineado", 1.1, 2.4, 0.05, "Junto", "Amplio")}${range("letter", "Espacio entre letras", 0, 0.15, 0.005, "Normal", "Abierto")}${range("word", "Espacio entre palabras", 0, 0.5, 0.02, "Normal", "Abierto")}${range("measure", "Ancho de línea", 480, 1280, 20, "Estrecho", "Ancho")}${segmented("alignment", "Alineación", [["left", "Izquierda"], ["justify", "Justificado"]])}${toggle("hyphens", "Separar palabras", "Guiones al final de línea")}${segmented("columns", "Columnas", [["auto", "Auto"], ["1", "Una"], ["2", "Dos"]])}<div class="ts-section-title">Papel</div><div class="ts-papers" role="radiogroup" aria-label="Color del papel de lectura">${READER_PAPERS.map((paper) => `<button type="button" role="radio" data-ts-choice="theme" data-value="${paper.id}" data-reader-theme="${paper.id}"><i></i><small>${paper.label}</small></button>`).join("")}</div><div class="ts-section-title">Páginas del PDF</div><div class="page-colors ts-tones">${PAGE_TONES.map((tone) => `<button type="button" data-page-color="${tone.id}" title="${tone.label}" aria-label="${tone.label}" aria-pressed="false"></button>`).join("")}</div><div class="ts-section-title">Interfaz</div><div class="ts-segmented ts-ui" role="radiogroup" aria-label="Tema de la interfaz"><button type="button" role="radio" data-ts-ui="light">Claro</button><button type="button" role="radio" data-ts-ui="sepia">Sepia</button><button type="button" role="radio" data-ts-ui="dark">Oscuro</button></div><button type="button" class="ts-reset" data-ts-reset>Restablecer ajustes de lectura</button></div></section>`;
+}
+let themePreviewToken = 0;
+function refreshThemeSheet({ sample = false } = {}) {
+  const sheet = $("themeSheet");
+  if (!sheet || sheet.hidden) return;
+  const prefs = readerPrefs();
+  const formats = { size: (v) => `${v} px`, leading: (v) => Number(v).toFixed(2), letter: (v) => (Number(v) ? `${Number(v).toFixed(3)} em` : "Normal"), word: (v) => (Number(v) ? `${Number(v).toFixed(2)} em` : "Normal"), measure: (v) => `${v} px` };
+  sheet.querySelectorAll("[data-ts-range]").forEach((input) => {
+    if (document.activeElement !== input) input.value = String(prefs[input.dataset.tsRange]);
+  });
+  sheet.querySelectorAll("[data-ts-output]").forEach((output) => (output.textContent = formats[output.dataset.tsOutput]?.(prefs[output.dataset.tsOutput]) ?? ""));
+  sheet.querySelectorAll("[data-ts-toggle]").forEach((button) => button.setAttribute("aria-checked", String(Boolean(prefs[button.dataset.tsToggle]))));
+  sheet.querySelectorAll("[data-ts-choice]").forEach((button) => button.setAttribute("aria-checked", String(String(prefs[button.dataset.tsChoice]) === button.dataset.value)));
+  const preset = activeReaderPreset(prefs);
+  sheet.querySelectorAll("[data-ts-preset]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.tsPreset === preset)));
+  const theme = document.documentElement.dataset.theme;
+  sheet.querySelectorAll("[data-ts-ui]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.tsUi === theme)));
+  const tone = currentPageTone();
+  sheet.querySelectorAll("[data-page-color]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.pageColor === tone);
+    button.setAttribute("aria-pressed", String(button.dataset.pageColor === tone));
+  });
+  const pdfPage = Boolean(pdfDoc && !reflowMode);
+  $("themePdfNote").hidden = !pdfPage;
+  sheet.classList.toggle("is-pdf", pdfPage);
+  // Vista previa: el texto con el aspecto elegido (o la página del PDF).
+  const preview = $("themePreview");
+  let sampleBox = preview.querySelector(".ts-sample");
+  if (!sampleBox) {
+    sampleBox = document.createElement("div");
+    sampleBox.className = "reflow-reader ts-sample";
+    preview.append(sampleBox);
+  }
+  if (sample || !sampleBox.childNodes.length) sampleBox.replaceChildren(...themeSampleNodes());
+  styleReader(sampleBox, prefs);
+  sampleBox.hidden = pdfPage;
+  if (pdfPage && (sample || !preview.querySelector(".ts-page"))) {
+    const token = ++themePreviewToken;
+    themePagePreview().then((node) => {
+      if (token !== themePreviewToken || !node) return;
+      preview.querySelector(".ts-page")?.remove();
+      preview.prepend(node);
+    });
+  }
+  if (!pdfPage) preview.querySelector(".ts-page")?.remove();
+}
+function openThemeSheet() {
+  let sheet = $("themeSheet");
+  if (!sheet) {
+    sheet = document.createElement("div");
+    sheet.id = "themeSheet";
+    sheet.className = "theme-sheet";
+    sheet.hidden = true;
+    sheet.innerHTML = themeSheetHtml();
+    document.body.append(sheet);
+    sheet.addEventListener("click", (event) => {
+      const target = event.target.closest("button, [data-ts-close]");
+      if (!target) return;
+      if (target.matches("[data-ts-close]")) return closeThemeSheet();
+      if (target.dataset.tsPreset) return applyReaderPreset(target.dataset.tsPreset);
+      if (target.dataset.tsChoice) return setReaderPref(target.dataset.tsChoice, target.dataset.value);
+      if (target.dataset.tsToggle) return setReaderPref(target.dataset.tsToggle, target.getAttribute("aria-checked") !== "true");
+      if (target.dataset.tsSize) return setReaderPref("size", clampPref(readerPrefs().size + Number(target.dataset.tsSize), 12, 40, 20));
+      if (target.dataset.pageColor) {
+        setPageColor(target.dataset.pageColor);
+        return refreshThemeSheet();
+      }
+      if (target.dataset.tsUi) {
+        setTheme(target.dataset.tsUi);
+        return refreshThemeSheet();
+      }
+      if (target.matches("[data-ts-reflow]")) {
+        return setReadingMode("reflow").then(() => refreshThemeSheet({ sample: true }));
+      }
+      if (target.matches("[data-ts-reset]")) {
+        ["size", "spacing", "font", "columns", "width", "tracking", "alignment", "theme", "bold", "leading", "letter", "word", "measure", "hyphens"].forEach((name) => kv.removeItem(`paper.reflow-${name}`));
+        applyReflowPreferences();
+        toast("Ajustes de lectura restablecidos");
+      }
+    });
+    sheet.addEventListener("input", (event) => {
+      const input = event.target.closest("[data-ts-range]");
+      if (input) setReaderPref(input.dataset.tsRange, input.value);
+    });
+    sheet.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      closeThemeSheet();
+    });
+  }
+  sheet.hidden = false;
+  document.body.classList.add("theme-sheet-open");
+  refreshThemeSheet({ sample: true });
+  requestAnimationFrame(() => sheet.classList.add("is-open"));
+  sheet.querySelector(".ts-close").focus({ preventScroll: true });
+}
+function closeThemeSheet() {
+  const sheet = $("themeSheet");
+  if (!sheet || sheet.hidden) return false;
+  sheet.classList.remove("is-open");
+  sheet.hidden = true;
+  document.body.classList.remove("theme-sheet-open");
+  return true;
 }
 async function setReadingMode(mode) {
   reflowMode = mode === "reflow";
@@ -11494,20 +11716,12 @@ async function setReadingMode(mode) {
 function buildReflowControls() {
   const popover = $("appearancePopover");
   if (!popover || $("reflowControls")) return;
-  popover.insertAdjacentHTML("beforeend", `<div class="label">Modo</div><div class="tool-row reading-mode-switch" role="group" aria-label="Modo de visualización"><button class="btn" data-reading-mode="pdf">PDF original</button><button class="btn" data-reading-mode="reflow">Lectura</button></div><div class="reflow-controls" id="reflowControls" hidden><div class="reflow-control-head"><strong>Maquetación de lectura</strong><small>El texto se adapta sin modificar el PDF.</small></div><div class="label">Tipografía</div><select class="field" id="reflowFont" aria-label="Fuente de lectura"><option value="sans">Sistema</option><option value="serif">Serif editorial</option><option value="humanist">Humanista accesible</option><option value="mono">Monoespaciada</option></select><label class="reflow-slider"><span>Tamaño <output id="reflowSizeOutput">20px</output></span><input id="reflowSize" type="range" min="14" max="36" step="1" value="20"></label><div class="label">Interlineado</div><div class="tool-row"><button class="btn" data-reflow-spacing="compact">Compacto</button><button class="btn" data-reflow-spacing="normal">Normal</button><button class="btn" data-reflow-spacing="relaxed">Amplio</button></div><div class="label">Ancho de lectura</div><div class="tool-row reflow-four"><button class="btn" data-reflow-width="narrow">Estrecho</button><button class="btn" data-reflow-width="normal">Normal</button><button class="btn" data-reflow-width="wide">Amplio</button><button class="btn" data-reflow-width="fluid">Fluido</button></div><div class="label">Columnas</div><div class="tool-row"><button class="btn" data-reflow-columns="auto">Auto</button><button class="btn" data-reflow-columns="1">Una</button><button class="btn" data-reflow-columns="2">Dos</button></div><div class="label">Texto</div><div class="tool-row"><button class="btn" data-reflow-alignment="left">Izquierda</button><button class="btn" data-reflow-alignment="justify">Justificado</button><button class="btn" data-reflow-tracking="normal">Natural</button><button class="btn" data-reflow-tracking="open">Abierto</button></div><div class="label">Papel de lectura</div><div class="reflow-themes"><button data-reflow-theme="paper" aria-label="Blanco"></button><button data-reflow-theme="warm" aria-label="Cálido"></button><button data-reflow-theme="sepia" aria-label="Sepia"></button><button data-reflow-theme="gray" aria-label="Gris"></button><button data-reflow-theme="night" aria-label="Noche"></button></div><button class="btn reflow-reset" id="reflowReset">Restablecer lectura</button></div>`);
+  popover.insertAdjacentHTML("beforeend", `<div class="label">Modo</div><div class="tool-row reading-mode-switch" role="group" aria-label="Modo de visualización"><button class="btn" data-reading-mode="pdf">PDF original</button><button class="btn" data-reading-mode="reflow">Lectura</button></div><div class="reflow-controls" id="reflowControls" hidden></div><button class="btn theme-sheet-open" id="openThemeSheet" type="button">${iconSvg("textSize")}<span><strong>Temas y ajustes</strong><small>Letra, tamaño, espaciado y colores, con vista previa</small></span></button>`);
   document.querySelectorAll("[data-reading-mode]").forEach((button) => (button.onclick = () => setReadingMode(button.dataset.readingMode)));
-  $("reflowFont").onchange = (event) => { kv.setItem("paper.reflow-font", event.target.value); applyReflowPreferences(); };
-  $("reflowSize").oninput = (event) => { kv.setItem("paper.reflow-size", event.target.value); applyReflowPreferences(); };
-  document.querySelectorAll("[data-reflow-spacing]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-spacing", button.dataset.reflowSpacing); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-columns]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-columns", button.dataset.reflowColumns); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-width]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-width", button.dataset.reflowWidth); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-tracking]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-tracking", button.dataset.reflowTracking); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-alignment]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-alignment", button.dataset.reflowAlignment); applyReflowPreferences(); }));
-  document.querySelectorAll("[data-reflow-theme]").forEach((button) => (button.onclick = () => { kv.setItem("paper.reflow-theme", button.dataset.reflowTheme); applyReflowPreferences(); }));
-  $("reflowReset").onclick = () => {
-    ["size", "spacing", "font", "columns", "width", "tracking", "alignment", "theme"].forEach((name) => kv.removeItem(`paper.reflow-${name}`));
-    applyReflowPreferences();
-    toast("Preferencias de lectura restablecidas");
+  $("openThemeSheet").onclick = () => {
+    $("appearancePopover")?.classList.remove("open");
+    $("appearanceBtn")?.setAttribute("aria-expanded", "false");
+    openThemeSheet();
   };
 }
 // ---- Color de página ----
@@ -11541,11 +11755,12 @@ function updatePageColor() {
     button.setAttribute("aria-pressed", String(button.dataset.pageColor === pageColor));
   });
 }
-function setPageColor(color) {
+function setPageColor(color, { quiet = false } = {}) {
   kv.setItem("paper.page-tone", color);
   updatePageColor();
   const tone = PAGE_TONES.find((item) => item.id === color);
-  if (tone) toast(`Páginas en ${tone.label.toLowerCase()}`);
+  if (tone && !quiet) toast(`Páginas en ${tone.label.toLowerCase()}`);
+  refreshThemeSheet();
 }
 function buildPageColorControls() {
   const popover = $("appearancePopover");
@@ -11816,6 +12031,7 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Escape" && closeMobileMore()) return;
+  if (e.key === "Escape" && closeThemeSheet()) return;
   if (e.key === "Escape" && $("promptMenu") && !$("promptMenu").hidden) {
     closePromptMenu();
     return;
