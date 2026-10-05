@@ -97,7 +97,6 @@ let pdfDoc = null,
   builtInVisionSession = null,
   aiSelection = "",
   aiAnswerRaw = "",
-  pendingNote = null,
   aiAbortController = null,
   aiScope = "selection",
   aiMessages = [],
@@ -8255,9 +8254,9 @@ function annotationStyle(color, opacity) {
   return `rgba(${rgb},${alpha})`;
 }
 function annotationLabel(type) {
-  if (type === "sticky") return "Nota";
+  if (type === "sticky") return "Nota adhesiva";
   return type === "note"
-    ? "Nota"
+    ? "Resaltado"
     : type === "pen"
       ? "Trazo libre"
       : type === "box"
@@ -8312,26 +8311,47 @@ function deleteAnnotation(id) {
   closeAnnotationEditor();
   toast("Anotación eliminada");
 }
-function openAnnotationEditor(id, anchorRect = null) {
+const COLOR_NAMES = { yellow: "Amarillo", green: "Verde", blue: "Azul", pink: "Rosa", orange: "Naranja", purple: "Morado", red: "Rojo" };
+// Rectángulo en pantalla de una anotación (para colocar su editor al lado).
+function annotationScreenRect(id) {
+  const nodes = [...document.querySelectorAll(`.annotation-layer [data-annotation-id="${CSS.escape(id)}"]`)];
+  if (!nodes.length) return null;
+  const boxes = nodes.map((node) => node.getBoundingClientRect()).filter((box) => box.width || box.height);
+  if (!boxes.length) return null;
+  const left = Math.min(...boxes.map((box) => box.left)), top = Math.min(...boxes.map((box) => box.top));
+  const right = Math.max(...boxes.map((box) => box.right)), bottom = Math.max(...boxes.map((box) => box.bottom));
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+function openAnnotationEditor(id, anchorRect = null, { focusNote = false } = {}) {
   const mark = annotations().find((item) => item.id === id);
   if (!mark) return;
-  if (!annotationSelectMode) setAnnotationSelectMode(true);
   selectedAnnotationId = id;
   renderAnnotations();
   renderAnnotationList();
+  const anchor = anchorRect || annotationScreenRect(id) || quickAnnotateAnchor;
   const editor = $("annotationEditor");
-  const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
-  const textTypes = ["highlight", "underline", "wavy", "strike"];
-  const editableType = textTypes.includes(mark.type);
-  editor.innerHTML = `<header><div><small>Página ${mark.page}</small><strong>${annotationLabel(mark.type)}</strong></div><button class="btn icon" data-editor-close aria-label="Cerrar editor">×</button></header>${editableType ? `<label>Tipo<select class="field" data-editor-type>${textTypes.map((type) => `<option value="${type}"${type === mark.type ? " selected" : ""}>${annotationLabel(type)}</option>`).join("")}</select></label>` : ""}<label>Color<div class="annotation-editor-colors">${colors.map((color) => `<button data-editor-color="${color}" class="${color === (mark.color || "yellow") ? "active" : ""}" style="--swatch:${annotationStyle(color, .9)}" aria-label="${color}"></button>`).join("")}</div></label><label>Opacidad <output data-opacity-output>${Math.round((mark.opacity ?? .48) * 100)}%</output><input type="range" min="10" max="100" value="${Math.round((mark.opacity ?? .48) * 100)}" data-editor-opacity></label>${mark.type !== "highlight" && mark.type !== "note" ? `<label>Grosor <output data-width-output>${mark.width || 2}px</output><input type="range" min="1" max="12" value="${mark.width || 2}" data-editor-width></label>` : ""}<label>Comentario<textarea class="field" data-editor-note placeholder="Añade una nota a esta anotación…">${escapeHtml(mark.note || "")}</textarea></label><footer><button class="btn" data-editor-duplicate>Duplicar</button><button class="btn danger" data-editor-delete>Eliminar</button></footer>`;
+  const textTypes = [["highlight", "highlighter", "Resaltar"], ["underline", "underline", "Subrayar"], ["wavy", "wavy", "Ondulado"], ["strike", "strike", "Tachar"]];
+  const isText = textTypes.some(([type]) => type === mark.type) || mark.type === "note";
+  const currentType = mark.type === "note" ? "highlight" : mark.type;
+  const showWidth = !["highlight", "note"].includes(mark.type);
+  editor.innerHTML = `<header><div><small>Página ${mark.page}</small><strong>${annotationLabel(mark.type)}</strong></div><button class="btn icon" data-editor-close aria-label="Cerrar">${iconSvg("close")}</button></header>${isText ? `<div class="ae-types" role="radiogroup" aria-label="Tipo">${textTypes.map(([type, icon, label]) => `<button type="button" role="radio" data-editor-type="${type}" aria-checked="${type === currentType}" title="${label}">${iconSvg(icon)}<span>${label}</span></button>`).join("")}</div>` : ""}<div class="annotation-editor-colors" role="radiogroup" aria-label="Color">${ANNOTATION_COLORS.map((color) => `<button type="button" role="radio" data-editor-color="${color}" aria-checked="${color === (mark.color || "yellow")}" class="${color === (mark.color || "yellow") ? "active" : ""}" style="--swatch:${annotationStyle(color, 0.9)}" aria-label="${COLOR_NAMES[color]}" title="${COLOR_NAMES[color]}"></button>`).join("")}</div><label class="ae-range">Opacidad <output data-opacity-output>${Math.round((mark.opacity ?? 0.48) * 100)}%</output><input type="range" min="10" max="100" value="${Math.round((mark.opacity ?? 0.48) * 100)}" data-editor-opacity></label>${showWidth ? `<label class="ae-range">Grosor <output data-width-output>${mark.width || 2}px</output><input type="range" min="1" max="12" value="${mark.width || 2}" data-editor-width></label>` : ""}<textarea class="field" data-editor-note placeholder="Comentario…" aria-label="Comentario">${escapeHtml(mark.note || "")}</textarea><footer>${mark.text ? `<button class="btn" data-editor-copy>${iconSvg("copy")}<span>Copiar</span></button>` : ""}<button class="btn" data-editor-duplicate>${iconSvg("plus")}<span>Duplicar</span></button><button class="btn danger" data-editor-delete>${iconSvg("trash")}<span>Eliminar</span></button></footer>`;
   editor.hidden = false;
-  const width = 310;
-  const left = anchorRect ? anchorRect.right + 10 : window.innerWidth - width - 18;
-  const top = anchorRect ? anchorRect.top : 84;
+  // Junto a la anotación: debajo si cabe, si no encima; centrado sobre ella.
+  const width = editor.offsetWidth || 300,
+    height = editor.offsetHeight || 260;
+  let left = anchor ? anchor.left + anchor.width / 2 - width / 2 : window.innerWidth - width - 18;
+  let top = anchor ? anchor.bottom + 10 : 84;
+  if (anchor && top + height > window.innerHeight - 10) top = anchor.top - height - 10;
   editor.style.left = `${Math.max(10, Math.min(left, window.innerWidth - width - 10))}px`;
-  editor.style.top = `${Math.max(64, Math.min(top, window.innerHeight - editor.offsetHeight - 10))}px`;
+  editor.style.top = `${Math.max(60, Math.min(top, window.innerHeight - height - 10))}px`;
   editor.querySelector("[data-editor-close]").onclick = closeAnnotationEditor;
-  editor.querySelector("[data-editor-delete]").onclick = () => deleteAnnotation(id);
+  editor.querySelector("[data-editor-delete]").onclick = () => {
+    deleteAnnotation(id);
+    closeAnnotationEditor();
+  };
+  editor.querySelector("[data-editor-copy]")?.addEventListener("click", () => {
+    navigator.clipboard?.writeText(mark.text).then(() => toast("Texto copiado"), () => toast("No se pudo copiar"));
+  });
   editor.querySelector("[data-editor-duplicate]").onclick = () => {
     const items = annotations();
     const copy = structuredClone(items.find((item) => item.id === id));
@@ -8345,13 +8365,13 @@ function openAnnotationEditor(id, anchorRect = null) {
     renderAnnotationList();
     toast("Anotación duplicada");
   };
-  editor.querySelector("[data-editor-type]")?.addEventListener("change", (event) => {
-    if (updateAnnotation(id, { type: event.target.value })) openAnnotationEditor(id, anchorRect);
-  });
-  editor.querySelectorAll("[data-editor-color]").forEach((button) => button.onclick = () => {
+  editor.querySelectorAll("[data-editor-type]").forEach((button) => (button.onclick = () => {
+    if (updateAnnotation(id, { type: button.dataset.editorType })) openAnnotationEditor(id, anchorRect);
+  }));
+  editor.querySelectorAll("[data-editor-color]").forEach((button) => (button.onclick = () => {
     updateAnnotation(id, { color: button.dataset.editorColor });
     openAnnotationEditor(id, anchorRect);
-  });
+  }));
   const opacity = editor.querySelector("[data-editor-opacity]");
   opacity.oninput = () => {
     editor.querySelector("[data-opacity-output]").textContent = `${opacity.value}%`;
@@ -8359,10 +8379,34 @@ function openAnnotationEditor(id, anchorRect = null) {
   opacity.onchange = () => updateAnnotation(id, { opacity: Number(opacity.value) / 100 });
   const widthInput = editor.querySelector("[data-editor-width]");
   if (widthInput) {
-    widthInput.oninput = () => editor.querySelector("[data-width-output]").textContent = `${widthInput.value}px`;
+    widthInput.oninput = () => (editor.querySelector("[data-width-output]").textContent = `${widthInput.value}px`);
     widthInput.onchange = () => updateAnnotation(id, { width: Number(widthInput.value) });
   }
-  editor.querySelector("[data-editor-note]").onchange = (event) => updateAnnotation(id, { note: event.target.value.trim().slice(0, 2000) });
+  const note = editor.querySelector("[data-editor-note]");
+  // El comentario se guarda mientras se escribe (y al salir del campo).
+  let noteTimer = 0;
+  const saveComment = () => {
+    clearTimeout(noteTimer);
+    const value = note.value.trim().slice(0, 2000);
+    if ((annotations().find((item) => item.id === id)?.note || "") !== value) updateAnnotation(id, { note: value }, false);
+  };
+  note.oninput = () => {
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(saveComment, 500);
+  };
+  note.onchange = saveComment;
+  note.onblur = saveComment;
+  if (focusNote) requestAnimationFrame(() => note.focus());
+}
+// Anotación de texto (resaltado, subrayado, tachado) bajo un punto de la
+// pantalla: un toque sobre ella abre su editor sin elegir antes ninguna
+// herramienta. Los trazos y recuadros siguen editándose con «Seleccionar».
+function textAnnotationAt(x, y) {
+  for (const node of document.querySelectorAll(".annotation-layer .annotation[data-annotation-id]:not(.annotation-vector)")) {
+    const box = node.getBoundingClientRect();
+    if (x >= box.left - 2 && x <= box.right + 2 && y >= box.top - 3 && y <= box.bottom + 3) return node.dataset.annotationId;
+  }
+  return "";
 }
 // ---- Superficies de página ----
 // Cada página dibujada —en la vista de una página, en doble página o en el
@@ -8471,13 +8515,18 @@ function renderAnnotationList() {
         : annotationFilter === "drawing"
           ? all.filter((mark) => ["pen", "box", "arrow"].includes(mark.type))
           : annotationFilter === "note"
-            ? all.filter((mark) => mark.type === "note" || mark.type === "sticky")
-            : all.filter((mark) => mark.type === annotationFilter);
+            ? all.filter((mark) => mark.note?.trim() || mark.type === "sticky")
+            : annotationFilter === "highlight"
+              ? all.filter((mark) => mark.type === "highlight" || mark.type === "note")
+              : annotationFilter === "underline"
+                ? all.filter((mark) => mark.type === "underline" || mark.type === "wavy")
+                : all.filter((mark) => mark.type === annotationFilter);
   list.innerHTML = marks.length
     ? marks
         .map(
           (mark) =>
-            `<div class="annotation-entry${mark.id === selectedAnnotationId ? " selected" : ""}"><button class="bookmark" data-annotation-page="${mark.page}" data-annotation-id="${mark.id}"><strong>${annotationLabel(mark.type)} · página ${mark.page}</strong><small>${escapeHtml(mark.note || mark.text || "Fragmento seleccionado")}</small></button><button class="btn icon annotation-remove" data-remove-annotation="${mark.id}" aria-label="Eliminar anotación">×</button></div>`,
+            // Color, tipo y página; el texto marcado y, debajo, el comentario.
+            `<div class="annotation-entry${mark.id === selectedAnnotationId ? " selected" : ""}"><button class="bookmark" data-annotation-page="${mark.page}" data-annotation-id="${mark.id}"><span class="ae-entry-head"><i class="ae-dot" style="--swatch:${annotationStyle(mark.color || "yellow", 0.9)}"></i><strong>${annotationLabel(mark.type)}</strong><span class="ae-entry-page">p. ${mark.page}</span></span>${mark.text ? `<q class="ae-entry-text">${escapeHtml(mark.text.slice(0, 220))}</q>` : ""}${mark.note ? `<small class="ae-entry-note">${iconSvg("sticky")}${escapeHtml(mark.note.slice(0, 280))}</small>` : ""}${!mark.text && !mark.note ? `<small>${["pen", "box", "arrow"].includes(mark.type) ? "Dibujo en la página" : "Sin texto"}</small>` : ""}</button><button class="btn icon annotation-remove" data-remove-annotation="${mark.id}" aria-label="Eliminar anotación">${iconSvg("trash")}</button></div>`,
         )
         .join("")
     : `<span style="color:var(--muted);font-size:13px">${all.length ? "No hay anotaciones de este tipo." : "Aún no hay anotaciones."}</span>`;
@@ -8998,41 +9047,38 @@ function clearPageAnnotations() {
   $("toolPopover").classList.remove("open");
   toast("Anotaciones eliminadas");
 }
-function openNotePanel() {
-  const rects = selectedRects(),
-    text = window.getSelection()?.toString().trim();
-  if (!rects || !text) return toast("Selecciona texto para añadir una nota");
-  pendingNote = { rects, page: selectionSurface()?.page || currentPage, text: text.slice(0, 500) };
-  $("noteQuote").textContent = pendingNote.text;
-  $("noteText").value = "";
-  $("notePanel").hidden = false;
-  window.getSelection().removeAllRanges();
+// «Comentar» la selección: se resalta y se abre su editor con el comentario
+// listo para escribir (antes había un panel de nota aparte).
+function commentSelection() {
+  const id = quickAnnotate("highlight");
+  if (id) openAnnotationEditor(id, null, { focusNote: true });
+}
+// Resaltar o subrayar directamente desde el menú de la selección.
+function quickAnnotate(type, color = null) {
+  const style = inkToolStyles[type] || inkToolStyles.highlight;
+  const previous = { annotationColor, inkOpacity, inkWidth };
+  annotationColor = color || style.color;
+  inkOpacity = Number(style.opacity);
+  inkWidth = Number(style.width);
+  const rect = window.getSelection()?.rangeCount ? window.getSelection().getRangeAt(0).getBoundingClientRect() : null;
+  const saved = saveAnnotation(type, true);
+  ({ annotationColor, inkOpacity, inkWidth } = previous);
+  if (!saved) return null;
+  // El color elegido se recuerda para la próxima vez (también en la barra Ink).
+  if (color && inkToolStyles[type]) {
+    inkToolStyles[type] = { ...inkToolStyles[type], color };
+    persistInkToolStyles();
+    if (inkTool === type) applyInkToolStyle(type);
+    refreshInkPreview();
+  }
+  window.getSelection()?.removeAllRanges();
   hideAnnotationActions();
-  $("noteText").focus();
+  const mark = annotations().at(-1);
+  quickAnnotateAnchor = rect;
+  toast(type === "highlight" ? "Texto resaltado · tócalo para cambiarlo" : "Texto subrayado · tócalo para cambiarlo");
+  return mark?.id || null;
 }
-function closeNotePanel() {
-  pendingNote = null;
-  $("notePanel").hidden = true;
-}
-function saveNote() {
-  const note = $("noteText").value.trim();
-  if (!pendingNote || !note || !currentBook) return;
-  const items = annotations();
-  items.push({
-    id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
-    page: pendingNote.page || currentPage,
-    type: "note",
-    text: pendingNote.text,
-    note: note.slice(0, 1000),
-    rects: pendingNote.rects,
-    createdAt: Date.now(),
-  });
-  commitAnnotations(items);
-  closeNotePanel();
-  renderAnnotations();
-  renderAnnotationList();
-  toast("Nota guardada");
-}
+let quickAnnotateAnchor = null;
 function closeCapture() {
   captureStart = null;
   $("captureOverlay").classList.remove("show");
@@ -11655,7 +11701,7 @@ let viewerScrolledAt = 0;
 $("viewer").addEventListener("scroll", () => (viewerScrolledAt = performance.now()), { passive: true });
 $("viewer").addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || document.body.classList.contains("ink-drawing-mode") || !currentBook) return;
-  paperTap = { id: event.pointerId, x: event.clientX, y: event.clientY, time: performance.now(), selection: window.getSelection()?.toString() || "" };
+  paperTap = { id: event.pointerId, x: event.clientX, y: event.clientY, time: performance.now(), selection: window.getSelection()?.toString() || "", editorOpen: !$("annotationEditor").hidden || Boolean($("annotationActions")?.classList.contains("show")) };
 });
 $("viewer").addEventListener("pointercancel", () => { paperTap = null; });
 $("viewer").addEventListener("pointerup", (event) => {
@@ -11666,11 +11712,23 @@ $("viewer").addEventListener("pointerup", (event) => {
   const touch = event.pointerType !== "mouse";
   if (moved > (touch ? 12 : 8) || performance.now() - tap.time > 600 || markerMode || eraserMode || stickyPlacement) return;
   if (document.body.classList.contains("ink-drawing-mode") || $("captureOverlay").classList.contains("show")) return;
-  if (event.target.closest("a, button, input, textarea, select, label, .sticky-pin, .hover-preview, .annotation-actions")) return;
+  if (event.target.closest("a, button, input, textarea, select, label, .sticky-pin, .hover-preview, .annotation-actions, #annotationEditor")) return;
+  // Un toque sobre un resaltado o subrayado abre su editor (y no oculta la
+  // interfaz). Se comprueba antes de nada porque el toque cae sobre el texto.
+  const annotationId = !tap.selection.trim() ? textAnnotationAt(event.clientX, event.clientY) : "";
+  if (annotationId) {
+    setTimeout(() => {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+      openAnnotationEditor(annotationId);
+    }, touch ? 60 : 0);
+    return;
+  }
   if (!touch && event.target.closest(".textLayer span, #reflowReader p, #reflowReader li, #reflowReader h2, #reflowReader h3")) return;
   if (!event.target.closest("#canvasWrap, #facingWrap, #continuousView, #reflowReader, #viewer")) return;
-  // Un toque que cierra una selección no alterna la interfaz.
-  if (tap.selection.trim()) return;
+  // Un toque que cierra una selección o el editor de una anotación no alterna
+  // la interfaz.
+  if (tap.selection.trim() || tap.editorOpen) return;
   // Ni el que detiene un desplazamiento con inercia: en el móvil se tocaba
   // para frenar el scroll y la cabecera desaparecía sin querer.
   if (touch && viewerScrolledAt > tap.time - 250) return;
@@ -12407,15 +12465,15 @@ document
   }));
 $("clearPageNotes").onclick = clearPageAnnotations;
 $("copySelectionBtn").onclick = copySelectionText;
-$("noteBtn").onclick = openNotePanel;
-$("closeNotePanel").onclick = closeNotePanel;
-$("saveNote").onclick = saveNote;
-$("notePanel").onclick = (e) => {
-  if (e.target === $("notePanel")) closeNotePanel();
-};
-$("noteText").onkeydown = (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") saveNote();
-};
+$("noteBtn").onclick = commentSelection;
+document.querySelectorAll("[data-quick-highlight]").forEach((button) => {
+  button.style.setProperty("--swatch", annotationStyle(button.dataset.quickHighlight, 0.9));
+  button.onclick = () => quickAnnotate("highlight", button.dataset.quickHighlight);
+});
+document.querySelectorAll("[data-quick-annotation]").forEach((button) => {
+  button.innerHTML = iconSvg(button.dataset.quickAnnotation);
+  button.onclick = () => quickAnnotate(button.dataset.quickAnnotation);
+});
 function setUiScale(value) {
   const n = Math.max(0.85, Math.min(1.25, value));
   document.documentElement.style.setProperty("--ui-scale", n);
@@ -12448,7 +12506,7 @@ document.addEventListener("pointerdown", (e) => {
     $("appearancePopover").classList.remove("open");
   }
   if (
-    annotationSelectMode &&
+    !$("annotationEditor").hidden &&
     !e.target.closest("#annotationEditor") &&
     !e.target.closest("[data-annotation-id]")
   ) closeAnnotationEditor();

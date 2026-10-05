@@ -83,9 +83,12 @@ test("PDF anotado: anotaciones estándar con apariencia y la pizarra al final", 
   // La nota se añade desde el menú de selección, antes de entrar en modo Ink
   // (el modo Ink sigue activo aunque se oculte su barra).
   await selectWord(page, "#canvasWrap", "hook length");
+  // «Comentar»: resalta y abre el editor con el comentario listo.
   await page.click("#noteBtn");
-  await page.fill("#noteText", "Longitud del gancho");
-  await page.click("#saveNote");
+  await expect(page.locator("#annotationEditor [data-editor-note]")).toBeFocused();
+  await page.keyboard.type("Longitud del gancho");
+  await page.keyboard.press("Tab");
+  await page.click("#annotationEditor [data-editor-close]");
   await selectInkTool(page, "underline");
   await selectWord(page, "#canvasWrap", "pairwise");
   await selectInkTool(page, "strike");
@@ -103,4 +106,72 @@ test("PDF anotado: anotaciones estándar con apariencia y la pizarra al final", 
   expect(annotations.map((a) => a.subtype).sort()).toEqual(["Highlight", "StrikeOut", "Underline"]);
   expect(annotations.every((a) => a.hasAppearance)).toBe(true);
   expect(annotations.find((a) => a.subtype === "Highlight").contentsObj.str).toBe("Longitud del gancho");
+});
+
+test.describe("anotar desde la selección y editar tocando", () => {
+  test.use({ viewport: { width: 820, height: 1180 }, hasTouch: true, isMobile: true });
+  const marks = (page) => page.evaluate(() => [...document.querySelectorAll("#annotationLayer .annotation[data-annotation-id]")].map((node) => node.className.replace("annotation ", "").replace(" selected", "")));
+  const select = async (page, word) => {
+    const r = await wordRect(page, "#canvasWrap", word);
+    await page.evaluate(([word]) => {
+      const span = [...document.querySelectorAll("#canvasWrap .textLayer span")].find((item) => item.textContent.includes(word));
+      const index = span.textContent.indexOf(word);
+      const range = document.createRange();
+      range.setStart(span.firstChild, index);
+      range.setEnd(span.firstChild, index + word.length);
+      const selection = getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+    }, [word]);
+    await page.waitForTimeout(400);
+    return r;
+  };
+
+  test("colores, subrayar, comentar y editar con un toque sin ocultar la interfaz", async ({ page }) => {
+    await openDoc(page, "refs.pdf");
+    // Resaltar en verde desde el menú de la selección.
+    await select(page, "pairwise");
+    await expect(page.locator("#annotationActions")).toHaveClass(/show/);
+    await page.locator('[data-quick-highlight="green"]').tap();
+    await expect.poll(() => marks(page)).toEqual(["highlight"]);
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector("#annotationLayer .annotation.highlight")).backgroundColor)).toMatch(/rgba?\(\s*\d+,\s*1[5-9]\d,/);
+    // Subrayar.
+    await select(page, "Standard");
+    await page.locator('[data-quick-annotation="underline"]').tap();
+    await expect.poll(() => marks(page)).toEqual(["highlight", "underline"]);
+
+    // Tocar el resaltado: se abre su editor y la interfaz sigue visible.
+    const box = await page.locator("#annotationLayer .annotation.highlight").boundingBox();
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+    const editor = page.locator("#annotationEditor");
+    await expect(editor).toBeVisible();
+    await expect(page.locator("body")).not.toHaveClass(/reader-chrome-hidden/);
+    await expect(page.locator(".toolbar")).toBeVisible();
+    // Pasar a tachado y a rojo.
+    await editor.locator('[data-editor-type="strike"]').tap();
+    await editor.locator('[data-editor-color="red"]').tap();
+    await expect.poll(() => marks(page)).toEqual(["strike", "underline"]);
+    // Tocar fuera lo cierra.
+    await page.touchscreen.tap(400, 900);
+    await expect(editor).toBeHidden();
+
+    // «Comentar» resalta y deja escribir el comentario, que se guarda solo.
+    await select(page, "hook length");
+    await page.locator("#noteBtn").tap();
+    await expect(editor.locator("[data-editor-note]")).toBeFocused();
+    await page.keyboard.type("Una idea");
+    await page.waitForTimeout(800);
+    await page.touchscreen.tap(400, 900);
+    await expect(editor).toBeHidden();
+    await expect.poll(() => marks(page)).toEqual(["strike", "underline", "highlight"]);
+    // Al volver a tocarlo, el comentario sigue ahí.
+    const hook = await page.locator("#annotationLayer .annotation.highlight").boundingBox();
+    await page.touchscreen.tap(hook.x + hook.width / 2, hook.y + hook.height / 2);
+    await expect(editor.locator("[data-editor-note]")).toHaveValue("Una idea");
+    // Eliminar desde el editor.
+    await editor.locator("[data-editor-delete]").tap();
+    await expect(editor).toBeHidden();
+    await expect.poll(() => marks(page)).toEqual(["strike", "underline"]);
+  });
 });
