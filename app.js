@@ -15,6 +15,7 @@ import {
   decryptBackupBlob,
 } from "./storage.js?v=2";
 import { folderSyncSupported, openSyncFolder, syncFolder } from "./sync.js?v=2";
+import { openEpub, cleanChapter, chapterAnchor, resolvePath, mediaTypeFor } from "./epub.js?v=1";
 import {
   buildLines,
   extractReferences,
@@ -654,7 +655,7 @@ async function restoreFullBackup(file, passphrase = "") {
       $("loaderText").textContent = meta.name || "Documento";
       await dbPut({
         ...meta,
-        blob: new Blob([await data.arrayBuffer()], { type: meta.kind === "markdown" ? "text/markdown" : "application/pdf" }),
+        blob: new Blob([await data.arrayBuffer()], { type: meta.kind === "markdown" ? "text/markdown" : meta.kind === "epub" ? "application/epub+zip" : "application/pdf" }),
         cover: coverIndex !== undefined ? new Blob([await fileAt(coverIndex).arrayBuffer()], { type: "image/jpeg" }) : null,
       });
       added++;
@@ -1040,7 +1041,7 @@ function setHtml(element, html) {
 let libraryCoverQueue = Promise.resolve();
 const libraryCoverPending = new Set();
 function libraryDisplayName(name) {
-  return String(name || "Documento").replace(/\.(pdf|md|markdown)$/i, "").replace(/[_]+/g, " ").replace(/\s{2,}/g, " ").trim();
+  return String(name || "Documento").replace(/\.(pdf|md|markdown|epub)$/i, "").replace(/[_]+/g, " ").replace(/\s{2,}/g, " ").trim();
 }
 function relativeTime(timestamp) {
   if (!timestamp) return "";
@@ -1078,6 +1079,7 @@ async function renderPdfCover(doc) {
 }
 async function ensureBookCover(rec, doc = null) {
   if (!rec || rec.kind === "markdown" || rec.cover || libraryCoverPending.has(rec.id)) return;
+  if (rec.kind === "epub") return ensureEpubCover(rec);
   libraryCoverPending.add(rec.id);
   libraryCoverQueue = libraryCoverQueue.then(async () => {
     let own = null;
@@ -1105,12 +1107,38 @@ async function ensureBookCover(rec, doc = null) {
   });
   return libraryCoverQueue;
 }
+async function ensureEpubCover(rec) {
+  libraryCoverPending.add(rec.id);
+  libraryCoverQueue = libraryCoverQueue.then(async () => {
+    try {
+      const cover = await epubCoverBlob(rec);
+      const fresh = (await dbGet(rec.id)) || rec;
+      // Sin imagen de portada se recuerda para no volver a intentarlo.
+      fresh.cover = cover || null;
+      fresh.coverChecked = true;
+      await dbPut(fresh);
+      if (!cover) return;
+      if (currentBook?.id === rec.id) currentBook.cover = cover;
+      const url = libraryCoverUrl({ id: rec.id, cover });
+      document.querySelectorAll(`[data-cover-for="${CSS.escape(encodeURIComponent(rec.id))}"]`).forEach((holder) => {
+        holder.classList.add("has-image");
+        holder.querySelector("img")?.remove();
+        holder.insertAdjacentHTML("afterbegin", `<img src="${url}" alt="" loading="lazy">`);
+      });
+    } catch (error) {
+      console.warn("No se pudo leer la portada del EPUB", error);
+    } finally {
+      libraryCoverPending.delete(rec.id);
+    }
+  });
+  return libraryCoverQueue;
+}
 function libraryCoverHtml(book, url, large = false) {
   const isMarkdown = book.kind === "markdown";
-  const name = libraryDisplayName(book.name);
-  return `<span class="lib-cover${isMarkdown ? " is-markdown" : ""}${url ? " has-image" : ""}${large ? " is-large" : ""}" data-cover-for="${encodeURIComponent(book.id)}">${
+  const name = libraryDisplayName(book.title || book.name);
+  return `<span class="lib-cover${isMarkdown ? " is-markdown" : ""}${book.kind === "epub" ? " is-epub" : ""}${url ? " has-image" : ""}${large ? " is-large" : ""}" data-cover-for="${encodeURIComponent(book.id)}">${
     url ? `<img src="${url}" alt="" loading="lazy">` : ""
-  }<span class="lib-cover-fallback"><b>${escapeHtml(name.slice(0, 80))}</b></span><span class="lib-badge">${isMarkdown ? "MD" : "PDF"}</span></span>`;
+  }<span class="lib-cover-fallback"><b>${escapeHtml(name.slice(0, 80))}</b></span><span class="lib-badge">${isMarkdown ? "MD" : book.kind === "epub" ? "EPUB" : "PDF"}</span></span>`;
 }
 // ---- Carpetas de la biblioteca ----
 // `paper.folders` guarda la lista de carpetas ({ id, name, parent }) y cada
@@ -1370,16 +1398,17 @@ async function renderLibrary() {
   const scope = folderSubtree(folder, folders);
   const inScope = (book) => !folder || scope.has(bookFolder(book.id));
   const scoped = books.filter(inScope);
-  const counts = { all: scoped.length, reading: 0, new: 0, done: 0, markdown: 0 };
+  const counts = { all: scoped.length, reading: 0, new: 0, done: 0, markdown: 0, epub: 0 };
   scoped.forEach((book) => {
     counts[status.get(book.id)]++;
     if (book.kind === "markdown") counts.markdown++;
+    if (book.kind === "epub") counts.epub++;
   });
   if (libraryFilter !== "all" && !counts[libraryFilter]) libraryFilter = "all";
-  const matchesFilter = (book) => libraryFilter === "all" || (libraryFilter === "markdown" ? book.kind === "markdown" : status.get(book.id) === libraryFilter);
+  const matchesFilter = (book) => libraryFilter === "all" || (libraryFilter === "markdown" || libraryFilter === "epub" ? book.kind === libraryFilter : status.get(book.id) === libraryFilter);
   const browsing = !query && libraryFilter === "all";
   const visibleBooks = scoped
-    .filter((book) => (!browsing || bookFolder(book.id) === folder) && (!query || book.name.toLocaleLowerCase().includes(query) || libraryDisplayName(book.name).toLocaleLowerCase().includes(query)) && matchesFilter(book))
+    .filter((book) => (!browsing || bookFolder(book.id) === folder) && (!query || `${book.title || ""} ${book.author || ""}`.toLocaleLowerCase().includes(query) || book.name.toLocaleLowerCase().includes(query) || libraryDisplayName(book.name).toLocaleLowerCase().includes(query)) && matchesFilter(book))
     .sort((a, b) => {
       if (sort === "name") return libraryDisplayName(a.name).localeCompare(libraryDisplayName(b.name), "es", { sensitivity: "base", numeric: true });
       if (sort === "progress") return estimates.get(b.id).progress - estimates.get(a.id).progress;
@@ -1408,6 +1437,7 @@ async function renderLibrary() {
     ["reading", "Leyendo"],
     ["new", "Sin empezar"],
     ["done", "Terminados"],
+    ...(counts.epub ? [["epub", "Libros"]] : []),
     ...(counts.markdown ? [["markdown", "Markdown"]] : []),
   ];
   // Ruta de carpetas («Biblioteca › Álgebra › Grupos») y «Nueva carpeta».
@@ -1432,19 +1462,19 @@ async function renderLibrary() {
           const stats = estimates.get(book.id);
           const state = status.get(book.id);
           const isCurrent = currentBook?.id === book.id;
-          const pageInfo = book.kind === "markdown" ? "Markdown" : book.pages ? `p. ${stats.page} de ${book.pages}` : "PDF";
+          const pageInfo = book.kind === "markdown" ? "Markdown" : book.kind === "epub" ? [book.author, book.pages ? `cap. ${stats.page} de ${book.pages}` : "EPUB"].filter(Boolean).join(" · ") : book.pages ? `p. ${stats.page} de ${book.pages}` : "PDF";
           const detail = state === "done" ? "Terminado" : state === "new" ? `Sin empezar · ≈ ${formatReadingDuration(stats.remainingMs, true)}` : `≈ ${formatReadingDuration(stats.remainingMs, true)} restantes`;
           // Al buscar o filtrar se mezclan carpetas: se indica dónde está cada uno.
           const where = !browsing && bookFolder(book.id) && bookFolder(book.id) !== folder ? `<span class="lib-where">${iconSvg("folder")}${escapeHtml(folderPath(bookFolder(book.id), folders).map((item) => item.name).join(" › "))}</span>` : "";
-          return `<article class="lib-book${isCurrent ? " is-current" : ""} is-${state}" draggable="true" data-book-drag="${encodeURIComponent(book.id)}"><button class="lib-open" data-id="${encodeURIComponent(book.id)}" title="${escapeHtml(book.name)}">${libraryCoverHtml(book, coverUrl(book))}<span class="lib-info"><strong class="lib-name">${escapeHtml(libraryDisplayName(book.name))}</strong>${where}<span class="lib-meta">${pageInfo}${state === "reading" ? ` · ${stats.progress}%` : ""}</span><span class="lib-detail">${isCurrent ? "Abierto ahora" : detail}</span><span class="lib-when">${relativeTime(book.openedAt)}</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i></span></button><button class="lib-move" data-move-book="${encodeURIComponent(book.id)}" aria-label="Mover ${escapeHtml(book.name)} a una carpeta" title="Mover a una carpeta">${iconSvg("folder")}</button><button class="lib-remove" data-remove-book="${encodeURIComponent(book.id)}" aria-label="Eliminar ${escapeHtml(book.name)}" title="Eliminar de la biblioteca">${iconSvg("trash")}</button></article>`;
+          return `<article class="lib-book${isCurrent ? " is-current" : ""} is-${state}" draggable="true" data-book-drag="${encodeURIComponent(book.id)}"><button class="lib-open" data-id="${encodeURIComponent(book.id)}" title="${escapeHtml(book.name)}">${libraryCoverHtml(book, coverUrl(book))}<span class="lib-info"><strong class="lib-name">${escapeHtml(libraryDisplayName(book.title || book.name))}</strong>${where}<span class="lib-meta">${pageInfo}${state === "reading" ? ` · ${stats.progress}%` : ""}</span><span class="lib-detail">${isCurrent ? "Abierto ahora" : detail}</span><span class="lib-when">${relativeTime(book.openedAt)}</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i></span></button><button class="lib-move" data-move-book="${encodeURIComponent(book.id)}" aria-label="Mover ${escapeHtml(book.name)} a una carpeta" title="Mover a una carpeta">${iconSvg("folder")}</button><button class="lib-remove" data-remove-book="${encodeURIComponent(book.id)}" aria-label="Eliminar ${escapeHtml(book.name)}" title="Eliminar de la biblioteca">${iconSvg("trash")}</button></article>`;
         })
         .join("")
     : folder && browsing
       ? `<div class="lib-empty"><span>${iconSvg("folder")}</span><strong>Carpeta vacía</strong><p>Añade un documento estando aquí o muévelo con el botón de carpeta de cada documento${window.matchMedia("(hover: hover)").matches ? " (o arrástralo hasta esta carpeta)" : ""}.</p></div>`
     : books.length
       ? `<div class="lib-empty"><strong>Nada por aquí</strong><p>${query ? `Ningún documento coincide con «${escapeHtml(query)}»${folder ? " en esta carpeta" : ""}.` : "No hay documentos con este filtro."}</p></div>`
-      : `<div class="lib-empty is-first"><span>${iconSvg("library")}</span><strong>Tu biblioteca está vacía</strong><p>Añade un PDF o un Markdown para empezar. Se guardan solo en este dispositivo.</p><label class="lib-add" for="fileInput">${iconSvg("plus")}<span>Añadir documento</span></label></div>`);
-  visibleBooks.filter((book) => book.kind !== "markdown" && !book.cover).forEach((book) => ensureBookCover(book));
+      : `<div class="lib-empty is-first"><span>${iconSvg("library")}</span><strong>Tu biblioteca está vacía</strong><p>Añade un PDF, un libro EPUB o un Markdown para empezar. Se guardan solo en este dispositivo.</p><label class="lib-add" for="fileInput">${iconSvg("plus")}<span>Añadir documento</span></label></div>`);
+  visibleBooks.filter((book) => book.kind !== "markdown" && !book.cover && !book.coverChecked).forEach((book) => ensureBookCover(book));
   if (resume && !resume.cover) ensureBookCover(resume);
 }
 function openLibrary() {
@@ -1600,15 +1630,17 @@ function escapeHtml(s) {
 async function addFile(file, open = true) {
   if (!file) return;
   const isMarkdown = /\.(md|markdown)$/i.test(file.name) || file.type === "text/markdown";
+  const isEpub = /\.epub$/i.test(file.name) || file.type === "application/epub+zip";
   if (
     !(
       file.type === "application/pdf" ||
       file.name.toLowerCase().endsWith(".pdf") ||
-      isMarkdown
+      isMarkdown ||
+      isEpub
     )
   )
-    return toast("Selecciona un PDF o Markdown");
-  showLoader(true, `Guardando ${isMarkdown ? "Markdown" : "PDF"}…`, "Se queda solo en este dispositivo");
+    return toast("Selecciona un PDF, un EPUB o un Markdown");
+  showLoader(true, `Guardando ${isEpub ? "libro" : isMarkdown ? "Markdown" : "PDF"}…`, "Se queda solo en este dispositivo");
   try {
     const buffer = await file.arrayBuffer();
     const id = await documentIdFor(buffer, file);
@@ -1617,8 +1649,8 @@ async function addFile(file, open = true) {
       ...existing,
       id,
       name: file.name,
-      kind: isMarkdown ? "markdown" : "pdf",
-      blob: new Blob([buffer], { type: isMarkdown ? "text/markdown" : "application/pdf" }),
+      kind: isEpub ? "epub" : isMarkdown ? "markdown" : "pdf",
+      blob: new Blob([buffer], { type: isEpub ? "application/epub+zip" : isMarkdown ? "text/markdown" : "application/pdf" }),
       size: buffer.byteLength,
       addedAt: existing?.addedAt || Date.now(),
       openedAt: Date.now(),
@@ -1639,6 +1671,11 @@ async function addFile(file, open = true) {
   } finally {
     showLoader(false);
   }
+}
+// Documentos de texto (sin PDF debajo): Markdown y libros EPUB. Se leen en el
+// lector adaptable y su texto completo está en `markdownContent`.
+function isTextBook(book) {
+  return book?.kind === "markdown" || book?.kind === "epub";
 }
 function markdownToHtml(source) {
   const lines = source.replace(/\r/g, "").split("\n");
@@ -1722,6 +1759,296 @@ async function openMarkdownStored(rec, superseded = () => false) {
   document.body.classList.remove("sidebar-open");
   markReadingActivity();
 }
+// ---- Libros EPUB ----
+// Se abren en el lector adaptable (con los temas y ajustes de lectura), con
+// los capítulos uno tras otro. Cada capítulo cuenta como una «página» para el
+// progreso, el tiempo restante y el índice. Las imágenes se cargan al
+// acercarse a ellas.
+const epubState = { urls: [], observer: null, chapters: [], scrollTimer: 0 };
+function closeEpubResources() {
+  epubState.observer?.disconnect();
+  epubState.observer = null;
+  epubState.urls.forEach((url) => URL.revokeObjectURL(url));
+  epubState.urls = [];
+  epubState.chapters = [];
+  epubState.book = null;
+  clearTimeout(epubState.scrollTimer);
+}
+function epubImageObserver() {
+  epubState.observer?.disconnect();
+  epubState.observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const img = entry.target;
+        epubState.observer.unobserve(img);
+        const path = img.dataset.epubSrc;
+        const book = epubState.book;
+        book?.readBytes(path).then((bytes) => {
+          if (!bytes || epubState.book !== book) return;
+          const url = URL.createObjectURL(new Blob([bytes], { type: mediaTypeFor(path, "image/jpeg") }));
+          epubState.urls.push(url);
+          img.src = url;
+        });
+      }
+    },
+    { root: $("viewer"), rootMargin: "1500px 0px" },
+  );
+  $("reflowReader").querySelectorAll("img[data-epub-src]").forEach((img) => epubState.observer.observe(img));
+}
+// Texto de cada capítulo (para buscar en toda la biblioteca).
+async function epubPlainPages(rec) {
+  const book = await openEpub(await rec.blob.arrayBuffer());
+  const parser = new DOMParser();
+  const pages = [];
+  for (const chapter of book.chapters) {
+    const html = (await book.readText(chapter.href)) || "";
+    pages.push(parser.parseFromString(html, "text/html").body?.textContent.replace(/\s+/g, " ").trim() || "");
+  }
+  return pages;
+}
+async function epubCoverBlob(rec) {
+  const book = await openEpub(await rec.blob.arrayBuffer());
+  let bytes = book.coverHref ? await book.readBytes(book.coverHref) : null;
+  // Sin portada declarada: la primera imagen del primer capítulo.
+  if (!bytes) {
+    const first = (await book.readText(book.chapters[0].href)) || "";
+    const src = first.match(/<img[^>]+src=["']([^"']+)/i)?.[1] || first.match(/xlink:href=["']([^"']+)/i)?.[1];
+    if (src) bytes = await book.readBytes(resolvePath(book.chapters[0].href, src));
+  }
+  if (!bytes) return null;
+  const bitmap = await createImageBitmap(new Blob([bytes], { type: mediaTypeFor(book.coverHref || "x.jpg", "image/jpeg") }));
+  const canvas = document.createElement("canvas");
+  canvas.width = 360;
+  canvas.height = Math.round((bitmap.height / bitmap.width) * 360);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+}
+function epubCurrentChapter() {
+  const viewer = $("viewer");
+  const top = viewer.getBoundingClientRect().top + 80;
+  let current = 0;
+  for (const section of $("reflowReader").querySelectorAll(".epub-chapter")) {
+    if (section.getBoundingClientRect().top <= top) current = Number(section.dataset.chapter);
+    else break;
+  }
+  return current;
+}
+function epubProgress() {
+  const viewer = $("viewer");
+  const max = Math.max(1, viewer.scrollHeight - viewer.clientHeight);
+  return Math.max(0, Math.min(1, viewer.scrollTop / max));
+}
+function updateEpubChrome() {
+  if (currentBook?.kind !== "epub") return;
+  const chapter = epubCurrentChapter();
+  const total = epubState.chapters.length;
+  const progress = epubProgress();
+  if (currentPage !== chapter + 1) {
+    flushReadingSession(false);
+    currentPage = chapter + 1;
+    readingSession.page = currentPage;
+    kv.setItem(key(currentBook.id, "page"), String(currentPage));
+    updateOutlineSelection();
+  }
+  const title = epubState.chapters[chapter]?.title;
+  $("pageStatus").textContent = `${title ? `${title} · ` : ""}Capítulo ${chapter + 1} de ${total} · ${Math.round(progress * 100)} %`;
+  $("progressBar").style.width = `${progress * 100}%`;
+  $("toolbarPage").value = String(chapter + 1);
+  $("toolbarPrev").disabled = chapter <= 0;
+  $("toolbarNext").disabled = chapter >= total - 1;
+}
+function saveEpubPosition() {
+  if (currentBook?.kind !== "epub") return;
+  const chapter = epubCurrentChapter();
+  const section = $("reflowReader").querySelector(`.epub-chapter[data-chapter="${chapter}"]`);
+  const viewer = $("viewer");
+  const ratio = section ? Math.max(0, Math.min(1, (viewer.scrollTop - section.offsetTop) / Math.max(1, section.offsetHeight))) : 0;
+  setJSON(key(currentBook.id, "epub-position"), { chapter, ratio });
+}
+function scrollEpubTo(anchorId, { smooth = false } = {}) {
+  const target = anchorId && document.getElementById(anchorId);
+  if (!target) return false;
+  const viewer = $("viewer");
+  viewer.scrollTo({ top: Math.max(0, viewer.scrollTop + target.getBoundingClientRect().top - viewer.getBoundingClientRect().top - 24), behavior: smooth ? "smooth" : "auto" });
+  return true;
+}
+function stepEpubChapter(direction) {
+  const next = Math.max(0, Math.min(epubState.chapters.length - 1, epubCurrentChapter() + direction));
+  scrollEpubTo(chapterAnchor(next));
+}
+// Nota al pie o enlace interno: vista previa del destino (como en los PDF).
+function epubLinkPreview(link, delay) {
+  const id = link.getAttribute("href").slice(1);
+  const target = document.getElementById(id);
+  if (!target) return;
+  const block = target.closest("aside, li, p, section, div") || target;
+  const node = document.createElement("div");
+  node.className = "hp-text reflow-reader";
+  styleReader(node);
+  const clone = (block.matches(".epub-chapter") ? target : block).cloneNode(true);
+  clone.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
+  clone.removeAttribute("id");
+  node.append(clone);
+  const chapter = Number(target.closest(".epub-chapter")?.dataset.chapter || 0);
+  const isNote = /note|footnote|endnote|rearnote/.test(target.closest("[data-epub-type]")?.dataset.epubType || "") || /^\[?\d+\]?$/.test(link.textContent.trim());
+  requestPreview(link.getBoundingClientRect(), `epub:${id}`, async () => ({
+    label: isNote ? "Nota" : epubState.chapters[chapter]?.title || `Capítulo ${chapter + 1}`,
+    page: null,
+    node,
+    go: () => scrollEpubTo(id, { smooth: true }),
+  }), delay);
+}
+async function openEpubStored(rec, superseded = () => false) {
+  flushReadingSession(true);
+  flushNotebook();
+  setStickyPlacement(false);
+  if (activeStickyId) closeStickyEditor();
+  const book = await openEpub(await rec.blob.arrayBuffer());
+  if (superseded()) return;
+  closeEpubResources();
+  epubState.book = book;
+  const chapterIndexByHref = new Map(book.chapters.map((chapter, index) => [chapter.href, index]));
+  // Título de cada capítulo: el del índice, o el primer encabezado.
+  const tocTitles = new Map();
+  const collect = (entries) => entries.forEach((entry) => {
+    const path = entry.href.split("#")[0];
+    if (!tocTitles.has(path)) tocTitles.set(path, entry.label);
+    collect(entry.children);
+  });
+  collect(book.toc);
+  const reader = $("reflowReader");
+  const sections = [];
+  const texts = [];
+  const stats = getReadingStats(rec.id);
+  for (const [index, chapter] of book.chapters.entries()) {
+    const xhtml = (await book.readText(chapter.href)) || "";
+    if (superseded()) return closeEpubResources();
+    const section = document.createElement("section");
+    section.className = "epub-chapter";
+    section.dataset.chapter = String(index);
+    section.id = chapterAnchor(index);
+    section.append(cleanChapter(xhtml, { chapterIndex: index, chapterHref: chapter.href, chapterIndexByHref }));
+    const text = section.textContent.replace(/\s+/g, " ").trim();
+    texts.push(text);
+    stats.pageChars[index + 1] = text.length;
+    epubState.chapters.push({ title: tocTitles.get(chapter.href) || section.querySelector("h1, h2, h3")?.textContent.replace(/\s+/g, " ").trim() || "" });
+    sections.push(section);
+  }
+  saveReadingStats(rec.id, stats);
+  rec.openedAt = Date.now();
+  rec.pages = book.chapters.length;
+  if (book.title) rec.title = book.title;
+  if (book.author) rec.author = book.author;
+  if (!superseded()) await dbPut(rec);
+  if (superseded()) return closeEpubResources();
+  markdownContent = texts.join("\n\n");
+  resetRenderEngine();
+  teardownContinuous();
+  viewMode = "single";
+  $("continuousView").hidden = true;
+  $("facingWrap").hidden = true;
+  $("viewer").classList.remove("double-mode");
+  pdfDoc = null;
+  currentBook = rec;
+  assistantLoadDocument();
+  boardLoadDocument();
+  resetAnnotationHistory();
+  resetNavHistory();
+  reflowMode = true;
+  document.body.classList.add("reflow-mode");
+  $("markerModeBtn").disabled = true;
+  $("eraserModeBtn").disabled = true;
+  $("emptyState").hidden = true;
+  $("canvasWrap").hidden = true;
+  $("reflowReader").hidden = false;
+  document.body.classList.add("has-doc");
+  reader.replaceChildren(...sections);
+  reader.lang = book.language || "";
+  reader.classList.add("is-epub");
+  $("docTitle").textContent = book.title || libraryDisplayName(rec.name);
+  $("docMeta").textContent = [book.author, "EPUB · guardado localmente"].filter(Boolean).join(" · ");
+  $("pageStatus").hidden = false;
+  $("pageTotal").textContent = "";
+  $("pageJump").hidden = true;
+  $("toolbarPage").disabled = true;
+  $("toolbarPageCount").textContent = `/ ${book.chapters.length}`;
+  $("pageScrubber").disabled = true;
+  $("reflowControls").hidden = false;
+  document.querySelectorAll("[data-reading-mode]").forEach((button) => button.classList.toggle("active", button.dataset.readingMode === "reflow"));
+  // Índice del libro en la barra lateral.
+  let outlineId = 0;
+  const toOutline = (entries, depth) =>
+    entries.map((entry) => {
+      const [path, hash] = entry.href.split("#");
+      const chapter = chapterIndexByHref.get(path);
+      return { id: String(outlineId++), title: entry.label, page: chapter === undefined ? null : chapter + 1, anchor: chapter === undefined ? "" : chapterAnchor(chapter, hash), depth, children: toOutline(entry.children, depth + 1) };
+    });
+  outlineTree = toOutline(book.toc.length ? book.toc : book.chapters.map((chapter, index) => ({ label: epubState.chapters[index].title || `Capítulo ${index + 1}`, href: chapter.href, children: [] })), 0);
+  outlineExpanded.clear();
+  activeOutlineId = "";
+  $("outlineTools").hidden = !flattenOutline().some((node) => node.children.length);
+  $("outlineFilterWrap").hidden = flattenOutline().length < 12;
+  if (flattenOutline().length <= 24) flattenOutline().forEach((node) => node.children.length && outlineExpanded.add(node.id));
+  applyReflowPreferences();
+  epubImageObserver();
+  // Volver a donde se dejó.
+  const saved = getJSON(key(rec.id, "epub-position"), null);
+  currentPage = (saved?.chapter || 0) + 1;
+  requestAnimationFrame(() => {
+    const section = reader.querySelector(`.epub-chapter[data-chapter="${saved?.chapter || 0}"]`);
+    $("viewer").scrollTop = section && saved ? section.offsetTop + (saved.ratio || 0) * section.offsetHeight : 0;
+    updateEpubChrome();
+    updateOutlineSelection(true);
+  });
+  renderBookmarks();
+  renderAnnotationList();
+  await renderLibrary();
+  document.body.classList.remove("sidebar-open");
+  markReadingActivity();
+}
+let epubScrollFrame = 0;
+$("viewer").addEventListener("scroll", () => {
+  if (currentBook?.kind !== "epub") return;
+  if (!epubScrollFrame) epubScrollFrame = requestAnimationFrame(() => {
+    epubScrollFrame = 0;
+    updateEpubChrome();
+  });
+  clearTimeout(epubState.scrollTimer);
+  epubState.scrollTimer = setTimeout(saveEpubPosition, 400);
+  markReadingActivity();
+}, { passive: true });
+window.addEventListener("pagehide", saveEpubPosition);
+document.addEventListener("visibilitychange", () => document.visibilityState === "hidden" && saveEpubPosition());
+// Enlaces internos del libro (notas al pie, referencias): vista previa al
+// pasar el ratón; con el dedo, el primer toque la abre y el segundo salta.
+{
+  const reader = $("reflowReader");
+  let tapKind = "mouse",
+    previewOpen = false;
+  reader.addEventListener("pointerdown", (event) => {
+    const link = event.target.closest?.("a[data-epub-link]");
+    if (!link) return;
+    tapKind = event.pointerType || "mouse";
+    previewOpen = hoverPreview.key === `epub:${link.getAttribute("href").slice(1)}` && hoverPreview.el && !hoverPreview.el.hidden;
+  });
+  reader.addEventListener("click", (event) => {
+    const link = event.target.closest?.("a[href^='#']");
+    if (!link || currentBook?.kind !== "epub") return;
+    event.preventDefault();
+    if (tapKind === "touch" && !previewOpen) return epubLinkPreview(link, 0);
+    hidePreview();
+    scrollEpubTo(link.getAttribute("href").slice(1), { smooth: true });
+  });
+  reader.addEventListener("pointerover", (event) => {
+    const link = event.target.closest?.("a[data-epub-link]");
+    if (link && event.pointerType !== "touch" && currentBook?.kind === "epub") epubLinkPreview(link);
+  });
+  reader.addEventListener("pointerout", (event) => {
+    if (event.target.closest?.("a[data-epub-link]") && event.pointerType !== "touch") scheduleHidePreview();
+  });
+}
 // Si se abre otro documento mientras este aún se prepara, la apertura antigua
 // se abandona en vez de pintar sus marcadores o su índice sobre el nuevo.
 // `requestedDocId` es siempre el último documento pedido (aunque aún cargue).
@@ -1749,8 +2076,16 @@ async function openStored(id) {
     const rec = await dbGet(id);
     if (superseded()) return;
     if (!rec) throw new Error("Documento no encontrado");
+    if (rec.kind !== "epub") {
+      closeEpubResources();
+      $("reflowReader").classList.remove("is-epub");
+    }
     if (rec.kind === "markdown") {
       await openMarkdownStored(rec, superseded);
+      return;
+    }
+    if (rec.kind === "epub") {
+      await openEpubStored(rec, superseded);
       return;
     }
     markdownContent = "";
@@ -2524,6 +2859,7 @@ async function setViewMode(mode, options = {}) {
     toast(mode === "continuous" ? "Scroll continuo" : mode === "double" ? "Doble página" : "Una página");
 }
 function stepPage(direction) {
+  if (currentBook?.kind === "epub") return stepEpubChapter(direction);
   const step = viewMode === "double" ? 2 : 1;
   renderPage(currentPage + direction * step);
 }
@@ -2765,7 +3101,7 @@ function paletteActions() {
   const hasDoc = Boolean(currentBook);
   const actions = [
     { icon: "▤", title: "Abrir biblioteca", keys: "biblioteca documentos inicio home", run: () => $("homeBtn").click() },
-    { icon: "＋", title: "Añadir PDF o Markdown", keys: "importar subir abrir archivo nuevo", run: () => $("fileInput").click() },
+    { icon: "＋", title: "Añadir PDF, EPUB o Markdown", keys: "importar subir abrir archivo nuevo libro epub", run: () => $("fileInput").click() },
     { icon: "⤒", title: "Ir a la primera página", shortcut: ["Inicio"], when: hasPdf, run: () => jumpToPage(1) },
     { icon: "⤓", title: "Ir a la última página", shortcut: ["Fin"], when: hasPdf, run: () => jumpToPage(pdfDoc.numPages) },
     { icon: "⟲", title: "Volver a la vista anterior", shortcut: ["Alt", "←"], when: hasPdf && navBackStack.length > 0, run: navigateBack },
@@ -2918,7 +3254,7 @@ function buildPaletteItems(query) {
     .sort((a, b) => b.score - a.score || (b.record.openedAt || 0) - (a.record.openedAt || 0))
     .slice(0, raw ? 5 : 4)
     .map(({ record }) => ({
-      icon: record.kind === "markdown" ? "MD" : "PDF",
+      icon: record.kind === "markdown" ? "MD" : record.kind === "epub" ? "EPUB" : "PDF",
       title: record.name,
       subtitle: record.pages ? `${record.pages} páginas` : "Documento local",
       run: () => openDocument(record.id),
@@ -5802,7 +6138,7 @@ function teardownSplitPages() {
   $("splitPages").replaceChildren();
 }
 async function populateSplitSelect() {
-  const records = (await dbAll()).filter((record) => record.kind !== "markdown").sort((a, b) => libraryDisplayName(a.name).localeCompare(libraryDisplayName(b.name), "es", { numeric: true }));
+  const records = (await dbAll()).filter((record) => !isTextBook(record)).sort((a, b) => libraryDisplayName(a.name).localeCompare(libraryDisplayName(b.name), "es", { numeric: true }));
   $("splitDoc").innerHTML = records.map((record) => `<option value="${escapeHtml(record.id)}"${record.id === split.id ? " selected" : ""}>${escapeHtml(libraryDisplayName(record.name))}</option>`).join("");
 }
 async function loadSplitDocument(id, page = 1) {
@@ -5812,7 +6148,7 @@ async function loadSplitDocument(id, page = 1) {
   if (id === currentBook?.id && pdfDoc) doc = pdfDoc;
   else {
     const record = await dbGet(id);
-    if (!record || record.kind === "markdown") return toast("La vista dividida solo admite PDFs");
+    if (!record || isTextBook(record)) return toast("La vista dividida solo admite PDFs");
     doc = await openPdfBlob(record.blob);
     own = true;
   }
@@ -6442,7 +6778,7 @@ async function exportBoardPng() {
   const canvas = await renderBoardCanvas(1400);
   canvas.toBlob((blob) => {
     if (!blob) return toast("No se pudo crear la imagen");
-    downloadBlob(`${(currentBook?.name || "documento").replace(/\.(pdf|md|markdown)$/i, "")}-pizarra.png`, blob);
+    downloadBlob(`${(currentBook?.name || "documento").replace(/\.(pdf|md|markdown|epub)$/i, "")}-pizarra.png`, blob);
   }, "image/png");
 }
 // La pizarra entera dibujada en un lienzo del ancho pedido.
@@ -7174,6 +7510,12 @@ function bindOutline() {
     const item = event.target.closest(".outline-item");
     if (!item) return;
     const page = Number(item.dataset.page);
+    if (currentBook?.kind === "epub") {
+      const node = flattenOutline().find((entry) => entry.id === item.dataset.outlineId);
+      if (!node?.anchor || !(scrollEpubTo(node.anchor) || scrollEpubTo(node.anchor.replace(/^(epub-\d+)-.*/, "$1")))) toast("No se pudo abrir esta sección");
+      else if (isDrawerLayout()) document.body.classList.remove("sidebar-open");
+      return;
+    }
     if (page) {
       jumpToPage(page);
       if (isDrawerLayout()) document.body.classList.remove("sidebar-open");
@@ -9160,7 +9502,7 @@ function assistantContextLabel(context) {
   if (context.kind === "selection") return `Selección · p. ${context.page}`;
   if (context.kind === "image") return context.count > 1 ? `${context.count} recortes · p. ${context.pages || context.page}` : `Recorte · p. ${context.page}`;
   if (context.kind === "document") return "Todo el documento";
-  return currentBook?.kind === "markdown" ? "Documento" : `Página ${context.page || currentPage}`;
+  return isTextBook(currentBook) ? "Documento" : `Página ${context.page || currentPage}`;
 }
 function setAssistantContext(context) {
   if (context.kind === "selection") {
@@ -9405,7 +9747,7 @@ function renderAssistantDock() {
   if (!panel || panel.hidden) return;
   const context = assistantContext;
   const selection = context.kind === "selection" ? context : captureReaderSelection(8000);
-  const isMarkdown = currentBook?.kind === "markdown";
+  const isMarkdown = isTextBook(currentBook);
   const scopes = [
     { kind: "selection", label: "Selección", disabled: !selection },
     { kind: "page", label: isMarkdown ? "Documento" : `Página ${currentPage}` },
@@ -9503,7 +9845,7 @@ function renderAssistantMessage(index) {
 }
 // -- Contexto y prompts -------------------------------------------------------
 async function assistantPageText(pageNumber) {
-  if (currentBook?.kind === "markdown") return String(markdownContent || "");
+  if (isTextBook(currentBook)) return String(markdownContent || "");
   if (!pdfDoc) return "";
   return getPagePlainText(pageNumber);
 }
@@ -9528,9 +9870,9 @@ async function assistantSourceText(context, action, question, signal) {
     return { text: context.text, extra, pages: String(context.pages || context.page).split(", ").map(Number), label };
   }
   if (context.kind === "page") {
-    const page = currentBook?.kind === "markdown" ? 1 : context.page;
+    const page = isTextBook(currentBook) ? 1 : context.page;
     const text = (await assistantPageText(page)).trim().slice(0, 7000);
-    return { text, pages: currentBook?.kind === "markdown" ? [] : [page], label: currentBook?.kind === "markdown" ? "documento" : `página ${page}` };
+    return { text, pages: isTextBook(currentBook) ? [] : [page], label: isTextBook(currentBook) ? "documento" : `página ${page}` };
   }
   const chunks = await ensureDocumentContextIndex(signal);
   if (action === "ask") {
@@ -9789,7 +10131,7 @@ function assistantRequestFromContext(action, question) {
     return { action, question, areas: context.areas, context: { kind: "image", page: pages[0], pages: pages.join(", "), count: context.areas.length, text: areasText(context.areas) } };
   }
   if (context.kind === "document") return { action, question, context: { kind: "document" } };
-  return { action, question, context: { kind: "page", page: currentBook?.kind === "markdown" ? 1 : currentPage } };
+  return { action, question, context: { kind: "page", page: isTextBook(currentBook) ? 1 : currentPage } };
 }
 async function runAssistantAction(action, context) {
   if (!openAssistant({ context, focus: false })) return;
@@ -10169,7 +10511,7 @@ async function ensureDocumentContextIndex(signal) {
   if (documentIndexLoading && documentContextIndexId === currentBook.id) return documentIndexLoading;
   documentContextIndexId = currentBook.id;
   documentIndexLoading = (async () => {
-    if (currentBook.kind === "markdown") return chunkAiText(markdownContent, 1);
+    if (isTextBook(currentBook)) return chunkAiText(markdownContent, 1);
     if (!pdfDoc) return [];
     const chunks = [];
     const indexed = currentDocPages();
@@ -10810,6 +11152,7 @@ async function searchLibrary(raw) {
         let pages = record.id === currentBook?.id ? currentDocPages() : null;
         if (!pages) pages = (await getTextIndex(record.id))?.pages || null;
         if (!pages && record.kind === "markdown") pages = [await record.blob.text()];
+        if (!pages && record.kind === "epub") pages = await epubPlainPages(record);
         if (!pages) {
           const doc =
             currentBook?.id === record.id && pdfDoc
@@ -12126,6 +12469,9 @@ window.addEventListener("keydown", (e) => {
     stepPage(1);
     return;
   }
+  // En un EPUB, Av Pág / Re Pág desplazan la pantalla (lo normal en un libro)
+  // y las flechas pasan de capítulo.
+  if (currentBook?.kind === "epub" && (e.key === "PageDown" || e.key === "PageUp")) return;
   if (e.key === "ArrowRight" || e.key === "PageDown") stepPage(1);
   if (e.key === "ArrowLeft" || e.key === "PageUp") stepPage(-1);
   if (e.key === "Home") jumpToPage(1);

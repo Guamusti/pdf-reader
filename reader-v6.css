@@ -584,3 +584,24 @@ html { height: 100%; overflow: hidden; overscroll-behavior: none; }
   .ts-papers { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 10px; }
 }
 .ts-size-value { flex: 0 0 auto; min-width: 44px; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; text-align: right; }
+
+/* ---- Libros EPUB ---- */
+.reflow-reader.is-epub .epub-chapter + .epub-chapter { margin-top: 3.2em; padding-top: 2.4em; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+.reflow-reader.is-epub img { display: block; max-width: 100%; max-height: 80vh; height: auto; margin: 1em auto; border-radius: 2px; }
+.reflow-reader.is-epub img:not([src]) { min-height: 120px; width: 60%; background: color-mix(in srgb, currentColor 6%, transparent); }
+.reflow-reader.is-epub figure { margin: 1.4em 0; text-align: center; break-inside: avoid; }
+.reflow-reader.is-epub figcaption { font-size: .85em; opacity: .75; }
+.reflow-reader.is-epub h1 { margin: 1.2em 0 .7em; font-size: 1.8em; line-height: 1.15; }
+.reflow-reader.is-epub :is(h4, h5, h6) { margin: 1.2em 0 .5em; font-size: 1.05em; }
+.reflow-reader.is-epub blockquote { margin: 1em 0 1em 1.2em; padding-left: 1em; border-left: 3px solid color-mix(in srgb, currentColor 20%, transparent); }
+.reflow-reader.is-epub table { border-collapse: collapse; margin: 1em 0; font-size: .9em; }
+.reflow-reader.is-epub :is(td, th) { padding: .3em .6em; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); }
+.reflow-reader.is-epub a[data-epub-link] { color: inherit; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 2px; }
+.reflow-reader.is-epub a[data-epub-type~="noteref"], .reflow-reader.is-epub sup a[data-epub-link] { color: var(--accent); text-decoration: none; }
+.reflow-reader.is-epub a[data-epub-type~="noteref"]:not(sup *) { vertical-align: super; font-size: .7em; line-height: 0; padding: 0 .1em; }
+.reflow-reader.is-epub [data-epub-type~="footnote"], .reflow-reader.is-epub [data-epub-type~="endnote"] { font-size: .88em; opacity: .85; }
+.reflow-reader.is-epub p { margin: 0 0 .9em; }
+.reflow-reader.is-epub .epub-chapter > :first-child { margin-top: 0; }
+.lib-cover.is-epub { background: linear-gradient(150deg, #9a5b3c, #5a2f1f); }
+.hp-text { width: auto !important; max-width: none !important; min-height: 0 !important; margin: 0 !important; padding: 12px 16px !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; column-count: 1 !important; font-size: min(var(--reflow-size, 20px), 17px) !important; }
+.hp-text img { max-width: 100%; }

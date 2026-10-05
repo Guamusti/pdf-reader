@@ -2,6 +2,7 @@
 import { chromium } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { FIXTURES } from "./helpers.mjs";
+import { buildZip } from "./zip-writer.mjs";
 
 const PAPER = `<body style="font-family:serif;padding:40px;font-size:15px">
 <h2>6. Dimensions of irreducible representations</h2>
@@ -26,6 +27,24 @@ const LINKS = `<style>body{font-family:serif;font-size:15px;padding:30px 50px} .
 <div class="pg"><p>Some preliminary text that fills the upper part of the second page before the statement appears.</p><p style="margin-top:380px" id="thm21"><b>Theorem 2.1.</b> Every irreducible representation of the symmetric group is a Specht module S<sup>λ</sup>.</p><p>Proof. Combine the hook formula with the branching rule.</p><div class="eq" id="eq34"><span>f<sup>λ</sup> = n! / ∏ h(i,j)</span><span>(3.4)</span></div></div>
 <div class="pg"><h3>References</h3><p>[11] G. James, The representation theory of the symmetric groups, 1978.</p><p id="ref12">[12] J. S. Frame, G. Robinson, R. M. Thrall, The hook graphs of the symmetric group, 1954.</p></div>`;
 
+// Libro EPUB 3: portada, índice con una subsección, imagen, nota al pie y
+// (para comprobar que se eliminan) un script y un atributo onclick.
+const paragraphs = (prefix, n) => Array.from({ length: n }, (_, i) => `<p>${prefix} ${i + 1}. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.</p>`).join("");
+function epubFiles(png) {
+  const xhtml = (title, body) => `<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="es"><head><title>${title}</title><link rel="stylesheet" href="style.css"/><script>window.__epubScript = true;</script></head><body>${body}</body></html>`;
+  return [
+    { name: "mimetype", data: "application/epub+zip", store: true },
+    { name: "META-INF/container.xml", data: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
+    { name: "OEBPS/content.opf", data: '<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:test:libro</dc:identifier><dc:title>El libro de prueba</dc:title><dc:creator>Ana Autora</dc:creator><dc:language>es</dc:language></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="cover" href="images/cover.png" media-type="image/png" properties="cover-image"/><item id="fig" href="images/fig.png" media-type="image/png"/><item id="css" href="style.css" media-type="text/css"/><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/ch2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>' },
+    { name: "OEBPS/nav.xhtml", data: xhtml("Índice", '<nav epub:type="toc"><ol><li><a href="text/ch1.xhtml">Capítulo 1: El comienzo</a></li><li><a href="text/ch2.xhtml">Capítulo 2: La travesía</a><ol><li><a href="text/ch2.xhtml#sec">La nota</a></li></ol></li></ol></nav>') },
+    { name: "OEBPS/style.css", data: "body { color: red; }" },
+    { name: "OEBPS/images/cover.png", data: png },
+    { name: "OEBPS/images/fig.png", data: png },
+    { name: "OEBPS/text/ch1.xhtml", data: xhtml("Capítulo 1", `<h1>Capítulo 1: El comienzo</h1><p onclick="window.__epubClick = true">Primer párrafo con una nota<a epub:type="noteref" href="ch2.xhtml#n1">1</a> y un <a href="https://example.com">enlace externo</a>.</p>${paragraphs("Párrafo", 30)}<figure><img src="../images/fig.png" alt="Figura"/><figcaption>Una figura</figcaption></figure>${paragraphs("Más texto", 10)}`) },
+    { name: "OEBPS/text/ch2.xhtml", data: xhtml("Capítulo 2", `<h1>Capítulo 2: La travesía</h1>${paragraphs("Viaje", 30)}<h2 id="sec">La nota</h2><aside epub:type="footnote" id="n1"><p>Esta es la nota al pie del primer capítulo.</p></aside>${paragraphs("Final", 20)}`) },
+  ];
+}
+
 export default async function globalSetup() {
   await mkdir(FIXTURES, { recursive: true });
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
@@ -34,6 +53,22 @@ export default async function globalSetup() {
   await writeFile(`${FIXTURES}/paper.pdf`, await page.pdf({ format: "A4" }));
   await page.setContent(REFS);
   await writeFile(`${FIXTURES}/refs.pdf`, await page.pdf({ format: "A4" }));
+  const png = Buffer.from(
+    await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 300;
+      canvas.height = 450;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#1f6f5c";
+      ctx.fillRect(0, 0, 300, 450);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 34px serif";
+      ctx.fillText("El libro", 60, 200);
+      return canvas.toDataURL("image/png").split(",")[1];
+    }),
+    "base64",
+  );
+  await writeFile(`${FIXTURES}/libro.epub`, buildZip(epubFiles(png)));
   await page.setContent(LINKS);
   await writeFile(`${FIXTURES}/links.pdf`, await page.pdf({ format: "A4" }));
   // Página escaneada: el texto es una imagen, sin capa de texto.

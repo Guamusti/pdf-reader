@@ -114,6 +114,12 @@ Incluye:
 - La comprobación de migraciones lee solo los identificadores; el arranque de una biblioteca ya migrada hace una sola lectura completa de documentos.
 - Buscar por nombre agrupa las pulsaciones durante 120 ms y descarta renders obsoletos para evitar consultas y reconstrucciones repetidas.
 
+### Novedades v13: libros EPUB, temas de lectura y bloqueo de eje
+
+- **Libros EPUB**: se añaden como cualquier documento (botón, arrastrar o «Compartir»). Se leen en el lector adaptable con índice (incluidas subsecciones), portada en la biblioteca, título y autor, imágenes que se cargan al acercarse, notas al pie con vista previa (en iPad, primer toque) y la posición guardada. Las flechas pasan de capítulo y la biblioteca muestra «cap. N de M» y el filtro «Libros». El libro se limpia al abrirlo: sin scripts, eventos ni estilos propios. Todo funciona sin conexión: el ZIP se lee con el descompresor del propio navegador.
+- **Temas y ajustes** (Vista, menú «⋯» o paleta), como en Libros de Apple, con vista previa en vivo del propio texto: seis temas (Original, Silencio, Papel, Negrita, Calma, Enfoque) y ajustes de letra (con muestras), tamaño, negrita, interlineado, espacio entre letras y palabras, ancho de línea, alineación, separación de palabras, columnas, papel, color de las páginas del PDF y tema de la interfaz.
+- **Bloqueo de eje** al desplazar con el dedo una página ampliada: un gesto casi vertical ya no mueve la página de lado (ni uno casi horizontal en vertical); en diagonal se mueve libre.
+
 ### Pruebas
 
 ```bash
