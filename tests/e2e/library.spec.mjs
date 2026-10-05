@@ -93,15 +93,18 @@ test("carpetas: crear, mover, subcarpetas, arrastrar, buscar, recargar y elimina
 });
 
 test.describe("iPad", () => {
-  test.use({ viewport: { width: 820, height: 1180 }, hasTouch: true });
+  test.use({ viewport: { width: 820, height: 1180 }, hasTouch: true, isMobile: true });
 
   test("con el dedo: botón de mover visible y menú de carpetas", async ({ page }) => {
     await openDoc(page, "paper.pdf");
     await page.click("#homeBtn");
     await newFolder(page, "Lecturas");
+    // Sin ratón no hay «pasar por encima»: el botón se ve siempre.
+    await page.mouse.move(1, 1);
     const move = page.locator(".lib-book [data-move-book]").first();
     await expect(move).toBeVisible();
-    expect(Number(await move.evaluate((node) => getComputedStyle(node).opacity))).toBeGreaterThan(0.5);
+    // (Tiene una transición de opacidad: se espera a que termine.)
+    await expect.poll(() => move.evaluate((node) => Number(getComputedStyle(node).opacity))).toBeGreaterThan(0.5);
     await move.tap();
     await page.locator("#libraryMenu button", { hasText: "Nueva carpeta" }).tap();
     await page.locator(".lib-dialog input").fill("Pendientes");
