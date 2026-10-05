@@ -4078,6 +4078,13 @@ function bindReadingTools() {
 // Iconos de trazo (estilo Lucide) para que toda la interfaz hable el mismo
 // lenguaje visual en lugar de mezclar caracteres Unicode sueltos.
 const ICONS = {
+  file: '<path d="M7 3.5h7l4 4V19a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 19V5a1.5 1.5 0 0 1 1-1.5z"/><path d="M14 3.5V8h4"/>',
+  pageSingle: '<rect x="7" y="3.5" width="10" height="17" rx="1.5"/>',
+  pageDouble: '<rect x="3" y="4.5" width="8.5" height="15" rx="1.2"/><rect x="12.5" y="4.5" width="8.5" height="15" rx="1.2"/>',
+  pageScroll: '<rect x="7" y="2" width="10" height="9" rx="1.2"/><rect x="7" y="13" width="10" height="9" rx="1.2"/>',
+  ruler: '<rect x="3" y="9" width="18" height="6" rx="1.5"/><path d="M3 5h18M3 19h18" opacity=".45"/>',
+  autoScroll: '<path d="M7 5l5 5 5-5M7 12l5 5 5-5"/><path d="M6 20.5h12" opacity=".5"/>',
+  present: '<rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M12 16v4M8 20.5h8M10.5 8l4 2-4 2z"/>',
   textSize: '<path d="M3.5 18 8.5 6l5 12M5.3 14h6.4"/><path d="M14.5 18l3.5-8 3.5 8M15.6 15.6h4.8"/>',
   folder: '<path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5v8.3A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"/>',
   scan: '<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M8 9.5h8M8 12.5h8M8 15.5h5"/>',
@@ -11443,7 +11450,7 @@ function setTheme(theme) {
   kv.setItem("paper.theme", theme);
   syncThemeColor();
   $("themeSelect").value = theme;
-  $("appearanceTheme").value = theme;
+  if ($("appearanceTheme")) $("appearanceTheme").value = theme;
   document.querySelectorAll("[data-theme-choice]").forEach((button) => button.classList.toggle("active", button.dataset.themeChoice === theme));
 }
 // ---- Menú «Más» del móvil ----
@@ -11544,7 +11551,7 @@ function syncThemeColor() {
   });
 }
 $("themeSelect").onchange = (e) => setTheme(e.target.value);
-$("appearanceTheme").onchange = (e) => setTheme(e.target.value);
+if ($("appearanceTheme")) $("appearanceTheme").onchange = (e) => setTheme(e.target.value);
 $("openSidebar").onclick = toggleSidebar;
 $("sidebarContentsTab").onclick = () => setSidebarPanel("contents");
 $("sidebarNotesTab").onclick = () => setSidebarPanel("notes");
@@ -11742,9 +11749,6 @@ $("appearanceBtn").onclick = () => {
     isOpen = pop.classList.toggle("open");
   $("appearanceBtn").setAttribute("aria-expanded", String(isOpen));
 };
-$("appearanceZoomIn").onclick = () => changeReaderZoom(ZOOM_STEP);
-$("appearanceZoomOut").onclick = () => changeReaderZoom(-ZOOM_STEP);
-$("appearanceFit").onclick = fitWidth;
 document.querySelectorAll("[data-reader-margin]").forEach(
   (button) =>
     (button.onclick = () => {
@@ -11885,6 +11889,7 @@ function applyReflowPreferences() {
     $("zoomLabel").title = `Tamaño de lectura ${prefs.size}px`;
   }
   refreshThemeSheet();
+  updateViewMenu();
   if (anchor) requestAnimationFrame(() => restoreReflowAnchor(anchor));
 }
 // Texto de muestra para la vista previa: lo que se está leyendo, si hay.
@@ -12086,16 +12091,48 @@ async function setReadingMode(mode) {
     toast("Modo Lectura activado");
   }
 }
+// ---- Menú «Vista» ----
+// Ordenado por lo que más se usa y según el modo: en el Modo lectura y en los
+// EPUB/Markdown no aparecen el diseño de página, los márgenes ni la imagen de
+// la página; la altura de la regla solo con la regla puesta. El aspecto
+// (letra, tamaño, colores, tema) vive en «Temas y ajustes».
+function closeViewMenu() {
+  $("appearancePopover")?.classList.remove("open");
+  $("appearanceBtn")?.setAttribute("aria-expanded", "false");
+}
+function updateViewMenu() {
+  const menu = $("appearancePopover");
+  if (!menu) return;
+  const textBook = isTextBook(currentBook);
+  menu.classList.toggle("is-reflow", reflowMode || textBook);
+  $("viewModeSection").hidden = textBook || !currentBook;
+  menu.querySelectorAll("[data-reading-mode]").forEach((button) => button.setAttribute("aria-checked", String((button.dataset.readingMode === "reflow") === reflowMode)));
+  menu.querySelectorAll("[data-view-mode]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.viewMode === viewMode)));
+  menu.querySelectorAll("[data-reader-margin]").forEach((button) => button.setAttribute("aria-checked", String(button.classList.contains("active"))));
+  $("viewRulerSizes").hidden = !rulerOn;
+  const prefs = readerPrefs();
+  const font = READER_FONTS.find((item) => item.id === prefs.font) || READER_FONTS[0];
+  const tone = PAGE_TONES.find((item) => item.id === currentPageTone());
+  $("viewAspectSample").style.fontFamily = font.stack;
+  $("viewAspectSample").style.fontWeight = prefs.bold ? "700" : "";
+  $("viewAspectSummary").textContent = [font.label, `${prefs.size} px`, tone?.label].filter(Boolean).join(" · ");
+}
 function buildReflowControls() {
-  const popover = $("appearancePopover");
-  if (!popover || $("reflowControls")) return;
-  popover.insertAdjacentHTML("beforeend", `<div class="label">Modo</div><div class="tool-row reading-mode-switch" role="group" aria-label="Modo de visualización"><button class="btn" data-reading-mode="pdf">PDF original</button><button class="btn" data-reading-mode="reflow">Lectura</button></div><div class="reflow-controls" id="reflowControls" hidden></div><button class="btn theme-sheet-open" id="openThemeSheet" type="button">${iconSvg("textSize")}<span><strong>Temas y ajustes</strong><small>Letra, tamaño, espaciado y colores, con vista previa</small></span></button>`);
-  document.querySelectorAll("[data-reading-mode]").forEach((button) => (button.onclick = () => setReadingMode(button.dataset.readingMode)));
+  const menu = $("appearancePopover");
+  if (!menu || menu.dataset.bound) return;
+  menu.dataset.bound = "1";
+  menu.querySelectorAll("[data-vm-icon]").forEach((holder) => (holder.innerHTML = iconSvg(holder.dataset.vmIcon)));
+  $("viewMenuClose").innerHTML = iconSvg("close");
+  $("viewMenuClose").onclick = closeViewMenu;
+  menu.querySelectorAll("[data-reading-mode]").forEach((button) => (button.onclick = () => setReadingMode(button.dataset.readingMode).then(updateViewMenu)));
   $("openThemeSheet").onclick = () => {
-    $("appearancePopover")?.classList.remove("open");
-    $("appearanceBtn")?.setAttribute("aria-expanded", "false");
+    closeViewMenu();
     openThemeSheet();
   };
+  // Cualquier cambio dentro del menú (diseño, márgenes, regla…) lo refresca.
+  menu.addEventListener("click", () => requestAnimationFrame(updateViewMenu));
+  $("appearanceBtn").addEventListener("click", updateViewMenu);
+  updateViewMenu();
 }
 // ---- Color de página ----
 // Un único tono para todas las páginas del PDF (en cualquier vista: página,
@@ -12151,13 +12188,19 @@ function setPageColor(color, { quiet = false } = {}) {
   applyReflowPreferences();
 }
 function buildPageColorControls() {
-  const popover = $("appearancePopover");
-  if (!popover || $("pageColors")) return;
-  const section = document.createElement("div");
-  section.id = "pageColors";
-  section.innerHTML = `<div class="label">Color de página</div><div class="page-colors">${PAGE_TONES.map((tone) => `<button type="button" data-page-color="${tone.id}" title="${tone.label}" aria-label="${tone.label}" aria-pressed="false"></button>`).join("")}</div><p class="reader-hint">Se aplica a todas las páginas del PDF, en cualquier vista.</p>`;
-  popover.append(section);
-  section.querySelectorAll("[data-page-color]").forEach((button) => (button.onclick = () => setPageColor(button.dataset.pageColor)));
+  const section = $("pageColors");
+  if (!section || section.childElementCount) return;
+  section.innerHTML = PAGE_TONES.map((tone) => `<button type="button" data-page-color="${tone.id}" title="${tone.label}" aria-label="${tone.label}" aria-pressed="false"></button>`).join("");
+  section.querySelectorAll("[data-page-color]").forEach((button) => (button.onclick = () => {
+    // El personalizado abre los selectores de fondo y texto.
+    const custom = button.dataset.pageColor === "custom";
+    setPageColor(button.dataset.pageColor, { quiet: custom });
+    if (custom) {
+      closeViewMenu();
+      openThemeSheet();
+      $("themeCustom")?.scrollIntoView({ block: "center" });
+    }
+  }));
   updatePageColor();
 }
 function buildThemeChoices() {

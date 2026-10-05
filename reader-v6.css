@@ -652,3 +652,49 @@ html[data-page-tone="custom"] .ts-tones [data-page-color="custom"] i { backgroun
 .ts-fonts button small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 @media (max-width: 700px) { .ts-fonts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .ts-custom:not([hidden]) + .ts-hint { display: none; }
+
+/* ---- Menú «Vista» reorganizado ---- */
+html.ui4 .appearance-popover.view-menu { width: 340px !important; max-width: calc(100vw - 16px); max-height: calc(100dvh - 80px); padding: 0 !important; overflow-x: hidden !important; overflow-y: auto !important; overscroll-behavior: contain; border-radius: 18px !important; }
+.view-menu .vm-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 8px 16px; background: inherit; }
+.view-menu .vm-head strong { font-size: 15px; }
+.view-menu .vm-close { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--soft); color: var(--text); cursor: pointer; }
+.view-menu .vm-close .ui-icon { width: 14px; height: 14px; }
+.view-menu .vm-section { padding: 4px 14px 12px; }
+.view-menu .vm-section[hidden] { display: none; }
+.view-menu .vm-section + .vm-section { padding-top: 12px; border-top: 1px solid var(--line); }
+.view-menu .vm-label { margin: 0 2px 8px; color: var(--muted); font-size: 10.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.view-menu .vm-segmented { display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: var(--soft); }
+.view-menu .vm-segmented button { flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
+.view-menu .vm-segmented button[aria-checked="true"], .view-menu .vm-segmented button.active { background: var(--surface-solid); box-shadow: 0 1px 4px rgba(0, 0, 0, .14); font-weight: 650; }
+.view-menu .vm-segmented .ui-icon { width: 16px; height: 16px; flex: 0 0 auto; }
+.view-menu .vm-layout button { flex-direction: column; gap: 3px; min-height: 52px; font-size: 12px; }
+.view-menu .vm-layout .ui-icon { width: 20px; height: 20px; }
+.view-menu .vm-small button { min-height: 30px; padding: 0 6px; font-size: 12px; }
+.view-menu .vm-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.view-menu .vm-row[hidden] { display: none; }
+.view-menu .vm-row > span { flex: 0 0 auto; color: var(--muted); font-size: 12.5px; }
+.view-menu .vm-row .vm-segmented { flex: 0 1 218px; }
+.view-menu .vm-colors { display: grid !important; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 4px !important; padding: 0 !important; background: none !important; }
+.view-menu .vm-colors [data-page-color] { width: 100% !important; height: auto !important; aspect-ratio: 1; }
+.view-menu .vm-aspect { width: 100%; display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-solid); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.view-menu .vm-aspect:hover { background: var(--soft); }
+.view-menu .vm-aspect-aa { flex: 0 0 auto; width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; background: var(--soft); font-size: 20px; }
+.view-menu .vm-aspect-text { flex: 1; min-width: 0; }
+.view-menu .vm-aspect-text strong { display: block; font-size: 14px; }
+.view-menu .vm-aspect-text small { display: block; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.view-menu .vm-aspect > [data-vm-icon] .ui-icon { width: 16px; height: 16px; color: var(--muted); }
+.view-menu .vm-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.view-menu .vm-tile { display: grid; justify-items: center; gap: 4px; min-height: 64px; padding: 8px 2px; border: 0; border-radius: 12px; background: var(--soft); color: var(--text); font: inherit; font-size: 11.5px; line-height: 1.15; text-align: center; cursor: pointer; }
+.view-menu .vm-tile .ui-icon { width: 20px; height: 20px; }
+.view-menu .vm-tile[aria-pressed="true"] { background: var(--accent); color: var(--surface-solid); }
+.view-menu .vm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.view-menu .vm-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-solid); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; }
+.view-menu .vm-actions .ui-icon { width: 15px; height: 15px; }
+.view-menu :is(.vm-tile, .vm-actions button, .vm-segmented button):hover { filter: brightness(.97); }
+/* En el Modo lectura, EPUB y Markdown no aplica lo propio de las páginas del PDF. */
+.view-menu.is-reflow .vm-pdf-only { display: none !important; }
+.view-menu.is-reflow .vm-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 700px) {
+  html.ui4 .appearance-popover.view-menu { width: auto !important; max-width: none; }
+  .view-menu .vm-head { padding-top: 10px; }
+}

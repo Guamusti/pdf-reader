@@ -141,6 +141,38 @@ test.describe("colores y tipografías", () => {
   });
 });
 
+test.describe("menú Vista", () => {
+  test.use({ viewport: { width: 1300, height: 900 } });
+
+  test("secciones según el modo, sin duplicados ni desbordes", async ({ page }) => {
+    await openDoc(page, "refs.pdf");
+    await page.click("#appearanceBtn");
+    const menu = page.locator("#appearancePopover");
+    await expect(menu.locator(".vm-label")).toHaveText(["Aspecto", "Páginas", "Herramientas", "Esta página"]);
+    // Lo que ya está en el pie o en «Temas y ajustes» no se repite aquí.
+    await expect(menu.locator("#appearanceZoomIn, #appearanceTheme, [data-theme-choice]")).toHaveCount(0);
+    await expect(page.locator("#viewRulerSizes")).toBeHidden();
+    await page.click("#rulerBtn");
+    await expect(page.locator("#viewRulerSizes")).toBeVisible();
+    await expect(page.locator("#rulerBtn")).toHaveAttribute("aria-pressed", "true");
+    expect(await menu.evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
+    await expect(page.locator("#viewAspectSummary")).toHaveText("Sistema · 20 px · Blanco");
+
+    // Modo lectura: fuera lo propio de las páginas del PDF.
+    await page.click('#appearancePopover [data-reading-mode="reflow"]');
+    await expect(menu.locator(".vm-label:visible")).toHaveText(["Aspecto", "Herramientas"]);
+    await expect(page.locator("#presentationBtn")).toBeHidden();
+    await expect(page.locator('#appearancePopover [data-reading-mode="reflow"]')).toHaveAttribute("aria-checked", "true");
+
+    // El resumen sigue los cambios de «Temas y ajustes».
+    await page.click("#openThemeSheet");
+    await page.click('[data-ts-preset="calm"]');
+    await page.keyboard.press("Escape");
+    await page.click("#appearanceBtn");
+    await expect(page.locator("#viewAspectSummary")).toHaveText("Palatino · 20 px · Sepia");
+  });
+});
+
 test.describe("móvil", () => {
   const { defaultBrowserType, ...pixel7 } = devices["Pixel 7"];
   test.use({ ...pixel7, viewport: { width: 390, height: 844 } });
