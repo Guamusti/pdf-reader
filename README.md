@@ -124,6 +124,14 @@ Incluye:
 
 - **Formularios XFA dinámicos** (los de muchas administraciones, como la AEAT, que en otros visores solo muestran «Please wait… your PDF viewer may not be able to display this type of document»): se abren con su contenido real y sus campos se pueden rellenar. Lo escrito se guarda en el dispositivo y se recupera al volver a abrirlos; «Guardar formulario» (menú «⋯») descarga el PDF con los datos dentro. En la biblioteca tienen portada propia (FORM). Funciona en una página, doble página y scroll continuo, y con la pluma se puede dibujar encima.
 
+### Novedades v15: texto y firma
+
+- **Texto** (barra Ink, «T»): toca la página y escribe; botón «Fecha de hoy», tamaño y color. Se arrastra para moverlo y el tirador de la esquina cambia el ancho.
+- **Firma** (barra Ink): la primera vez se dibuja con el dedo o el Apple Pencil (se guarda solo en este dispositivo); después se coloca con un toque, se mueve y se redimensiona. «Cambiar firma» la vuelve a dibujar.
+- Ambos se **incrustan** en el «PDF anotado» como contenido de la página (se ven en cualquier visor).
+- **Formularios XFA → «PDF para enviar»**: un PDF normal, sin XFA, con el formulario tal como se ve, los datos escritos, el texto y la firma; se abre en cualquier visor y el texto sigue siendo seleccionable. «Formulario editable (XFA)» sigue disponible para seguir rellenándolo.
+- No es una firma electrónica con certificado: para eso, firma después el PDF con AutoFirma o Adobe.
+
 ### Pruebas
 
 ```bash

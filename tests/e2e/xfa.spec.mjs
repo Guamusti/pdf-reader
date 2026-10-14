@@ -43,7 +43,8 @@ test("se ve el formulario (no el aviso), se rellena, se recuerda y se exporta co
   // Exportar: «Guardar formulario» descarga el PDF con los datos dentro.
   await page.click("#mobileMoreBtn");
   await expect(page.locator('[data-mm="pdf"]')).toContainText("Guardar formulario");
-  const [download] = await Promise.all([page.waitForEvent("download"), page.click('[data-mm="pdf"]')]);
+  await page.click('[data-mm="pdf"]');
+  const [download] = await Promise.all([page.waitForEvent("download"), page.click('[data-choose="xfa"]')]);
   expect(download.suggestedFilename()).toBe("xfa-rellenado.pdf");
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const doc = await pdfjs.getDocument({ data: new Uint8Array(await readFile(await download.path())), enableXfa: true, verbosity: 0 }).promise;

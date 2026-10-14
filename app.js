@@ -165,6 +165,8 @@ const INK_TOOL_LABELS = {
   strike: "Tachado",
   box: "Recuadro",
   arrow: "Flecha",
+  text: "Texto",
+  signature: "Firma",
 };
 const DEFAULT_INK_STYLES = {
   pen: { color: "red", opacity: 0.88, width: 3 },
@@ -174,6 +176,8 @@ const DEFAULT_INK_STYLES = {
   strike: { color: "red", opacity: 0.88, width: 2 },
   box: { color: "orange", opacity: 0.88, width: 3 },
   arrow: { color: "green", opacity: 0.88, width: 3 },
+  text: { color: "black", opacity: 1, width: 2 },
+  signature: { color: "navy", opacity: 1, width: 2.2 },
 };
 const storedInkStyles = getJSON("paper.ink-tool-styles", {});
 const inkToolStyles = Object.fromEntries(
@@ -588,7 +592,7 @@ function formatBytes(bytes) {
 // Un único archivo .paperbackup con la biblioteca (opcionalmente sin los PDFs),
 // todas las notas, anotaciones, tarjetas y ajustes. Puede cifrarse con una
 // contraseña. Restaurar combina: no borra nada de lo que ya tengas.
-const DEVICE_ONLY_KEYS = /^paper\.(library-folder|notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|ai-profile|ai-server|ai-webllm-consent|ai-vision-consent|sync-[\w-]+|__[\w-]+)$/;
+const DEVICE_ONLY_KEYS = /^paper\.(signature|library-folder|notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|ai-profile|ai-server|ai-webllm-consent|ai-vision-consent|sync-[\w-]+|__[\w-]+)$/;
 async function exportFullBackup({ includeFiles = true, passphrase = "" } = {}) {
   if (!db) return toast("El almacenamiento local no está disponible");
   await kv.flush().catch(() => {});
@@ -2439,17 +2443,32 @@ window.addEventListener("pagehide", saveXfaValues);
 async function exportXfaForm() {
   if (!isXfaDocument()) return false;
   saveXfaValues();
+  const choice = await chooseOption({
+    title: "Guardar formulario",
+    text: "Para enviarlo por correo o firmarlo, mejor el PDF para enviar: se abre en cualquier visor.",
+    options: [
+      { id: "flat", label: "PDF para enviar", hint: "Con tus datos, el texto y la firma. Se ve igual en cualquier visor.", primary: true },
+      { id: "xfa", label: "Formulario editable (XFA)", hint: "Conserva los campos para seguir rellenándolo. Solo se ve en Adobe o en esta app." },
+    ],
+  });
+  if (!choice) return true;
+  const base = (currentBook?.name || "formulario").replace(/\.pdf$/i, "");
+  showLoader(true, choice === "flat" ? "Preparando el PDF para enviar…" : "Guardando el formulario…", "Se hace en este dispositivo");
   try {
-    const bytes = await pdfDoc.saveDocument();
-    const name = `${(currentBook?.name || "formulario").replace(/\.pdf$/i, "")}-rellenado.pdf`;
-    const blob = new Blob([bytes], { type: "application/pdf" });
-    const file = new File([blob], name, { type: "application/pdf" });
-    if (window.innerWidth <= 900 && navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: name }).catch(() => downloadBlob(name, blob));
-    else downloadBlob(name, blob);
-    toast("Formulario guardado con los datos escritos");
+    if (choice === "flat") {
+      const bytes = await buildFlatXfaPdf();
+      await shareOrDownload(`${base}-para-enviar.pdf`, new Blob([bytes], { type: "application/pdf" }));
+      toast("PDF para enviar listo, con datos, texto y firma");
+    } else {
+      const bytes = await pdfDoc.saveDocument();
+      await shareOrDownload(`${base}-rellenado.pdf`, new Blob([bytes], { type: "application/pdf" }));
+      toast("Formulario guardado con los datos escritos");
+    }
   } catch (error) {
     console.error(error);
     toast("No se pudo guardar el formulario");
+  } finally {
+    showLoader(false);
   }
   return true;
 }
@@ -4185,6 +4204,8 @@ function bindReadingTools() {
 // Iconos de trazo (estilo Lucide) para que toda la interfaz hable el mismo
 // lenguaje visual en lugar de mezclar caracteres Unicode sueltos.
 const ICONS = {
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>',
+  signature: '<path d="M3 16.5c2.5 0 3.5-9 6-9 2 0 0 8 2.5 8 1.6 0 2.2-3.2 3.6-3.2 1.2 0 .9 2.4 2.4 2.4 1 0 1.7-.8 2.5-1.6"/><path d="M3 20.5h18" opacity=".45"/>',
   file: '<path d="M7 3.5h7l4 4V19a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 19V5a1.5 1.5 0 0 1 1-1.5z"/><path d="M14 3.5V8h4"/>',
   pageSingle: '<rect x="7" y="3.5" width="10" height="17" rx="1.5"/>',
   pageDouble: '<rect x="3" y="4.5" width="8.5" height="15" rx="1.2"/><rect x="12.5" y="4.5" width="8.5" height="15" rx="1.2"/>',
@@ -7968,6 +7989,278 @@ function pdfTextNote(lib, point, text, color, id, date) {
   const { PDFHexString } = lib;
   return { Type: "Annot", Subtype: "Text", F: 4, Name: "Comment", Open: false, Rect: [point[0], point[1] - 20, point[0] + 20, point[1]], C: pdfRgb(color), Contents: PDFHexString.fromText(text), T: PDFHexString.fromText("Paper Reader"), M: PDFHexString.fromText(date), NM: PDFHexString.fromText(`paper-reader-${id}`) };
 }
+// ---- Dibujar en el PDF: texto, firma y formularios XFA «aplanados» ----
+const pdfFontCache = new WeakMap();
+async function standardPdfFonts(lib, doc) {
+  if (pdfFontCache.has(doc)) return pdfFontCache.get(doc);
+  const { StandardFonts } = lib;
+  const names = { sans: "Helvetica", sansBold: "HelveticaBold", sansItalic: "HelveticaOblique", sansBoldItalic: "HelveticaBoldOblique", serif: "TimesRoman", serifBold: "TimesRomanBold", serifItalic: "TimesRomanItalic", serifBoldItalic: "TimesRomanBoldItalic" };
+  const fonts = {};
+  for (const [key, name] of Object.entries(names)) fonts[key] = await doc.embedFont(StandardFonts[name]);
+  pdfFontCache.set(doc, fonts);
+  return fonts;
+}
+// Las fuentes estándar del PDF solo tienen el juego WinAnsi (sirve para el
+// español); lo que no cabe se sustituye por «?» en vez de fallar.
+function pdfSafeText(font, text) {
+  return [...String(text)].map((char) => {
+    try {
+      font.encodeText(char);
+      return char;
+    } catch {
+      return "?";
+    }
+  }).join("");
+}
+function wrapPdfText(font, text, size, width) {
+  const lines = [];
+  for (const paragraph of String(text).split("\n")) {
+    let line = "";
+    for (const word of paragraph.split(/\s+/)) {
+      const next = line ? `${line} ${word}` : word;
+      if (line && font.widthOfTextAtSize(next, size) > width) {
+        lines.push(line);
+        line = word;
+      } else line = next;
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+function cssColor(value) {
+  const numbers = String(value || "").match(/[\d.]+/g)?.map(Number) || [];
+  if (numbers.length < 3) return null;
+  const alpha = numbers.length > 3 ? numbers[3] : 1;
+  return { r: numbers[0] / 255, g: numbers[1] / 255, b: numbers[2] / 255, a: alpha };
+}
+// Texto o firma de la app dibujados en una página (como contenido, para que
+// se vean igual en cualquier visor). `toPdf` lleva coordenadas 0–1 al PDF;
+// `width`/`height` son las medidas de la página en puntos.
+async function drawObjectOnPage(lib, doc, page, mark, toPdf, width, height) {
+  const { rgb, LineCapStyle } = lib;
+  const rect = mark.rects?.[0];
+  if (!rect) return false;
+  const [r, g, b] = pdfRgb(mark.color || "black");
+  const color = rgb(r, g, b);
+  const [left, top] = toPdf(rect.x, rect.y);
+  if (mark.type === "text") {
+    const text = String(mark.text || "").trim();
+    if (!text) return false;
+    const font = (await standardPdfFonts(lib, doc)).sans;
+    const size = (mark.size || 0.016) * height;
+    const lines = wrapPdfText(font, pdfSafeText(font, text), size, rect.w * width + 1);
+    lines.forEach((line, index) => page.drawText(line, { x: left, y: top - size * (0.88 + 1.25 * index), size, font, color }));
+    return true;
+  }
+  if (mark.type === "signature" && mark.strokes?.length) {
+    const w = rect.w * width,
+      h = rect.h * height;
+    const d = mark.strokes.filter((stroke) => stroke.length > 1).map((stroke) => stroke.map(([x, y], index) => `${index ? "L" : "M"}${(x * w).toFixed(2)} ${(y * h).toFixed(2)}`).join(" ")).join(" ");
+    page.drawSvgPath(d, { x: left, y: top, borderColor: color, borderWidth: Math.max(0.8, w / 160), borderLineCap: LineCapStyle.Round });
+    return true;
+  }
+  return false;
+}
+// Imagen de la página (logotipos del formulario) para incrustarla.
+async function domImageToPdf(doc, img) {
+  if (!img.complete) await new Promise((resolve) => ((img.onload = img.onerror = resolve), setTimeout(resolve, 3000)));
+  if (!img.naturalWidth) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  canvas.getContext("2d").drawImage(img, 0, 0);
+  const bytes = await (await fetch(canvas.toDataURL("image/png"))).arrayBuffer();
+  return doc.embedPng(bytes);
+}
+// Copia vectorial de lo que se ve en una página HTML (la capa XFA): fondos,
+// bordes, imágenes, textos, campos y casillas, en su sitio y a su tamaño.
+async function drawDomToPdf(lib, doc, page, root, height) {
+  const { rgb } = lib;
+  const fonts = await standardPdfFonts(lib, doc);
+  const origin = root.getBoundingClientRect();
+  const X = (value) => value - origin.left;
+  const Y = (value) => height - (value - origin.top);
+  const fontFor = (style) => {
+    const serif = /times|serif/i.test(style.fontFamily) && !/sans/i.test(style.fontFamily);
+    const bold = Number(style.fontWeight) >= 600 || style.fontWeight === "bold";
+    const italic = style.fontStyle === "italic" || style.fontStyle === "oblique";
+    return fonts[`${serif ? "serif" : "sans"}${bold ? "Bold" : ""}${italic ? "Italic" : ""}`] || fonts.sans;
+  };
+  const roundedPath = (w, h, radius) => {
+    const k = Math.min(radius, w / 2, h / 2);
+    return `M${k} 0 H${w - k} Q${w} 0 ${w} ${k} V${h - k} Q${w} ${h} ${w - k} ${h} H${k} Q0 ${h} 0 ${h - k} V${k} Q0 0 ${k} 0 Z`;
+  };
+  for (const el of root.querySelectorAll("*")) {
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 0.5 && r.height < 0.5) continue;
+    const radius = parseFloat(style.borderTopLeftRadius) || 0;
+    const background = cssColor(style.backgroundColor);
+    if (background && background.a > 0.02) {
+      const options = { color: rgb(background.r, background.g, background.b), opacity: background.a };
+      if (radius > 0.5) page.drawSvgPath(roundedPath(r.width, r.height, radius), { x: X(r.left), y: Y(r.top), ...options });
+      else page.drawRectangle({ x: X(r.left), y: Y(r.bottom), width: r.width, height: r.height, ...options });
+    }
+    const sides = ["Top", "Right", "Bottom", "Left"].map((side) => ({ side, width: parseFloat(style[`border${side}Width`]) || 0, type: style[`border${side}Style`], color: cssColor(style[`border${side}Color`]) }));
+    const visible = sides.filter((item) => item.width > 0 && !["none", "hidden"].includes(item.type) && item.color?.a > 0.02);
+    if (visible.length === 4 && radius > 0.5 && visible.every((item) => item.width === visible[0].width)) {
+      const c = visible[0].color;
+      page.drawSvgPath(roundedPath(r.width, r.height, radius), { x: X(r.left), y: Y(r.top), borderColor: rgb(c.r, c.g, c.b), borderWidth: visible[0].width, borderOpacity: c.a });
+    } else {
+      for (const item of visible) {
+        const half = item.width / 2;
+        const color = rgb(item.color.r, item.color.g, item.color.b);
+        const line = { Top: [[r.left, r.top + half], [r.right, r.top + half]], Bottom: [[r.left, r.bottom - half], [r.right, r.bottom - half]], Left: [[r.left + half, r.top], [r.left + half, r.bottom]], Right: [[r.right - half, r.top], [r.right - half, r.bottom]] }[item.side];
+        page.drawLine({ start: { x: X(line[0][0]), y: Y(line[0][1]) }, end: { x: X(line[1][0]), y: Y(line[1][1]) }, thickness: item.width, color, opacity: item.color.a, dashArray: item.type === "dashed" ? [item.width * 3, item.width * 2] : item.type === "dotted" ? [item.width, item.width * 1.5] : undefined });
+      }
+    }
+    if (el.tagName === "IMG") {
+      const image = await domImageToPdf(doc, el).catch(() => null);
+      if (image) page.drawImage(image, { x: X(r.left), y: Y(r.bottom), width: r.width, height: r.height });
+      continue;
+    }
+    if (el.tagName === "INPUT" && (el.type === "checkbox" || el.type === "radio")) {
+      const size = Math.min(r.width, r.height);
+      const x = X(r.left + (r.width - size) / 2),
+        y = Y(r.top + (r.height + size) / 2);
+      page.drawRectangle({ x, y, width: size, height: size, borderColor: rgb(0.2, 0.2, 0.2), borderWidth: 0.8 });
+      if (el.checked) {
+        page.drawLine({ start: { x: x + size * 0.2, y: y + size * 0.5 }, end: { x: x + size * 0.42, y: y + size * 0.25 }, thickness: Math.max(1, size * 0.12), color: rgb(0.1, 0.1, 0.1) });
+        page.drawLine({ start: { x: x + size * 0.42, y: y + size * 0.25 }, end: { x: x + size * 0.82, y: y + size * 0.78 }, thickness: Math.max(1, size * 0.12), color: rgb(0.1, 0.1, 0.1) });
+      }
+      continue;
+    }
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT") {
+      const value = el.tagName === "SELECT" ? el.options[el.selectedIndex]?.text || "" : el.value || "";
+      if (!value.trim()) continue;
+      const font = fontFor(style);
+      const size = parseFloat(style.fontSize) || 10;
+      const color = cssColor(style.color) || { r: 0, g: 0, b: 0 };
+      const padLeft = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.borderLeftWidth) || 0) + 1;
+      const inner = r.width - padLeft * 2;
+      if (el.tagName === "TEXTAREA") {
+        const lineHeight = parseFloat(style.lineHeight) || size * 1.2;
+        const lines = wrapPdfText(font, pdfSafeText(font, value), size, inner);
+        lines.forEach((line, index) => {
+          const baseline = r.top + (parseFloat(style.paddingTop) || 0) + 1 + lineHeight * index + size * 0.95;
+          if (baseline < r.bottom + 1) page.drawText(line, { x: X(r.left + padLeft), y: Y(baseline), size, font, color: rgb(color.r, color.g, color.b) });
+        });
+      } else {
+        let text = pdfSafeText(font, value);
+        while (text.length > 1 && font.widthOfTextAtSize(text, size) > inner) text = text.slice(0, -1);
+        page.drawText(text, { x: X(r.left + padLeft), y: Y(r.top + r.height / 2 + size * 0.35), size, font, color: rgb(color.r, color.g, color.b) });
+      }
+    }
+  }
+  // Textos: línea a línea, en la posición que ocupan en pantalla.
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const parent = node.parentElement;
+    if (!parent || !node.nodeValue.trim() || parent.closest("input, textarea, select, option, script, style")) continue;
+    const style = getComputedStyle(parent);
+    if (style.visibility === "hidden" || style.display === "none") continue;
+    const font = fontFor(style);
+    const size = parseFloat(style.fontSize) || 10;
+    const color = cssColor(style.color) || { r: 0, g: 0, b: 0 };
+    const underline = /underline/.test(style.textDecorationLine || style.textDecoration);
+    const lines = [];
+    const pattern = /\S+/g;
+    for (let match = pattern.exec(node.nodeValue); match; match = pattern.exec(node.nodeValue)) {
+      const range = document.createRange();
+      range.setStart(node, match.index);
+      range.setEnd(node, match.index + match[0].length);
+      const box = range.getClientRects()[0];
+      if (!box || !box.width) continue;
+      const last = lines.at(-1);
+      if (last && Math.abs(last.top - box.top) < size * 0.5) {
+        last.words.push(match[0]);
+        last.right = box.right;
+        last.height = Math.max(last.height, box.height);
+      } else lines.push({ top: box.top, left: box.left, right: box.right, height: box.height, words: [match[0]] });
+    }
+    for (const line of lines) {
+      const text = pdfSafeText(font, line.words.join(" "));
+      const target = line.right - line.left;
+      const natural = font.widthOfTextAtSize(text, size);
+      const fitted = natural > target * 1.03 && target > 0 ? Math.max(size * 0.7, (size * target) / natural) : size;
+      const baseline = line.top + line.height * 0.79;
+      page.drawText(text, { x: X(line.left), y: Y(baseline), size: fitted, font, color: rgb(color.r, color.g, color.b) });
+      if (underline) page.drawLine({ start: { x: X(line.left), y: Y(baseline + size * 0.12) }, end: { x: X(line.left) + Math.min(target, font.widthOfTextAtSize(text, fitted)), y: Y(baseline + size * 0.12) }, thickness: Math.max(0.5, size * 0.06), color: rgb(color.r, color.g, color.b) });
+    }
+  }
+}
+// «PDF para enviar» de un formulario XFA: un PDF normal (sin XFA) con el
+// formulario tal como se ve, los datos escritos, el texto y la firma.
+async function buildFlatXfaPdf() {
+  const lib = await loadPdfLib();
+  const { PDFDocument, PDFName, PDFArray } = lib;
+  const out = await PDFDocument.create();
+  ensureXfaStyles();
+  const stage = document.createElement("div");
+  stage.className = "xfa-export-stage";
+  document.body.append(stage);
+  const date = pdfDateString();
+  try {
+    for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber++) {
+      const pdfPage = await pdfDoc.getPage(pageNumber);
+      const viewport = pdfPage.getViewport({ scale: 1 });
+      const width = viewport.width,
+        height = viewport.height;
+      const holder = document.createElement("div");
+      holder.style.cssText = `position:relative;width:${width}px;height:${height}px;background:#fff;overflow:hidden`;
+      const div = document.createElement("div");
+      holder.append(div);
+      stage.append(holder);
+      pdfjsLib.XfaLayer.render({ viewport: viewport.clone({ dontFlip: true }), div, xfaHtml: await pdfPage.getXfa(), annotationStorage: pdfDoc.annotationStorage, linkService: xfaLinkService, intent: "display" });
+      await document.fonts.ready;
+      const page = out.addPage([width, height]);
+      await drawDomToPdf(lib, out, page, holder, height);
+      holder.remove();
+      const toPdf = (x, y) => [x * width, height - y * height];
+      for (const mark of annotations().filter((item) => item.page === pageNumber)) {
+        if (await drawObjectOnPage(lib, out, page, mark, toPdf, width, height)) continue;
+        if (mark.type === "sticky") continue;
+        const dict = pdfAnnotationFor(lib, out.context, mark, toPdf, { date });
+        if (!dict) continue;
+        const ref = out.context.register(out.context.obj(dict));
+        const annots = page.node.lookup(PDFName.of("Annots"));
+        if (annots instanceof PDFArray) annots.push(ref);
+        else page.node.set(PDFName.of("Annots"), out.context.obj([ref]));
+      }
+    }
+  } finally {
+    stage.remove();
+  }
+  out.setTitle(libraryDisplayName(currentBook?.title || currentBook?.name || "Formulario"));
+  out.setProducer("Paper Reader");
+  return out.save({ useObjectStreams: false });
+}
+// Pequeña hoja para elegir entre varias opciones (devuelve el id o null).
+function chooseOption({ title, text = "", options }) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("div");
+    dialog.className = "lib-dialog choose-dialog";
+    dialog.innerHTML = `<div class="lib-dialog-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><strong>${escapeHtml(title)}</strong>${text ? `<p>${escapeHtml(text)}</p>` : ""}<div class="choose-options">${options.map((option) => `<button type="button" class="choose-option${option.primary ? " is-primary" : ""}" data-choose="${option.id}"><strong>${escapeHtml(option.label)}</strong><small>${escapeHtml(option.hint || "")}</small></button>`).join("")}</div><div class="lib-dialog-actions"><button type="button" data-dialog-cancel>Cancelar</button></div></div>`;
+    const finish = (value) => {
+      dialog.remove();
+      resolve(value);
+    };
+    dialog.addEventListener("click", (event) => {
+      const option = event.target.closest("[data-choose]");
+      if (option) return finish(option.dataset.choose);
+      if (event.target === dialog || event.target.closest("[data-dialog-cancel]")) finish(null);
+    });
+    dialog.addEventListener("keydown", (event) => event.key === "Escape" && finish(null));
+    document.body.append(dialog);
+    dialog.querySelector(".choose-option")?.focus();
+  });
+}
+async function shareOrDownload(name, blob) {
+  const file = new File([blob], name, { type: blob.type });
+  if (window.innerWidth <= 900 && navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: name }).catch(() => downloadBlob(name, blob));
+  else downloadBlob(name, blob);
+}
 async function buildAnnotatedPdf({ includeBoard = true } = {}) {
   const lib = await loadPdfLib();
   const { PDFDocument, PDFName, PDFArray } = lib;
@@ -7998,6 +8291,10 @@ async function buildAnnotatedPdf({ includeBoard = true } = {}) {
     const marginPoint = () => toPdf(0.015, 0.02 + 0.035 * margin++);
     for (const mark of marks.filter((item) => item.page === pageNumber)) {
       let dict = null;
+      if (mark.type === "text" || mark.type === "signature") {
+        if (await drawObjectOnPage(lib, doc, page, mark, toPdf, viewport.width, viewport.height)) count++;
+        continue;
+      }
       if (mark.type === "sticky") {
         const text = String(mark.note || "").trim();
         if (text) dict = pdfTextNote(lib, isPinned(mark) ? toPdf(mark.x, mark.y) : marginPoint(), text, mark.color || "yellow", mark.id, date);
@@ -8101,7 +8398,7 @@ function exportMarkdown() {
 }
 
 const SUPPORTED_ANNOTATION_TYPES = new Set(["highlight", "underline", "wavy", "strike", "note", "sticky", "pen", "box", "arrow"]);
-const ANNOTATION_COLORS = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
+const ANNOTATION_COLORS = ["yellow", "green", "blue", "pink", "orange", "purple", "red", "black", "navy"];
 function clampUnit(value) {
   return Math.max(0, Math.min(1, Number(value)));
 }
@@ -8361,6 +8658,9 @@ const ANNOTATION_RGB = {
   orange: [239, 123, 38],
   purple: [137, 74, 204],
   red: [218, 64, 64],
+  // Para texto y firmas: tinta negra o azul oscura.
+  black: [28, 28, 30],
+  navy: [24, 44, 120],
 };
 function annotationStyle(color, opacity) {
   const rgb = (ANNOTATION_RGB[color] || ANNOTATION_RGB.yellow).join(",");
@@ -8369,6 +8669,8 @@ function annotationStyle(color, opacity) {
 }
 function annotationLabel(type) {
   if (type === "sticky") return "Nota adhesiva";
+  if (type === "text") return "Texto";
+  if (type === "signature") return "Firma";
   return type === "note"
     ? "Resaltado"
     : type === "pen"
@@ -8425,7 +8727,7 @@ function deleteAnnotation(id) {
   closeAnnotationEditor();
   toast("Anotación eliminada");
 }
-const COLOR_NAMES = { yellow: "Amarillo", green: "Verde", blue: "Azul", pink: "Rosa", orange: "Naranja", purple: "Morado", red: "Rojo" };
+const COLOR_NAMES = { yellow: "Amarillo", green: "Verde", blue: "Azul", pink: "Rosa", orange: "Naranja", purple: "Morado", red: "Rojo", black: "Negro", navy: "Azul tinta" };
 // Rectángulo en pantalla de una anotación (para colocar su editor al lado).
 function annotationScreenRect(id) {
   const nodes = [...document.querySelectorAll(`.annotation-layer [data-annotation-id="${CSS.escape(id)}"]`)];
@@ -8447,8 +8749,15 @@ function openAnnotationEditor(id, anchorRect = null, { focusNote = false } = {})
   const textTypes = [["highlight", "highlighter", "Resaltar"], ["underline", "underline", "Subrayar"], ["wavy", "wavy", "Ondulado"], ["strike", "strike", "Tachar"]];
   const isText = textTypes.some(([type]) => type === mark.type) || mark.type === "note";
   const currentType = mark.type === "note" ? "highlight" : mark.type;
-  const showWidth = !["highlight", "note"].includes(mark.type);
-  editor.innerHTML = `<header><div><small>Página ${mark.page}</small><strong>${annotationLabel(mark.type)}</strong></div><button class="btn icon" data-editor-close aria-label="Cerrar">${iconSvg("close")}</button></header>${isText ? `<div class="ae-types" role="radiogroup" aria-label="Tipo">${textTypes.map(([type, icon, label]) => `<button type="button" role="radio" data-editor-type="${type}" aria-checked="${type === currentType}" title="${label}">${iconSvg(icon)}<span>${label}</span></button>`).join("")}</div>` : ""}<div class="annotation-editor-colors" role="radiogroup" aria-label="Color">${ANNOTATION_COLORS.map((color) => `<button type="button" role="radio" data-editor-color="${color}" aria-checked="${color === (mark.color || "yellow")}" class="${color === (mark.color || "yellow") ? "active" : ""}" style="--swatch:${annotationStyle(color, 0.9)}" aria-label="${COLOR_NAMES[color]}" title="${COLOR_NAMES[color]}"></button>`).join("")}</div><label class="ae-range">Opacidad <output data-opacity-output>${Math.round((mark.opacity ?? 0.48) * 100)}%</output><input type="range" min="10" max="100" value="${Math.round((mark.opacity ?? 0.48) * 100)}" data-editor-opacity></label>${showWidth ? `<label class="ae-range">Grosor <output data-width-output>${mark.width || 2}px</output><input type="range" min="1" max="12" value="${mark.width || 2}" data-editor-width></label>` : ""}<textarea class="field" data-editor-note placeholder="Comentario…" aria-label="Comentario">${escapeHtml(mark.note || "")}</textarea><footer>${mark.text ? `<button class="btn" data-editor-copy>${iconSvg("copy")}<span>Copiar</span></button>` : ""}<button class="btn" data-editor-duplicate>${iconSvg("plus")}<span>Duplicar</span></button><button class="btn danger" data-editor-delete>${iconSvg("trash")}<span>Eliminar</span></button></footer>`;
+  const isObject = mark.type === "text" || mark.type === "signature";
+  const showWidth = !["highlight", "note", "text", "signature"].includes(mark.type);
+  const pageHeight = Number(mark.pageHeight) || 792;
+  const objectFields = mark.type === "text"
+    ? `<textarea class="field ae-text" data-editor-text placeholder="Escribe aquí…" aria-label="Texto">${escapeHtml(mark.text || "")}</textarea><div class="ae-row"><button type="button" class="btn" data-editor-today>${iconSvg("calendar")}<span>Fecha de hoy</span></button></div><label class="ae-range">Tamaño <output data-size-output>${Math.round((mark.size || 0.016) * pageHeight)} pt</output><input type="range" min="6" max="48" step="1" value="${Math.round((mark.size || 0.016) * pageHeight)}" data-editor-size></label>`
+    : mark.type === "signature"
+      ? `<label class="ae-range">Tamaño <output data-size-output>${Math.round((mark.rects?.[0]?.w || 0.3) * 100)}%</output><input type="range" min="8" max="80" step="1" value="${Math.round((mark.rects?.[0]?.w || 0.3) * 100)}" data-editor-sigsize></label><div class="ae-row"><button type="button" class="btn" data-editor-resign>${iconSvg("signature")}<span>Cambiar firma</span></button></div>`
+      : "";
+  editor.innerHTML = `<header><div><small>Página ${mark.page}</small><strong>${annotationLabel(mark.type)}</strong></div><button class="btn icon" data-editor-close aria-label="Cerrar">${iconSvg("close")}</button></header>${isText ? `<div class="ae-types" role="radiogroup" aria-label="Tipo">${textTypes.map(([type, icon, label]) => `<button type="button" role="radio" data-editor-type="${type}" aria-checked="${type === currentType}" title="${label}">${iconSvg(icon)}<span>${label}</span></button>`).join("")}</div>` : ""}${objectFields}<div class="annotation-editor-colors" role="radiogroup" aria-label="Color">${(isObject ? ["black", "navy", "blue", "red", "green"] : ANNOTATION_COLORS.filter((color) => color !== "black" && color !== "navy")).map((color) => `<button type="button" role="radio" data-editor-color="${color}" aria-checked="${color === (mark.color || "yellow")}" class="${color === (mark.color || "yellow") ? "active" : ""}" style="--swatch:${annotationStyle(color, 0.9)}" aria-label="${COLOR_NAMES[color]}" title="${COLOR_NAMES[color]}"></button>`).join("")}</div>${isObject ? "" : `<label class="ae-range">Opacidad <output data-opacity-output>${Math.round((mark.opacity ?? 0.48) * 100)}%</output><input type="range" min="10" max="100" value="${Math.round((mark.opacity ?? 0.48) * 100)}" data-editor-opacity></label>`}${showWidth ? `<label class="ae-range">Grosor <output data-width-output>${mark.width || 2}px</output><input type="range" min="1" max="12" value="${mark.width || 2}" data-editor-width></label>` : ""}${isObject ? "" : `<textarea class="field" data-editor-note placeholder="Comentario…" aria-label="Comentario">${escapeHtml(mark.note || "")}</textarea>`}<footer>${mark.text ? `<button class="btn" data-editor-copy>${iconSvg("copy")}<span>Copiar</span></button>` : ""}<button class="btn" data-editor-duplicate>${iconSvg("plus")}<span>Duplicar</span></button><button class="btn danger" data-editor-delete>${iconSvg("trash")}<span>Eliminar</span></button></footer>`;
   editor.hidden = false;
   // Junto a la anotación: debajo si cabe, si no encima; centrado sobre ella.
   const width = editor.offsetWidth || 300,
@@ -8487,16 +8796,20 @@ function openAnnotationEditor(id, anchorRect = null, { focusNote = false } = {})
     openAnnotationEditor(id, anchorRect);
   }));
   const opacity = editor.querySelector("[data-editor-opacity]");
-  opacity.oninput = () => {
-    editor.querySelector("[data-opacity-output]").textContent = `${opacity.value}%`;
-  };
-  opacity.onchange = () => updateAnnotation(id, { opacity: Number(opacity.value) / 100 });
+  if (opacity) {
+    opacity.oninput = () => {
+      editor.querySelector("[data-opacity-output]").textContent = `${opacity.value}%`;
+    };
+    opacity.onchange = () => updateAnnotation(id, { opacity: Number(opacity.value) / 100 });
+  }
+  bindObjectEditor(editor, id, { focusText: focusNote });
   const widthInput = editor.querySelector("[data-editor-width]");
   if (widthInput) {
     widthInput.oninput = () => (editor.querySelector("[data-width-output]").textContent = `${widthInput.value}px`);
     widthInput.onchange = () => updateAnnotation(id, { width: Number(widthInput.value) });
   }
   const note = editor.querySelector("[data-editor-note]");
+  if (!note) return;
   // El comentario se guarda mientras se escribe (y al salir del campo).
   let noteTimer = 0;
   const saveComment = () => {
@@ -8511,6 +8824,239 @@ function openAnnotationEditor(id, anchorRect = null, { focusNote = false } = {})
   note.onchange = saveComment;
   note.onblur = saveComment;
   if (focusNote) requestAnimationFrame(() => note.focus());
+}
+// ---- Texto y firma sobre la página ----
+// Objetos que se colocan con un toque, se mueven arrastrándolos y se
+// redimensionan con el tirador de la esquina. Se incrustan en el PDF al
+// exportar (también en el «PDF para enviar» de los formularios XFA).
+function todayText() {
+  return new Date().toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+function bindObjectEditor(editor, id, { focusText = false } = {}) {
+  const text = editor.querySelector("[data-editor-text]");
+  if (text) {
+    let timer = 0;
+    const save = () => {
+      clearTimeout(timer);
+      const value = text.value.slice(0, 2000);
+      if ((annotations().find((item) => item.id === id)?.text || "") !== value) updateAnnotation(id, { text: value }, false);
+    };
+    text.oninput = () => {
+      // Se ve al momento en la página; se guarda poco después.
+      const node = document.querySelector(`.annotation-object[data-annotation-id="${CSS.escape(id)}"]`);
+      if (node) {
+        node.firstChild?.nodeType === 3 ? (node.firstChild.nodeValue = text.value) : node.prepend(document.createTextNode(text.value));
+        node.classList.toggle("is-empty", !text.value);
+      }
+      clearTimeout(timer);
+      timer = setTimeout(save, 400);
+    };
+    text.onblur = save;
+    if (focusText) requestAnimationFrame(() => text.focus());
+  }
+  editor.querySelector("[data-editor-today]")?.addEventListener("click", () => {
+    const value = text.value ? `${text.value}${/\s$/.test(text.value) ? "" : " "}${todayText()}` : todayText();
+    text.value = value;
+    text.dispatchEvent(new Event("input"));
+    updateAnnotation(id, { text: value }, false);
+  });
+  const size = editor.querySelector("[data-editor-size]");
+  if (size) {
+    size.oninput = () => (editor.querySelector("[data-size-output]").textContent = `${size.value} pt`);
+    size.onchange = () => {
+      const mark = annotations().find((item) => item.id === id);
+      updateAnnotation(id, { size: Number(size.value) / (Number(mark?.pageHeight) || 792) });
+    };
+  }
+  const sigSize = editor.querySelector("[data-editor-sigsize]");
+  if (sigSize) {
+    sigSize.oninput = () => (editor.querySelector("[data-size-output]").textContent = `${sigSize.value}%`);
+    sigSize.onchange = () => {
+      const mark = annotations().find((item) => item.id === id);
+      const rect = mark?.rects?.[0];
+      if (!rect) return;
+      const w = Number(sigSize.value) / 100;
+      updateAnnotation(id, { rects: [{ ...rect, w, h: (rect.h * w) / rect.w }] });
+    };
+  }
+  editor.querySelector("[data-editor-resign]")?.addEventListener("click", async () => {
+    const signature = await openSignaturePad();
+    if (!signature) return;
+    const mark = annotations().find((item) => item.id === id);
+    const rect = mark?.rects?.[0];
+    if (!rect) return;
+    const host = document.querySelector(`.annotation-object[data-annotation-id="${CSS.escape(id)}"]`)?.closest(".canvas-wrap, .cont-page, #facingWrap");
+    const box = host?.getBoundingClientRect();
+    const h = box ? (rect.w * box.width) / box.height / signature.aspect : rect.h;
+    updateAnnotation(id, { strokes: signature.strokes, rects: [{ ...rect, h }] });
+    openAnnotationEditor(id);
+  });
+}
+// Firma guardada (solo en este dispositivo): trazos normalizados a su caja.
+function savedSignature() {
+  const data = getJSON("paper.signature", null);
+  return data?.strokes?.length ? data : null;
+}
+function openSignaturePad() {
+  return new Promise((resolve) => {
+    document.getElementById("signaturePad")?.remove();
+    const sheet = document.createElement("div");
+    sheet.id = "signaturePad";
+    sheet.className = "signature-pad";
+    sheet.innerHTML = `<div class="sp-card" role="dialog" aria-modal="true" aria-labelledby="signaturePadTitle"><header><strong id="signaturePadTitle">Tu firma</strong><small>Fírmala con el dedo o el Apple Pencil. Se guarda solo en este dispositivo.</small></header><div class="sp-area"><canvas></canvas><span class="sp-line" aria-hidden="true"></span></div><footer><button type="button" class="btn" data-sp-clear>Borrar</button><span></span><button type="button" class="btn" data-sp-cancel>Cancelar</button><button type="button" class="btn primary" data-sp-save disabled>Usar firma</button></footer></div>`;
+    document.body.append(sheet);
+    const canvas = sheet.querySelector("canvas");
+    const area = sheet.querySelector(".sp-area");
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const box = area.getBoundingClientRect();
+    canvas.width = Math.round(box.width * dpr);
+    canvas.height = Math.round(box.height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 2.6;
+    ctx.strokeStyle = annotationStyle("navy", 1);
+    const strokes = [];
+    let current = null;
+    const point = (event) => {
+      const r = canvas.getBoundingClientRect();
+      return [event.clientX - r.left, event.clientY - r.top];
+    };
+    canvas.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      canvas.setPointerCapture(event.pointerId);
+      current = [point(event)];
+      strokes.push(current);
+    });
+    canvas.addEventListener("pointermove", (event) => {
+      if (!current) return;
+      for (const sample of event.getCoalescedEvents?.() || [event]) {
+        const next = point(sample);
+        const last = current.at(-1);
+        ctx.beginPath();
+        ctx.moveTo(last[0], last[1]);
+        ctx.lineTo(next[0], next[1]);
+        ctx.stroke();
+        current.push(next);
+      }
+      sheet.querySelector("[data-sp-save]").disabled = false;
+    });
+    const end = () => (current = null);
+    canvas.addEventListener("pointerup", end);
+    canvas.addEventListener("pointercancel", end);
+    const finish = (result) => {
+      sheet.remove();
+      resolve(result);
+    };
+    sheet.querySelector("[data-sp-clear]").onclick = () => {
+      strokes.length = 0;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      sheet.querySelector("[data-sp-save]").disabled = true;
+    };
+    sheet.querySelector("[data-sp-cancel]").onclick = () => finish(null);
+    sheet.addEventListener("keydown", (event) => event.key === "Escape" && (event.stopPropagation(), finish(null)));
+    sheet.querySelector("[data-sp-save]").onclick = () => {
+      const points = strokes.flat();
+      if (points.length < 2) return;
+      const pad = 4;
+      const minX = Math.min(...points.map((p) => p[0])) - pad, maxX = Math.max(...points.map((p) => p[0])) + pad;
+      const minY = Math.min(...points.map((p) => p[1])) - pad, maxY = Math.max(...points.map((p) => p[1])) + pad;
+      const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
+      const round = (value) => Math.round(value * 10000) / 10000;
+      const signature = { strokes: strokes.filter((stroke) => stroke.length > 1).map((stroke) => stroke.map(([x, y]) => [round((x - minX) / w), round((y - minY) / h)])), aspect: w / h };
+      setJSON("paper.signature", signature);
+      finish(signature);
+    };
+  });
+}
+// Coloca un texto o la firma en el punto tocado de una página.
+async function placeObjectAt(host, clientX, clientY) {
+  const page = surfacePage(host);
+  if (!page || !currentBook) return;
+  const box = host.getBoundingClientRect();
+  const x = (clientX - box.left) / box.width,
+    y = (clientY - box.top) / box.height;
+  const pageHeight = (await getCachedPage(page)).getViewport({ scale: 1, rotation: 0 }).height;
+  const style = inkToolStyles[inkTool] || {};
+  let mark;
+  if (inkTool === "text") {
+    const size = 12 / pageHeight;
+    mark = { type: "text", text: "", size, pageHeight, rects: [{ x: Math.min(x, 0.9), y: Math.max(0, y - size * 0.7), w: Math.min(0.45, 0.98 - Math.min(x, 0.9)), h: size * 1.4 }] };
+  } else {
+    const signature = savedSignature() || (await openSignaturePad());
+    if (!signature) return;
+    const w = 0.26;
+    const h = (w * box.width) / box.height / signature.aspect;
+    mark = { type: "signature", strokes: signature.strokes, pageHeight, rects: [{ x: Math.max(0, Math.min(1 - w, x - w / 2)), y: Math.max(0, Math.min(1 - h, y - h / 2)), w, h }] };
+  }
+  const item = { id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, page, color: style.color || "black", width: style.width, createdAt: Date.now(), ...mark };
+  const items = annotations();
+  items.push(item);
+  commitAnnotations(items);
+  renderAnnotations();
+  renderAnnotationList();
+  openAnnotationEditor(item.id, null, { focusNote: item.type === "text" });
+  toast(item.type === "text" ? "Escribe el texto · arrástralo para moverlo" : "Firma colocada · arrástrala para moverla");
+}
+{
+  // Colocar: un toque en la página con la herramienta Texto o Firma.
+  let placing = null;
+  $("viewer").addEventListener("pointerdown", (event) => {
+    placing = null;
+    if (!markerMode || !isPlacingTool() || event.button > 0) return;
+    if (event.target.closest(".annotation-object, #annotationEditor, button, input, textarea")) return;
+    const host = surfaceHostOf(event.target);
+    if (!host) return;
+    // Si el editor estaba abierto, este toque solo lo cierra.
+    placing = { host, x: event.clientX, y: event.clientY, id: event.pointerId, closing: !$("annotationEditor").hidden };
+  });
+  $("viewer").addEventListener("pointerup", (event) => {
+    const tap = placing;
+    placing = null;
+    if (!tap || tap.id !== event.pointerId || tap.closing) return;
+    if (Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 10) return;
+    placeObjectAt(tap.host, event.clientX, event.clientY);
+  });
+  // Mover y redimensionar un texto o una firma.
+  let drag = null;
+  document.addEventListener("pointerdown", (event) => {
+    const node = event.target.closest?.(".annotation-object");
+    if (!node || document.body.classList.contains("ink-drawing-mode") || eraserMode) return;
+    const mark = annotations().find((item) => item.id === node.dataset.annotationId);
+    const host = node.closest(".canvas-wrap, .cont-page, #facingWrap");
+    if (!mark || !host) return;
+    event.preventDefault();
+    node.setPointerCapture?.(event.pointerId);
+    drag = { node, mark, rect: { ...mark.rects[0] }, box: host.getBoundingClientRect(), x: event.clientX, y: event.clientY, id: event.pointerId, resize: Boolean(event.target.closest(".ao-resize")), moved: false };
+  });
+  document.addEventListener("pointermove", (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    const dx = (event.clientX - drag.x) / drag.box.width,
+      dy = (event.clientY - drag.y) / drag.box.height;
+    if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 4) return;
+    drag.moved = true;
+    const r = drag.rect;
+    if (drag.resize) {
+      const w = Math.max(0.04, Math.min(1 - r.x, r.w + dx));
+      drag.next = drag.mark.type === "signature" ? { ...r, w, h: (r.h * w) / r.w } : { ...r, w };
+      drag.node.style.width = `${w * 100}%`;
+      if (drag.mark.type === "signature") drag.node.style.height = `${drag.next.h * 100}%`;
+    } else {
+      drag.next = { ...r, x: Math.max(0, Math.min(1 - r.w, r.x + dx)), y: Math.max(0, Math.min(1 - r.h, r.y + dy)) };
+      drag.node.style.left = `${drag.next.x * 100}%`;
+      drag.node.style.top = `${drag.next.y * 100}%`;
+    }
+  });
+  const endDrag = (event) => {
+    if (!drag || drag.id !== event.pointerId) return;
+    const current = drag;
+    drag = null;
+    if (current.moved && current.next) updateAnnotation(current.mark.id, { rects: [current.next] });
+    else if (event.type === "pointerup") openAnnotationEditor(current.mark.id);
+  };
+  document.addEventListener("pointerup", endDrag);
+  document.addEventListener("pointercancel", endDrag);
 }
 // Anotación de texto (resaltado, subrayado, tachado) bajo un punto de la
 // pantalla: un toque sobre ella abre su editor sin elegir antes ninguna
@@ -8557,11 +9103,65 @@ function renderAnnotations() {
   for (const { host, page } of renderedSurfaces()) renderPageAnnotations(host.querySelector(".annotation-layer"), page, marks);
   renderStickyNotes();
 }
+// Capa de objetos (texto y firmas): por encima del texto, del formulario XFA
+// y del dibujo, para verlos y moverlos en cualquier documento.
+function objectLayerFor(layer) {
+  const host = layer.parentElement;
+  let objects = host?.querySelector(":scope > .object-layer");
+  if (host && !objects) {
+    objects = document.createElement("div");
+    objects.className = "object-layer";
+    host.append(objects);
+  }
+  return objects;
+}
+function renderObjectMark(mark) {
+  const rect = mark.rects?.[0];
+  if (!rect) return null;
+  const el = document.createElement("div");
+  el.className = `annotation-object annotation-${mark.type}`;
+  el.classList.toggle("selected", mark.id === selectedAnnotationId);
+  el.dataset.annotationId = mark.id;
+  el.style.left = `${rect.x * 100}%`;
+  el.style.top = `${rect.y * 100}%`;
+  el.style.width = `${rect.w * 100}%`;
+  el.style.color = annotationStyle(mark.color || "black", 1);
+  if (mark.type === "text") {
+    el.style.minHeight = `${rect.h * 100}%`;
+    el.style.setProperty("--text-size", String(mark.size || 0.016));
+    el.textContent = mark.text || "";
+    if (!mark.text) el.classList.add("is-empty");
+  } else {
+    el.style.height = `${rect.h * 100}%`;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 1 1");
+    svg.setAttribute("preserveAspectRatio", "none");
+    for (const stroke of mark.strokes || []) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", stroke.map((point, index) => `${index ? "L" : "M"}${point[0]} ${point[1]}`).join(" "));
+      path.setAttribute("stroke-width", String(mark.width || 2.2));
+      svg.append(path);
+    }
+    el.append(svg);
+  }
+  const handle = document.createElement("span");
+  handle.className = "ao-resize";
+  handle.setAttribute("aria-hidden", "true");
+  el.append(handle);
+  return el;
+}
 function renderPageAnnotations(layer, pageNumber, marks = annotations()) {
   if (!layer) return;
   layer.replaceChildren();
+  const objects = objectLayerFor(layer);
+  objects?.replaceChildren();
   for (const mark of marks.filter((a) => a.page === pageNumber)) {
     if (mark.type === "sticky") continue;
+    if (mark.type === "text" || mark.type === "signature") {
+      const node = renderObjectMark(mark);
+      if (node) objects?.append(node);
+      continue;
+    }
     if ((mark.type === "pen" || mark.type === "arrow") && mark.points?.length) {
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 1 1");
@@ -8627,7 +9227,7 @@ function renderAnnotationList() {
       annotationFilter === "all"
         ? all
         : annotationFilter === "drawing"
-          ? all.filter((mark) => ["pen", "box", "arrow"].includes(mark.type))
+          ? all.filter((mark) => ["pen", "box", "arrow", "signature", "text"].includes(mark.type))
           : annotationFilter === "note"
             ? all.filter((mark) => mark.note?.trim() || mark.type === "sticky")
             : annotationFilter === "highlight"
@@ -8740,8 +9340,13 @@ function clearLiveHighlight() {
 function isDrawingTool(tool = inkTool) {
   return tool === "pen" || tool === "box" || tool === "arrow";
 }
+// Herramientas que colocan un objeto con un toque (texto y firma).
+function isPlacingTool(tool = inkTool) {
+  return tool === "text" || tool === "signature";
+}
 function syncInkInteractionMode() {
   document.body.classList.toggle("ink-drawing-mode", markerMode && isDrawingTool());
+  document.body.classList.toggle("ink-placing-mode", markerMode && isPlacingTool());
   document.body.classList.toggle("ink-eraser-mode", eraserMode);
   $("inkDrawingLayer").style.setProperty("--draw-color", annotationStyle(annotationColor, inkOpacity));
   $("inkDrawingLayer").style.setProperty("--draw-width", String(inkWidth));
@@ -8968,7 +9573,7 @@ function buildInkPalette() {
     strip.dataset.activeTool = "Marcador";
     strip.hidden = true;
     const toolButton = (tool, icon, label) => `<button data-strip-tool="${tool}" title="${label}" aria-label="${label}">${iconSvg(icon)}<i class="tool-color"></i></button>`;
-    strip.innerHTML = `<div class="ink-strip-inner"><button class="ink-drag-handle" data-strip-drag title="Mover la barra (doble clic para recolocarla)" aria-label="Mover barra Ink">${iconSvg("grip")}</button><span class="ink-sep"></span><button data-strip-select title="Seleccionar y editar anotaciones (S)" aria-label="Seleccionar anotación">${iconSvg("cursor")}</button><span class="ink-sep"></span>${toolButton("pen", "pen", "Pluma libre")}${toolButton("highlight", "highlighter", "Marcador de texto")}<span class="ink-sep"></span>${toolButton("underline", "underline", "Subrayado")}${toolButton("wavy", "wavy", "Subrayado ondulado")}${toolButton("strike", "strike", "Tachado")}<span class="ink-sep"></span>${toolButton("box", "square", "Recuadro")}${toolButton("arrow", "arrow", "Flecha")}<button data-strip-note title="Nota en un punto de la página (N)" aria-label="Añadir nota en la página">${iconSvg("sticky")}</button><span class="ink-sep"></span><button data-strip-eraser title="Goma: toca una anotación para borrarla" aria-label="Goma">${iconSvg("eraser")}</button><button data-strip-color title="Color y grosor de la herramienta" aria-label="Color y grosor"><i class="ink-dot"></i></button><span class="ink-sep"></span><button data-strip-undo title="Deshacer (Ctrl+Z)" aria-label="Deshacer">${iconSvg("back")}</button><button data-strip-redo title="Rehacer (Ctrl+Shift+Z)" aria-label="Rehacer">${iconSvg("forward")}</button><button data-strip-close title="Ocultar la barra Ink" aria-label="Ocultar la barra Ink">${iconSvg("close")}</button></div>`;
+    strip.innerHTML = `<div class="ink-strip-inner"><button class="ink-drag-handle" data-strip-drag title="Mover la barra (doble clic para recolocarla)" aria-label="Mover barra Ink">${iconSvg("grip")}</button><span class="ink-sep"></span><button data-strip-select title="Seleccionar y editar anotaciones (S)" aria-label="Seleccionar anotación">${iconSvg("cursor")}</button><span class="ink-sep"></span>${toolButton("pen", "pen", "Pluma libre")}${toolButton("highlight", "highlighter", "Marcador de texto")}<span class="ink-sep"></span>${toolButton("underline", "underline", "Subrayado")}${toolButton("wavy", "wavy", "Subrayado ondulado")}${toolButton("strike", "strike", "Tachado")}<span class="ink-sep"></span>${toolButton("box", "square", "Recuadro")}${toolButton("arrow", "arrow", "Flecha")}${toolButton("text", "type", "Texto: toca donde quieras escribir")}${toolButton("signature", "signature", "Firma: toca donde quieras colocarla")}<button data-strip-note title="Nota en un punto de la página (N)" aria-label="Añadir nota en la página">${iconSvg("sticky")}</button><span class="ink-sep"></span><button data-strip-eraser title="Goma: toca una anotación para borrarla" aria-label="Goma">${iconSvg("eraser")}</button><button data-strip-color title="Color y grosor de la herramienta" aria-label="Color y grosor"><i class="ink-dot"></i></button><span class="ink-sep"></span><button data-strip-undo title="Deshacer (Ctrl+Z)" aria-label="Deshacer">${iconSvg("back")}</button><button data-strip-redo title="Rehacer (Ctrl+Shift+Z)" aria-label="Rehacer">${iconSvg("forward")}</button><button data-strip-close title="Ocultar la barra Ink" aria-label="Ocultar la barra Ink">${iconSvg("close")}</button></div>`;
     $("openSidebar").closest(".toolbar").append(strip);
     const colors = ["yellow", "green", "blue", "pink", "orange", "purple", "red"];
     const colorCard = document.createElement("div");
@@ -9071,12 +9676,17 @@ function buildInkPalette() {
       updateInkColorCard();
       requestAnimationFrame(() => positionInkColorCard(button));
     };
-    strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = () => {
+    strip.querySelectorAll("[data-strip-tool]").forEach((button) => (button.onclick = async () => {
+      if (button.dataset.stripTool === "signature" && !savedSignature() && !(await openSignaturePad())) return;
       const repeated = button.dataset.stripTool === inkTool && markerMode;
       setInkTool(button.dataset.stripTool);
       if (!markerMode) toggleMarkerMode();
       updateStrip();
-      openToolStyle(button, repeated);
+      // Texto y firma se ajustan en su propio editor al colocarlos.
+      if (isPlacingTool(button.dataset.stripTool)) {
+        $("inkColorCard")?.setAttribute("hidden", "");
+        toast(button.dataset.stripTool === "text" ? "Toca donde quieras escribir" : "Toca donde quieras colocar la firma");
+      } else openToolStyle(button, repeated);
     }));
     strip.querySelector("[data-strip-select]").onclick = () => setAnnotationSelectMode();
     strip.querySelector("[data-strip-eraser]").onclick = () => { toggleEraserMode(); updateStrip(); };
@@ -11826,7 +12436,7 @@ $("viewer").addEventListener("pointerup", (event) => {
   const touch = event.pointerType !== "mouse";
   if (moved > (touch ? 12 : 8) || performance.now() - tap.time > 600 || markerMode || eraserMode || stickyPlacement) return;
   if (document.body.classList.contains("ink-drawing-mode") || $("captureOverlay").classList.contains("show")) return;
-  if (event.target.closest("a, button, input, textarea, select, label, .sticky-pin, .hover-preview, .annotation-actions, #annotationEditor")) return;
+  if (event.target.closest("a, button, input, textarea, select, label, .sticky-pin, .hover-preview, .annotation-actions, #annotationEditor, .annotation-object")) return;
   // Un toque sobre un resaltado o subrayado abre su editor (y no oculta la
   // interfaz). Se comprueba antes de nada porque el toque cae sobre el texto.
   const annotationId = !tap.selection.trim() ? textAnnotationAt(event.clientX, event.clientY) : "";

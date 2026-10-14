@@ -762,3 +762,53 @@ body.ink-drawing-mode .xfa-host * { pointer-events: none !important; }
 /* Tonos oscuros: el formulario se invierte como la página. */
 html[data-page-dark] .xfa-host { filter: var(--page-filter); }
 .lib-cover.is-form { background: linear-gradient(150deg, #3d8b7a, #1f5a4e); }
+
+/* ---- Texto y firma sobre la página ---- */
+.object-layer { position: absolute; inset: 0; z-index: 6; pointer-events: none; container-type: size; }
+.annotation-object { position: absolute; pointer-events: auto; touch-action: none; cursor: grab; border-radius: 3px; -webkit-user-select: none; user-select: none; }
+.annotation-object:active { cursor: grabbing; }
+.annotation-text { padding: 0; font-family: Helvetica, Arial, sans-serif; font-size: calc(var(--text-size, .016) * 100cqh); line-height: 1.25; white-space: pre-wrap; overflow-wrap: anywhere; }
+.annotation-text.is-empty::before { content: "Texto"; opacity: .35; }
+.annotation-signature svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.annotation-signature path { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.annotation-object.selected, .annotation-object:hover { outline: 1.5px dashed #3b7cff; outline-offset: 3px; }
+.annotation-object .ao-resize { position: absolute; right: -9px; bottom: -9px; width: 16px; height: 16px; border: 2px solid #fff; border-radius: 50%; background: #3b7cff; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); cursor: nwse-resize; opacity: 0; }
+.annotation-object.selected .ao-resize { opacity: 1; }
+@media (pointer: coarse) { .annotation-object .ao-resize { width: 22px; height: 22px; right: -12px; bottom: -12px; } }
+/* Con Texto o Firma, un toque en la página coloca el objeto. */
+body.ink-placing-mode :is(.textLayer, .xfa-host, .annotation-layer, .link-layer) { pointer-events: none !important; }
+body.ink-placing-mode :is(.textLayer, .xfa-host) * { pointer-events: none !important; }
+body.ink-placing-mode :is(.canvas-wrap, .cont-page, #facingWrap) { cursor: copy; }
+body.ink-drawing-mode .object-layer { pointer-events: none; }
+body.ink-drawing-mode .annotation-object { pointer-events: none; }
+.annotation-editor .ae-text { width: 100%; min-height: 70px; margin-top: 4px; font-size: 15px; }
+.annotation-editor .ae-row { display: flex; gap: 6px; margin-top: 8px; }
+.annotation-editor .ae-row .btn { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; }
+.annotation-editor .ae-row .ui-icon { width: 15px; height: 15px; }
+
+/* Panel para dibujar la firma */
+.signature-pad { position: fixed; inset: 0; z-index: 220; display: grid; place-items: center; padding: 16px; background: rgba(12, 15, 22, .45); }
+.sp-card { width: min(560px, 100%); display: grid; gap: 12px; padding: 16px; border-radius: 18px; background: var(--surface-solid); color: var(--text); box-shadow: 0 30px 80px rgba(0, 0, 0, .35); }
+.sp-card header strong { display: block; font-size: 17px; }
+.sp-card header small { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; }
+.sp-area { position: relative; height: 220px; border: 1px solid var(--line); border-radius: 14px; background: #fff; overflow: hidden; }
+.sp-area canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+.sp-line { position: absolute; left: 24px; right: 24px; bottom: 54px; border-bottom: 1.5px dashed #c8ccd4; pointer-events: none; }
+.sp-card footer { display: flex; align-items: center; gap: 8px; }
+.sp-card footer span { flex: 1; }
+.sp-card footer .btn { min-height: 38px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; }
+.sp-card footer .primary { border-color: var(--text); background: var(--text); color: var(--surface-solid); font-weight: 650; }
+.sp-card footer .primary:disabled { opacity: .4; }
+
+/* Elegir una opción (p. ej. cómo guardar un formulario) */
+.choose-dialog { z-index: 210; }
+.choose-dialog .lib-dialog-card { width: min(420px, 100%); }
+.choose-dialog p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.choose-options { display: grid; gap: 8px; }
+.choose-option { display: grid; gap: 3px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-solid); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.choose-option strong { font-size: 14.5px; }
+.choose-option small { color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+.choose-option.is-primary { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.choose-option:hover { background: var(--soft); }
+/* Página XFA que se copia al PDF para enviar: fuera de la vista, pero con su maquetación. */
+.xfa-export-stage { position: fixed; left: -30000px; top: 0; pointer-events: none; }
