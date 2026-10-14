@@ -1,4 +1,4 @@
-import { pdfjsLib, openPdfBlob } from "./pdf-engine.js?v=1";
+import { pdfjsLib, openPdfBlob } from "./pdf-engine.js?v=2";
 
 import {
   openDatabase,
@@ -1084,6 +1084,14 @@ async function ensureBookCover(rec, doc = null) {
     let own = null;
     try {
       const source = doc || (own = await openPdfBlob(rec.blob));
+      // Un formulario XFA no tiene página que fotografiar (se dibuja en HTML):
+      // portada propia con su nombre.
+      if (isXfaDocument(source)) {
+        const fresh = (await dbGet(rec.id)) || rec;
+        Object.assign(fresh, { xfa: true, cover: null, coverChecked: true });
+        await dbPut(fresh);
+        return;
+      }
       const cover = await renderPdfCover(source);
       if (!cover) return;
       const fresh = (await dbGet(rec.id)) || rec;
@@ -1135,9 +1143,9 @@ async function ensureEpubCover(rec) {
 function libraryCoverHtml(book, url, large = false) {
   const isMarkdown = book.kind === "markdown";
   const name = libraryDisplayName(book.title || book.name);
-  return `<span class="lib-cover${isMarkdown ? " is-markdown" : ""}${book.kind === "epub" ? " is-epub" : ""}${url ? " has-image" : ""}${large ? " is-large" : ""}" data-cover-for="${encodeURIComponent(book.id)}">${
+  return `<span class="lib-cover${isMarkdown ? " is-markdown" : ""}${book.kind === "epub" ? " is-epub" : ""}${book.xfa ? " is-form" : ""}${url ? " has-image" : ""}${large ? " is-large" : ""}" data-cover-for="${encodeURIComponent(book.id)}">${
     url ? `<img src="${url}" alt="" loading="lazy">` : ""
-  }<span class="lib-cover-fallback"><b>${escapeHtml(name.slice(0, 80))}</b></span><span class="lib-badge">${isMarkdown ? "MD" : book.kind === "epub" ? "EPUB" : "PDF"}</span></span>`;
+  }<span class="lib-cover-fallback"><b>${escapeHtml(name.slice(0, 80))}</b></span><span class="lib-badge">${isMarkdown ? "MD" : book.kind === "epub" ? "EPUB" : book.xfa ? "FORM" : "PDF"}</span></span>`;
 }
 // ---- Carpetas de la biblioteca ----
 // `paper.folders` guarda la lista de carpetas ({ id, name, parent }) y cada
@@ -2107,6 +2115,12 @@ async function openStored(id) {
     }
     // A partir de aquí no hay esperas hasta el primer render: el documento
     // nuevo y su estado se asignan juntos.
+    restoreXfaValues(loadedDoc, rec.id);
+    // Portada antigua de un formulario XFA: era la página «Please wait…».
+    if (isXfaDocument(loadedDoc) && !rec.xfa) {
+      Object.assign(rec, { xfa: true, cover: null, coverChecked: true });
+      await dbPut(rec);
+    }
     pdfDoc = loadedDoc;
     currentBook = rec;
     if (!rec.cover) ensureBookCover(rec, pdfDoc);
@@ -2347,6 +2361,98 @@ function navigateForward() {
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const CANVAS_PIXELS_PER_PAGE = IS_IOS ? 12_000_000 : 24_000_000;
 const CANVAS_PIXELS_TOTAL = IS_IOS ? 60_000_000 : 260_000_000;
+// ---- Formularios XFA dinámicos ----
+// Algunos PDF (formularios de administraciones, sobre todo) no traen páginas
+// dibujadas sino una plantilla XFA. pdf.js la convierte en HTML con campos de
+// verdad: se coloca sobre cada página, encima de la capa de texto. Lo que se
+// escribe se guarda en este dispositivo y se puede exportar dentro del PDF.
+function isXfaDocument(doc = pdfDoc) {
+  return Boolean(doc?.isPureXfa);
+}
+function ensureXfaStyles() {
+  if (document.getElementById("xfaStyles")) return;
+  const link = document.createElement("link");
+  link.id = "xfaStyles";
+  link.rel = "stylesheet";
+  link.href = "xfa-layer.css?v=1";
+  document.head.append(link);
+}
+const xfaLinkService = {
+  addLinkAttributes(link, url, newWindow) {
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  },
+  getDestinationHash: () => "#",
+  getAnchorUrl: () => "#",
+  navigateTo() {},
+  goToDestination() {},
+  executeNamedAction() {},
+  eventBus: null,
+};
+const xfaHtmlCache = new Map();
+async function renderXfaLayer(host, page, viewport) {
+  let layer = host?.querySelector(":scope > .xfa-host");
+  if (!host || !isXfaDocument()) {
+    layer?.remove();
+    return;
+  }
+  ensureXfaStyles();
+  const cacheKey = `${currentBook?.id}:${page.pageNumber}`;
+  let xfaHtml = xfaHtmlCache.get(cacheKey);
+  if (!xfaHtml) {
+    xfaHtml = await page.getXfa();
+    touchCache(xfaHtmlCache, cacheKey, xfaHtml, 40);
+  }
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.className = "xfa-host";
+    host.append(layer);
+  }
+  layer.dataset.page = String(page.pageNumber);
+  const div = document.createElement("div");
+  layer.replaceChildren(div);
+  pdfjsLib.XfaLayer.render({ viewport: viewport.clone({ dontFlip: true }), div, xfaHtml, annotationStorage: pdfDoc.annotationStorage, linkService: xfaLinkService, intent: "display" });
+}
+// Valores del formulario: se guardan al escribir y se recuperan al abrirlo.
+let xfaSaveTimer = 0;
+function saveXfaValues() {
+  clearTimeout(xfaSaveTimer);
+  if (!currentBook || !isXfaDocument()) return;
+  const values = pdfDoc.annotationStorage.getAll?.() || null;
+  if (values) setJSON(key(currentBook.id, "xfa-values"), values);
+}
+function restoreXfaValues(doc, id) {
+  const values = getJSON(key(id, "xfa-values"), null);
+  if (!values || !isXfaDocument(doc)) return;
+  for (const [field, value] of Object.entries(values)) doc.annotationStorage.setValue(field, value);
+}
+for (const type of ["input", "change"]) {
+  document.addEventListener(type, (event) => {
+    if (!event.target.closest?.(".xfa-host")) return;
+    clearTimeout(xfaSaveTimer);
+    xfaSaveTimer = setTimeout(saveXfaValues, 400);
+  }, true);
+}
+window.addEventListener("pagehide", saveXfaValues);
+// Exporta el PDF con los datos escritos dentro del propio formulario XFA.
+async function exportXfaForm() {
+  if (!isXfaDocument()) return false;
+  saveXfaValues();
+  try {
+    const bytes = await pdfDoc.saveDocument();
+    const name = `${(currentBook?.name || "formulario").replace(/\.pdf$/i, "")}-rellenado.pdf`;
+    const blob = new Blob([bytes], { type: "application/pdf" });
+    const file = new File([blob], name, { type: "application/pdf" });
+    if (window.innerWidth <= 900 && navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: name }).catch(() => downloadBlob(name, blob));
+    else downloadBlob(name, blob);
+    toast("Formulario guardado con los datos escritos");
+  } catch (error) {
+    console.error(error);
+    toast("No se pudo guardar el formulario");
+  }
+  return true;
+}
 async function renderPageGraphics(pageNumber, targets, token) {
   const page = await getCachedPage(pageNumber);
   if (token !== undefined && token !== renderToken) return null;
@@ -2371,7 +2477,9 @@ async function renderPageGraphics(pageNumber, targets, token) {
     throw error;
   }
   if (token !== undefined && token !== renderToken) return null;
-  if (textLayer) {
+  await renderXfaLayer(sizeTarget || canvas.parentElement, page, viewport);
+  if (textLayer && isXfaDocument()) textLayer.replaceChildren();
+  else if (textLayer) {
     textLayer.replaceChildren();
     textLayer.style.width = `${viewport.width}px`;
     textLayer.style.height = `${viewport.height}px`;
@@ -2494,7 +2602,7 @@ function scheduleOcrCheck() {
   ocrCheckTimer = setTimeout(checkOcrNeeded, 400);
 }
 async function checkOcrNeeded() {
-  if (!pdfDoc || !currentBook || currentBook.kind === "markdown" || ocrRun) return;
+  if (!pdfDoc || !currentBook || currentBook.kind === "markdown" || ocrRun || isXfaDocument()) return;
   const page = currentPage;
   const needed = !pageOcr(page) && !(await pageHasNativeText(page).catch(() => true));
   if (page !== currentPage || ocrRun) return;
@@ -5037,6 +5145,7 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   updatePageChrome();
   if (anchor) restoreZoomAnchor(anchor);
   else if (resetScroll) $("viewer").scrollTo({ top: 0, left: 0 });
+  await renderXfaLayer($("canvasWrap"), page, viewport);
   await renderTextLayer(page, viewport);
   if (token !== renderToken || requestId !== pageRenderRequestId) return false;
   renderLinkLayer(page, viewport, token);
@@ -5282,6 +5391,8 @@ function scheduleScrubPage(pageNumber) {
 async function renderTextLayer(page, viewport) {
   const layer = $("textLayer");
   layer.replaceChildren();
+  // En un formulario XFA el texto ya está en su capa HTML (seleccionable).
+  if (isXfaDocument()) return;
   layer.style.width = `${viewport.width}px`;
   layer.style.height = `${viewport.height}px`;
   layer.style.setProperty("--scale-factor", String(viewport.scale));
@@ -7929,6 +8040,9 @@ async function buildAnnotatedPdf({ includeBoard = true } = {}) {
 }
 async function exportAnnotatedPdf() {
   if (!pdfDoc || !currentBook || currentBook.kind === "markdown") return toast("Abre un PDF primero");
+  // Un formulario XFA se guarda con sus datos (las anotaciones encima no se
+  // verían: los visores dibujan el formulario, no las páginas).
+  if (await exportXfaForm()) return;
   showLoader(true, "Preparando el PDF anotado…", "Escribiendo las anotaciones en el documento");
   try {
     const { bytes, count, boardPages } = await buildAnnotatedPdf();
@@ -11525,7 +11639,7 @@ function mobileMoreItems() {
     { id: "study", icon: "check", label: "Estudiar", when: hasDoc, run: () => openStudy() },
     { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
     { id: "themes", icon: "textSize", label: "Temas y ajustes", when: hasDoc, run: openThemeSheet },
-    { id: "pdf", icon: "download", label: "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
+    { id: "pdf", icon: "download", label: isXfaDocument() ? "Guardar formulario" : "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
     { id: "ocr", icon: "scan", label: "Reconocer texto (OCR)", when: hasPdf, run: () => runOcr("all") },
     { id: "markdown", icon: "copy", label: "Exportar notas", when: hasDoc, run: exportMarkdown },
     { id: "backup", icon: "database", label: "Copia y sincronización", run: openDataPanel },

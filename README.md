@@ -120,6 +120,10 @@ Incluye:
 - **Temas y ajustes** (Vista, menú «⋯» o paleta), como en Libros de Apple, con vista previa en vivo del propio texto: seis temas (Original, Silencio, Papel, Negrita, Calma, Enfoque) y ajustes de letra (con muestras), tamaño, negrita, interlineado, espacio entre letras y palabras, ancho de línea, alineación, separación de palabras, columnas, papel, color de las páginas del PDF y tema de la interfaz.
 - **Bloqueo de eje** al desplazar con el dedo una página ampliada: un gesto casi vertical ya no mueve la página de lado (ni uno casi horizontal en vertical); en diagonal se mueve libre.
 
+### Novedades v14: formularios XFA
+
+- **Formularios XFA dinámicos** (los de muchas administraciones, como la AEAT, que en otros visores solo muestran «Please wait… your PDF viewer may not be able to display this type of document»): se abren con su contenido real y sus campos se pueden rellenar. Lo escrito se guarda en el dispositivo y se recupera al volver a abrirlos; «Guardar formulario» (menú «⋯») descarga el PDF con los datos dentro. En la biblioteca tienen portada propia (FORM). Funciona en una página, doble página y scroll continuo, y con la pluma se puede dibujar encima.
+
 ### Pruebas
 
 ```bash

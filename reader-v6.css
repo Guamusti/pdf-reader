@@ -749,3 +749,16 @@ html.ui4 .toolbar #stickyNoteBtn { display: none !important; }
 .annotation-entry:hover .annotation-remove { opacity: 1; }
 .annotation-entry .bookmark small.ae-entry-note { display: flex !important; flex-direction: row; }
 .annotation-entry .bookmark .ae-entry-note .ui-icon { display: inline-block; }
+
+/* ---- Formularios XFA: su capa HTML encima de la página ---- */
+.xfa-host { position: absolute; inset: 0; z-index: 4; overflow: hidden; }
+.xfa-host .xfaLayer { background: transparent; }
+/* Campos: se ven como campos (fondo azulado suave) y se pueden escribir. */
+.xfa-host :is(input, textarea, select) { color: #111; }
+.xfa-host :is(input, textarea):focus { outline: 2px solid #3b7cff; outline-offset: -1px; }
+/* Con la pluma o el recuadro, el dibujo va por encima del formulario. */
+body.ink-drawing-mode .xfa-host { pointer-events: none; }
+body.ink-drawing-mode .xfa-host * { pointer-events: none !important; }
+/* Tonos oscuros: el formulario se invierte como la página. */
+html[data-page-dark] .xfa-host { filter: var(--page-filter); }
+.lib-cover.is-form { background: linear-gradient(150deg, #3d8b7a, #1f5a4e); }

@@ -24,5 +24,8 @@ export function loadPdfEngine() {
 export async function openPdfBlob(blob) {
   // Leer el archivo y cargar el motor en paralelo evita una espera adicional.
   const [engine, buffer] = await Promise.all([loadPdfEngine(), blob.arrayBuffer()]);
-  return engine.getDocument({ data: new Uint8Array(buffer) }).promise;
+  // enableXfa: los formularios XFA dinámicos (los de «Please wait… your PDF
+  // viewer may not be able to display this type of document») se abren con su
+  // contenido real en lugar de esa página de aviso.
+  return engine.getDocument({ data: new Uint8Array(buffer), enableXfa: true }).promise;
 }
