@@ -13401,6 +13401,7 @@ window.addEventListener("keydown", (e) => {
     hideAnnotationActions();
     if (selectedAnnotationId) closeAnnotationEditor();
     $("toolPopover").classList.remove("open");
+    closeViewMenu();
   }
 });
 // Botones laterales del ratón: atrás (3) / adelante (4) en el historial de vistas.
