@@ -6678,31 +6678,36 @@ function bindPaneResizer(resizer, onDone) {
   };
   const currentWidth = () => parseInt(getComputedStyle(document.body).getPropertyValue("--split-w"), 10) || 0;
   const half = () => document.querySelector(".main").getBoundingClientRect().width / 2;
+  // `lastTap`: el último toque sin arrastre (el final de un arrastre no cuenta
+  // como primer toque de un doble toque).
   resizer.addEventListener("pointerdown", (event) => {
     event.preventDefault();
-    const now = Date.now();
-    if (now - lastTap < 350) {
+    if (lastTap && Date.now() - lastTap.time < 350 && Math.hypot(event.clientX - lastTap.x, event.clientY - lastTap.y) < 16) {
       lastTap = 0;
       setSplitWidth(half());
       return done();
     }
-    lastTap = now;
-    drag = { id: event.pointerId, moved: false };
+    lastTap = 0;
+    drag = { id: event.pointerId, moved: false, x: event.clientX, y: event.clientY };
     resizer.setPointerCapture(event.pointerId);
     document.body.classList.add("split-resizing");
   });
   resizer.addEventListener("pointermove", (event) => {
     if (!drag || drag.id !== event.pointerId) return;
+    if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 3) return;
     drag.moved = true;
     const main = document.querySelector(".main").getBoundingClientRect();
     setSplitWidth(main.right - event.clientX, false);
   });
   const finish = (event) => {
     if (!drag || drag.id !== event.pointerId) return;
-    const moved = drag.moved;
+    const { moved, x, y } = drag;
     drag = null;
     document.body.classList.remove("split-resizing");
-    if (!moved) return;
+    if (!moved) {
+      lastTap = { time: Date.now(), x, y };
+      return;
+    }
     setSplitWidth(currentWidth());
     done();
   };

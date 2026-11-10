@@ -75,6 +75,7 @@ test("PDF normal: texto y firma incrustados, moverlos y reutilizar la firma", as
   const box = await page.locator("#canvasWrap").boundingBox();
   await chooseTool(page, "text");
   await page.mouse.click(box.x + box.width * 0.1, box.y + 380);
+  await expect(page.locator("#annotationEditor [data-editor-text]")).toBeFocused();
   await page.keyboard.type("Revisado por Ana");
   await page.waitForTimeout(600);
   await page.mouse.click(box.x + box.width * 0.5, box.y + 560);

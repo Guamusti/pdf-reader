@@ -74,6 +74,12 @@ test("abrir otro PDF al lado, ajustar el ancho, mitad y mitad e intercambiar", a
   await page.mouse.up();
   const main = await page.evaluate(() => document.querySelector(".main").getBoundingClientRect().width);
   expect(await splitWidth(page)).toBeLessThanOrEqual(main - 240 + 1);
+  // Un toque justo después de arrastrar no cuenta como doble toque.
+  const dragged = await splitWidth(page);
+  await handle.click();
+  expect(Math.abs((await splitWidth(page)) - dragged)).toBeLessThan(2);
+  await expect(page.locator("body")).not.toHaveClass(/reader-chrome-hidden/);
+  await page.waitForTimeout(400);
   // Doble clic: mitad y mitad (y se recuerda).
   await handle.dblclick();
   await expect.poll(async () => Math.abs((await splitWidth(page)) - main / 2)).toBeLessThan(3);
