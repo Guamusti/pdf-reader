@@ -37,11 +37,20 @@ test("abrir otro PDF al lado, ajustar el ancho, mitad y mitad e intercambiar", a
   await page.mouse.wheel(0, 300);
   await expect(page.locator("#splitPane .own-scrollbar-y")).toHaveClass(/is-active/);
   const thumb = page.locator("#splitPane .own-scrollbar-y .own-scrollbar-thumb");
+  // Se espera a que termine el desplazamiento (puede ser animado) antes de medir el asa.
+  const scrollTop = () => page.evaluate(() => document.querySelector("#splitScroll").scrollTop);
+  let scrolled = -1;
+  await expect.poll(async () => {
+    const previous = scrolled;
+    scrolled = await scrollTop();
+    await page.waitForTimeout(150);
+    return scrolled > 0 && scrolled === previous;
+  }).toBe(true);
   const tb = await thumb.boundingBox();
-  const scrolled = await page.evaluate(() => document.querySelector("#splitScroll").scrollTop);
-  await page.mouse.move(tb.x + tb.width / 2, tb.y + 5);
+  const y = tb.y + tb.height / 2;
+  await page.mouse.move(tb.x + tb.width / 2, y);
   await page.mouse.down();
-  await page.mouse.move(tb.x + tb.width / 2, tb.y + 150, { steps: 5 });
+  await page.mouse.move(tb.x + tb.width / 2, y + 150, { steps: 5 });
   await page.mouse.up();
   await expect.poll(() => page.evaluate(() => document.querySelector("#splitScroll").scrollTop)).toBeGreaterThan(scrolled + 100);
 
