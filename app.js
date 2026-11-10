@@ -592,7 +592,7 @@ function formatBytes(bytes) {
 // Un único archivo .paperbackup con la biblioteca (opcionalmente sin los PDFs),
 // todas las notas, anotaciones, tarjetas y ajustes. Puede cifrarse con una
 // contraseña. Restaurar combina: no borra nada de lo que ya tengas.
-const DEVICE_ONLY_KEYS = /^paper\.(signature|library-folder|notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|ai-profile|ai-server|ai-webllm-consent|ai-vision-consent|sync-[\w-]+|__[\w-]+)$/;
+const DEVICE_ONLY_KEYS = /^paper\.(signature|split-doc|library-folder|notes-window|assistant-window|ink-position|notes-minimized|footer-minimized|design-version|last-backup-at|split-width|ai-profile|ai-server|ai-webllm-consent|ai-vision-consent|sync-[\w-]+|__[\w-]+)$/;
 async function exportFullBackup({ includeFiles = true, passphrase = "" } = {}) {
   if (!db) return toast("El almacenamiento local no está disponible");
   await kv.flush().catch(() => {});
@@ -1336,7 +1336,16 @@ async function openMoveBookMenu(anchor, id) {
     toast(folder ? `«${libraryDisplayName(book.name)}» → ${folderPath(folder).map((f) => f.name).join(" › ")}` : `«${libraryDisplayName(book.name)}» está ahora fuera de las carpetas`);
     renderLibrary();
   };
+  // Abrir al lado: junto al PDF que se está leyendo (vista dividida).
+  const canSplit = !isTextBook(book) && pdfDoc && currentBook && window.innerWidth >= SPLIT_MIN_VIEWPORT;
+  const sideBySide = canSplit
+    ? [{ label: id === currentBook.id ? "Abrir también a la derecha" : "Abrir al lado del actual", icon: "split", run: () => {
+        closeLibrary();
+        openSplitView({ id, page: id === currentBook.id ? currentPage : savedPageOf(id) });
+      } }]
+    : [];
   openLibraryMenu(anchor, [
+    ...sideBySide,
     { heading: "Mover a" },
     ...folderTargets(current).map((target) => ({ label: target.label, icon: target.id ? "folder" : "library", depth: target.depth, checked: target.checked, run: () => target.id !== current && move(target.id) })),
     { label: "Nueva carpeta…", icon: "plus", run: async () => {
@@ -1477,7 +1486,7 @@ async function renderLibrary() {
           const detail = state === "done" ? "Terminado" : state === "new" ? `Sin empezar · ≈ ${formatReadingDuration(stats.remainingMs, true)}` : `≈ ${formatReadingDuration(stats.remainingMs, true)} restantes`;
           // Al buscar o filtrar se mezclan carpetas: se indica dónde está cada uno.
           const where = !browsing && bookFolder(book.id) && bookFolder(book.id) !== folder ? `<span class="lib-where">${iconSvg("folder")}${escapeHtml(folderPath(bookFolder(book.id), folders).map((item) => item.name).join(" › "))}</span>` : "";
-          return `<article class="lib-book${isCurrent ? " is-current" : ""} is-${state}" draggable="true" data-book-drag="${encodeURIComponent(book.id)}"><button class="lib-open" data-id="${encodeURIComponent(book.id)}" title="${escapeHtml(book.name)}">${libraryCoverHtml(book, coverUrl(book))}<span class="lib-info"><strong class="lib-name">${escapeHtml(libraryDisplayName(book.title || book.name))}</strong>${where}<span class="lib-meta">${pageInfo}${state === "reading" ? ` · ${stats.progress}%` : ""}</span><span class="lib-detail">${isCurrent ? "Abierto ahora" : detail}</span><span class="lib-when">${relativeTime(book.openedAt)}</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i></span></button><button class="lib-move" data-move-book="${encodeURIComponent(book.id)}" aria-label="Mover ${escapeHtml(book.name)} a una carpeta" title="Mover a una carpeta">${iconSvg("folder")}</button><button class="lib-remove" data-remove-book="${encodeURIComponent(book.id)}" aria-label="Eliminar ${escapeHtml(book.name)}" title="Eliminar de la biblioteca">${iconSvg("trash")}</button></article>`;
+          return `<article class="lib-book${isCurrent ? " is-current" : ""} is-${state}" draggable="true" data-book-drag="${encodeURIComponent(book.id)}"><button class="lib-open" data-id="${encodeURIComponent(book.id)}" title="${escapeHtml(book.name)}">${libraryCoverHtml(book, coverUrl(book))}<span class="lib-info"><strong class="lib-name">${escapeHtml(libraryDisplayName(book.title || book.name))}</strong>${where}<span class="lib-meta">${pageInfo}${state === "reading" ? ` · ${stats.progress}%` : ""}</span><span class="lib-detail">${isCurrent ? "Abierto ahora" : detail}</span><span class="lib-when">${relativeTime(book.openedAt)}</span><i class="lib-progress"><b style="width:${stats.progress}%"></b></i></span></button><button class="lib-move" data-move-book="${encodeURIComponent(book.id)}" aria-label="Opciones de ${escapeHtml(book.name)}" title="Abrir al lado o mover a una carpeta">${iconSvg("more")}</button><button class="lib-remove" data-remove-book="${encodeURIComponent(book.id)}" aria-label="Eliminar ${escapeHtml(book.name)}" title="Eliminar de la biblioteca">${iconSvg("trash")}</button></article>`;
         })
         .join("")
     : folder && browsing
@@ -1676,6 +1685,7 @@ async function addFile(file, open = true) {
       ensureBookCover(record);
       if (!$("libraryPanel").hidden) renderLibrary();
     }
+    return id;
   } catch (e) {
     console.error(e);
     toast("No se pudo guardar el PDF");
@@ -4265,6 +4275,7 @@ const ICONS = {
   square: '<rect x="4" y="4" width="16" height="16" rx="2"/>',
   arrow: '<path d="M7 17 17 7"/><path d="M8 7h9v9"/>',
   split: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/>',
+  swap: '<path d="M7 7h12l-3.5-3.5M17 17H5l3.5 3.5"/>',
   database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   palette: '<circle cx="13.5" cy="6.5" r="1.3"/><circle cx="17.5" cy="10.5" r="1.3"/><circle cx="8.5" cy="7.5" r="1.3"/><circle cx="6.5" cy="12.5" r="1.3"/><path d="M12 2a10 10 0 0 0 0 20c.9 0 1.6-.7 1.6-1.6 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.6 1.6-1.6H16a6 6 0 0 0 6-6c0-4.9-4.5-8.6-10-8.6"/>',
 };
@@ -6237,25 +6248,84 @@ function bindReferencesPanel() {
 // ---- Vista dividida ----
 // Un segundo lector independiente a la derecha: otro documento de la
 // biblioteca o el mismo en otra página (la bibliografía, una figura…).
+// Cada lado tiene al menos SPLIT_MIN_SIDE px; el ancho del panel derecho se
+// guarda en este dispositivo (y lo comparte la pizarra).
 const split = { id: "", doc: null, own: false, zoom: 1, scale: 1, observer: null, rendered: new Set(), token: 0, frame: 0 };
+const SPLIT_MIN_VIEWPORT = 600;
+const SPLIT_MIN_SIDE = 240;
 function splitOpen() {
   return document.body.classList.contains("split-open");
 }
-function applySplitWidth() {
-  const saved = Number(kv.getItem("paper.split-width")) || Math.round(window.innerWidth * 0.42);
+function clampSplitWidth(width) {
   const main = document.querySelector(".main").getBoundingClientRect();
-  const width = Math.max(280, Math.min(main.width - 320, saved));
-  document.body.style.setProperty("--split-w", `${width}px`);
+  return Math.round(Math.max(SPLIT_MIN_SIDE, Math.min(main.width - SPLIT_MIN_SIDE, width)));
 }
-async function openSplitView({ id = currentBook?.id, page = currentPage } = {}) {
+// Sin un ancho guardado, la vista dividida empieza mitad y mitad y la
+// pizarra con algo menos de la mitad de la ventana.
+function applySplitWidth() {
+  const main = document.querySelector(".main").getBoundingClientRect();
+  const saved = Number(kv.getItem("paper.split-width")) || Math.round(splitOpen() ? main.width / 2 : window.innerWidth * 0.42);
+  document.body.style.setProperty("--split-w", `${clampSplitWidth(saved)}px`);
+}
+function setSplitWidth(width, save = true) {
+  const value = clampSplitWidth(width);
+  document.body.style.setProperty("--split-w", `${value}px`);
+  if (save) kv.setItem("paper.split-width", String(value));
+  return value;
+}
+// Al pulsar «Dividir»: el último documento que estuvo al lado o, si no, el
+// PDF abierto más recientemente (que no sea el de la izquierda).
+async function defaultSplitDocId() {
+  const pdfs = (await dbAll()).filter((record) => !isTextBook(record));
+  const remembered = kv.getItem("paper.split-doc");
+  if (remembered && remembered !== currentBook?.id && pdfs.some((record) => record.id === remembered)) return remembered;
+  const other = pdfs.filter((record) => record.id !== currentBook?.id).sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0))[0];
+  return other?.id || currentBook?.id;
+}
+function savedPageOf(id) {
+  return Math.max(1, Number(kv.getItem(key(id, "page")) || 1));
+}
+async function openSplitView({ id, page } = {}) {
   if (!currentBook || !pdfDoc) return toast("Abre un PDF primero");
-  if (window.innerWidth < 760) return toast("La vista dividida necesita una pantalla más ancha");
+  if (window.innerWidth < SPLIT_MIN_VIEWPORT) return toast("La vista dividida necesita una pantalla más ancha: gira el dispositivo");
   if (boardOpen()) closeBoard();
+  id ||= await defaultSplitDocId();
+  page ||= id === currentBook.id ? currentPage : savedPageOf(id);
   document.body.classList.add("split-open");
   $("splitPane").hidden = false;
+  $("splitViewBtn")?.setAttribute("aria-pressed", "true");
   applySplitWidth();
   scheduleLayoutRefit();
-  await loadSplitDocument(id || currentBook.id, page);
+  await loadSplitDocument(id, page);
+}
+// Pasa el documento de la derecha a la izquierda y viceversa.
+async function swapSplitSides() {
+  if (!splitOpen() || !currentBook || !split.id || split.id === currentBook.id) return toast("Elige otro documento en el lado derecho para intercambiarlos");
+  const left = { id: currentBook.id, page: currentPage };
+  const right = { id: split.id, page: splitCurrentPage() };
+  kv.setItem(key(right.id, "page"), String(right.page));
+  await openDocument(right.id);
+  if (!splitOpen()) return;
+  await loadSplitDocument(left.id, left.page);
+}
+// «Abrir otro archivo…»: se guarda en la biblioteca y se abre a la derecha.
+function pickSplitFile() {
+  let input = $("splitFileInput");
+  if (!input) {
+    input = document.createElement("input");
+    Object.assign(input, { type: "file", id: "splitFileInput", accept: "application/pdf,.pdf", hidden: true });
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      input.value = "";
+      if (!file) return;
+      if (!(file.type === "application/pdf" || /\.pdf$/i.test(file.name))) return toast("En la vista dividida se abren PDFs");
+      const id = await addFile(file, false);
+      if (id && splitOpen()) await loadSplitDocument(id, 1);
+      else if (id) await openSplitView({ id, page: 1 });
+    });
+    document.body.append(input);
+  }
+  input.click();
 }
 function closeSplitView() {
   split.token++;
@@ -6264,6 +6334,7 @@ function closeSplitView() {
   Object.assign(split, { id: "", doc: null, own: false });
   $("splitPane").hidden = true;
   document.body.classList.remove("split-open");
+  $("splitViewBtn")?.setAttribute("aria-pressed", "false");
   scheduleLayoutRefit();
 }
 function toggleSplitView() {
@@ -6277,7 +6348,8 @@ function teardownSplitPages() {
 }
 async function populateSplitSelect() {
   const records = (await dbAll()).filter((record) => !isTextBook(record)).sort((a, b) => libraryDisplayName(a.name).localeCompare(libraryDisplayName(b.name), "es", { numeric: true }));
-  $("splitDoc").innerHTML = records.map((record) => `<option value="${escapeHtml(record.id)}"${record.id === split.id ? " selected" : ""}>${escapeHtml(libraryDisplayName(record.name))}</option>`).join("");
+  $("splitDoc").innerHTML = `<optgroup label="Biblioteca">${records.map((record) => `<option value="${escapeHtml(record.id)}"${record.id === split.id ? " selected" : ""}>${escapeHtml(libraryDisplayName(record.name))}${record.id === currentBook?.id ? " (el de la izquierda)" : ""}</option>`).join("")}</optgroup><option value="__file">Abrir otro archivo…</option>`;
+  $("splitSwap").disabled = !split.id || split.id === currentBook?.id;
 }
 async function loadSplitDocument(id, page = 1) {
   const token = ++split.token;
@@ -6296,6 +6368,7 @@ async function loadSplitDocument(id, page = 1) {
   }
   if (split.own && split.doc && split.doc !== doc) split.doc.destroy?.();
   Object.assign(split, { id, doc, own });
+  if (id !== currentBook?.id) kv.setItem("paper.split-doc", id);
   populateSplitSelect();
   await buildSplitPages(page);
 }
@@ -6322,6 +6395,7 @@ async function buildSplitPages(page = 1) {
   }
   $("splitPages").append(fragment);
   $("splitCount").textContent = `/ ${doc.numPages}`;
+  $("splitZoomLevel").textContent = `${Math.round(split.zoom * 100)} %`;
   $("splitPage").max = doc.numPages;
   split.observer = new IntersectionObserver((entries) => {
     for (const entry of entries) {
@@ -6426,18 +6500,28 @@ function bindSplitView() {
   setIcon("splitNext", "chevronRight");
   setIcon("splitZoomOut", "minus");
   setIcon("splitZoomIn", "plus");
+  setIcon("splitSwap", "swap");
   $("splitClose").onclick = closeSplitView;
+  $("splitSwap").onclick = swapSplitSides;
   $("splitViewBtn").onclick = () => {
     $("appearancePopover").classList.remove("open");
     toggleSplitView();
   };
-  $("splitDoc").onchange = (event) => loadSplitDocument(event.target.value, 1);
+  $("splitDoc").onchange = (event) => {
+    const id = event.target.value;
+    if (id === "__file") {
+      event.target.value = split.id;
+      return pickSplitFile();
+    }
+    loadSplitDocument(id, id === currentBook?.id ? currentPage : savedPageOf(id));
+  };
   $("splitPrev").onclick = () => splitScrollTo(splitCurrentPage() - 1);
   $("splitNext").onclick = () => splitScrollTo(splitCurrentPage() + 1);
   $("splitPage").onchange = (event) => splitScrollTo(Number(event.target.value) || 1);
   const rezoom = (factor) => {
     const page = splitCurrentPage();
     split.zoom = Math.max(0.4, Math.min(3, split.zoom * factor));
+    if (Math.abs(split.zoom - 1) < 0.04) split.zoom = 1;
     buildSplitPages(page);
   };
   $("splitZoomOut").onclick = () => rezoom(1 / 1.2);
@@ -6449,41 +6533,190 @@ function bindSplitView() {
       if (document.activeElement !== $("splitPage")) $("splitPage").value = splitCurrentPage();
     });
   }, { passive: true });
+  attachScrollbar($("viewer"));
+  attachScrollbar($("splitScroll"));
   bindPaneResizer($("splitResizer"), () => {
     if (split.doc) buildSplitPages(splitCurrentPage());
   });
   window.addEventListener("resize", () => {
     if (!splitOpen()) return;
-    if (window.innerWidth < 760) closeSplitView();
+    if (window.innerWidth < SPLIT_MIN_VIEWPORT) closeSplitView();
     else applySplitWidth();
   }, { passive: true });
 }
 
+// ---- Barras de desplazamiento propias ----
+// Las del sistema (con flechas en Windows, distintas en cada navegador) se
+// ocultan en el visor y en el lado derecho de la vista dividida; en su lugar
+// hay una barra fina que aparece al desplazarse o al acercar el puntero, se
+// ensancha al pasar por encima y se puede arrastrar o pulsar para avanzar.
+function attachScrollbar(scroller) {
+  if (!scroller || scroller.dataset.ownScrollbar) return;
+  scroller.dataset.ownScrollbar = "1";
+  scroller.classList.add("own-scroll");
+  const host = scroller.offsetParent || scroller.parentElement;
+  const bars = ["y", "x"].map((axis) => {
+    const track = document.createElement("div");
+    track.className = `own-scrollbar own-scrollbar-${axis}`;
+    track.setAttribute("aria-hidden", "true");
+    track.innerHTML = '<div class="own-scrollbar-thumb"></div>';
+    scroller.parentElement.append(track);
+    return { axis, track, thumb: track.firstChild, size: 0, travel: 0 };
+  });
+  let hideTimer = 0,
+    frame = 0,
+    drag = null;
+  const show = () => {
+    bars.forEach((bar) => bar.track.classList.add("is-active"));
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      if (!drag) bars.forEach((bar) => bar.track.classList.remove("is-active"));
+    }, 1100);
+  };
+  const layout = () => {
+    frame = 0;
+    const visible = scroller.offsetParent !== null && scroller.getClientRects().length > 0;
+    const top = scroller.offsetTop,
+      left = scroller.offsetLeft,
+      width = scroller.clientWidth,
+      height = scroller.clientHeight;
+    for (const bar of bars) {
+      const vertical = bar.axis === "y";
+      const content = vertical ? scroller.scrollHeight : scroller.scrollWidth;
+      const view = vertical ? height : width;
+      const overflow = visible && content > view + 2;
+      bar.track.hidden = !overflow;
+      if (!overflow) continue;
+      const inset = 4;
+      const length = view - inset * 2 - (vertical ? 0 : 14);
+      bar.size = Math.max(36, Math.round((length * view) / content));
+      bar.travel = Math.max(1, length - bar.size);
+      const position = vertical ? scroller.scrollTop / (content - view) : scroller.scrollLeft / (content - view);
+      const offset = Math.round(bar.travel * Math.max(0, Math.min(1, position)));
+      if (vertical) {
+        Object.assign(bar.track.style, { top: `${top + inset}px`, left: `${left + width - 14}px`, height: `${length}px`, width: "" });
+        Object.assign(bar.thumb.style, { height: `${bar.size}px`, transform: `translateY(${offset}px)`, width: "" });
+      } else {
+        Object.assign(bar.track.style, { top: `${top + height - 14}px`, left: `${left + inset}px`, width: `${length}px`, height: "" });
+        Object.assign(bar.thumb.style, { width: `${bar.size}px`, transform: `translateX(${offset}px)`, height: "" });
+      }
+    }
+  };
+  const schedule = () => {
+    if (!frame) frame = requestAnimationFrame(layout);
+  };
+  scroller.addEventListener("scroll", () => {
+    schedule();
+    show();
+  }, { passive: true });
+  new ResizeObserver(schedule).observe(scroller);
+  const contentObserver = new ResizeObserver(schedule);
+  const observeChildren = () => [...scroller.children].forEach((child) => contentObserver.observe(child));
+  observeChildren();
+  new MutationObserver(() => {
+    observeChildren();
+    schedule();
+  }).observe(scroller, { childList: true });
+  if (host) new ResizeObserver(schedule).observe(host);
+  window.addEventListener("resize", schedule, { passive: true });
+  document.addEventListener("transitionend", schedule, { passive: true });
+  scroller.addEventListener("pointermove", (event) => {
+    if (event.pointerType !== "mouse") return;
+    const rect = scroller.getBoundingClientRect();
+    if (rect.right - event.clientX < 24 || rect.bottom - event.clientY < 24) show();
+  }, { passive: true });
+  for (const bar of bars) {
+    const vertical = bar.axis === "y";
+    bar.track.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const content = vertical ? scroller.scrollHeight - scroller.clientHeight : scroller.scrollWidth - scroller.clientWidth;
+      if (event.target === bar.thumb) {
+        drag = { bar, id: event.pointerId, start: vertical ? event.clientY : event.clientX, origin: vertical ? scroller.scrollTop : scroller.scrollLeft, ratio: content / bar.travel };
+        bar.track.setPointerCapture(event.pointerId);
+        bar.track.classList.add("is-dragging");
+      } else {
+        // Pulsar en la pista avanza (o retrocede) una pantalla.
+        const thumbRect = bar.thumb.getBoundingClientRect();
+        const before = vertical ? event.clientY < thumbRect.top : event.clientX < thumbRect.left;
+        const page = (vertical ? scroller.clientHeight : scroller.clientWidth) * 0.9 * (before ? -1 : 1);
+        scroller.scrollBy({ [vertical ? "top" : "left"]: page, behavior: "smooth" });
+      }
+      show();
+    });
+    bar.track.addEventListener("pointermove", (event) => {
+      if (!drag || drag.bar !== bar || drag.id !== event.pointerId) return;
+      const delta = ((vertical ? event.clientY : event.clientX) - drag.start) * drag.ratio;
+      if (vertical) scroller.scrollTop = drag.origin + delta;
+      else scroller.scrollLeft = drag.origin + delta;
+    });
+    const end = (event) => {
+      if (!drag || drag.bar !== bar || drag.id !== event.pointerId) return;
+      drag = null;
+      bar.track.classList.remove("is-dragging");
+      show();
+    };
+    bar.track.addEventListener("pointerup", end);
+    bar.track.addEventListener("pointercancel", end);
+    bar.track.addEventListener("pointerenter", show);
+  }
+  schedule();
+}
+
 // Arrastrar el borde izquierdo de un panel lateral (vista dividida o pizarra)
 // cambia su ancho; ambos comparten el mismo ancho guardado.
+// Con el dedo, el ratón o el lápiz; doble toque (o doble clic) lo deja al
+// 50 %, y con el teclado se mueve con las flechas.
 function bindPaneResizer(resizer, onDone) {
   let drag = null;
+  let lastTap = 0;
+  resizer.tabIndex = 0;
+  resizer.innerHTML = '<span class="split-grip" aria-hidden="true"></span>';
+  const done = () => {
+    scheduleLayoutRefit();
+    onDone?.();
+  };
+  const currentWidth = () => parseInt(getComputedStyle(document.body).getPropertyValue("--split-w"), 10) || 0;
+  const half = () => document.querySelector(".main").getBoundingClientRect().width / 2;
   resizer.addEventListener("pointerdown", (event) => {
-    drag = { id: event.pointerId };
+    event.preventDefault();
+    const now = Date.now();
+    if (now - lastTap < 350) {
+      lastTap = 0;
+      setSplitWidth(half());
+      return done();
+    }
+    lastTap = now;
+    drag = { id: event.pointerId, moved: false };
     resizer.setPointerCapture(event.pointerId);
     document.body.classList.add("split-resizing");
   });
   resizer.addEventListener("pointermove", (event) => {
     if (!drag || drag.id !== event.pointerId) return;
+    drag.moved = true;
     const main = document.querySelector(".main").getBoundingClientRect();
-    const width = Math.max(280, Math.min(main.width - 320, main.right - event.clientX));
-    document.body.style.setProperty("--split-w", `${Math.round(width)}px`);
+    setSplitWidth(main.right - event.clientX, false);
   });
   const finish = (event) => {
     if (!drag || drag.id !== event.pointerId) return;
+    const moved = drag.moved;
     drag = null;
     document.body.classList.remove("split-resizing");
-    kv.setItem("paper.split-width", String(parseInt(getComputedStyle(document.body).getPropertyValue("--split-w"), 10) || 0));
-    scheduleLayoutRefit();
-    onDone?.();
+    if (!moved) return;
+    setSplitWidth(currentWidth());
+    done();
   };
   resizer.addEventListener("pointerup", finish);
   resizer.addEventListener("pointercancel", finish);
+  resizer.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? 80 : 24;
+    const delta = { ArrowLeft: step, ArrowRight: -step }[event.key];
+    if (event.key === "Enter" || event.key === " ") setSplitWidth(half());
+    else if (delta) setSplitWidth(currentWidth() + delta);
+    else return;
+    event.preventDefault();
+    done();
+  });
 }
 
 // ---- Pizarra ----
@@ -12247,6 +12480,7 @@ function mobileMoreItems() {
     { id: "bookmark", icon: "bookmark", label: marked ? "Quitar marcador" : "Marcar página", toolbar: "bookmarkBtn", when: hasDoc, active: marked, run: toggleBookmark },
     { id: "read", icon: "volume", label: "Leer en voz alta", toolbar: "readAloudBtn", when: hasDoc, run: () => $("readAloudBtn").click() },
     { id: "study", icon: "check", label: "Estudiar", when: hasDoc, run: () => openStudy() },
+    { id: "split", icon: "split", label: splitOpen() ? "Cerrar la vista dividida" : "Dos PDFs a la vez", when: hasPdf && window.innerWidth >= SPLIT_MIN_VIEWPORT, active: splitOpen(), run: toggleSplitView },
     { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
     { id: "themes", icon: "textSize", label: "Temas y ajustes", when: hasDoc, run: openThemeSheet },
     { id: "pdf", icon: "download", label: isXfaDocument() ? "Guardar formulario" : "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
