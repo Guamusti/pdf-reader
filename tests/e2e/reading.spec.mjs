@@ -102,7 +102,7 @@ test.describe("iPad", () => {
     await expect(page.locator("#mobileMoreBtn")).toBeVisible();
     await page.click("#mobileMoreBtn");
     const menu = page.locator("#mobileMore .mm-grid button");
-    await expect(menu).toHaveText(["Nota en la página", "Estudiar", "Dos PDFs a la vez", "Modo lectura", "Temas y ajustes", "PDF anotado", "Reconocer texto (OCR)", "Exportar notas", "Copia y sincronización", "Pantalla completa"]);
+    await expect(menu).toHaveText(["Nota en la página", "Estudiar", "Dos PDFs a la vez", "Modo lectura", "Girar páginas", "Temas y ajustes", "PDF anotado", "Reconocer texto (OCR)", "Exportar notas", "Copia y sincronización", "Pantalla completa"]);
     // Desplegable bajo el botón, no hoja inferior.
     await page.waitForTimeout(250);
     const [button, sheet] = await Promise.all([page.locator("#mobileMoreBtn").boundingBox(), page.locator(".mm-sheet").boundingBox()]);

@@ -12482,6 +12482,7 @@ function mobileMoreItems() {
     { id: "study", icon: "check", label: "Estudiar", when: hasDoc, run: () => openStudy() },
     { id: "split", icon: "split", label: splitOpen() ? "Cerrar la vista dividida" : "Dos PDFs a la vez", when: hasPdf && window.innerWidth >= SPLIT_MIN_VIEWPORT, active: splitOpen(), run: toggleSplitView },
     { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
+    { id: "rotate", icon: "rotate", label: "Girar páginas", when: hasPdf && !reflowMode, run: () => $("rotateBtn").click() },
     { id: "themes", icon: "textSize", label: "Temas y ajustes", when: hasDoc, run: openThemeSheet },
     { id: "pdf", icon: "download", label: isXfaDocument() ? "Guardar formulario" : "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
     { id: "ocr", icon: "scan", label: "Reconocer texto (OCR)", when: hasPdf, run: () => runOcr("all") },
@@ -12579,12 +12580,13 @@ $("rotateBtn").onclick = async () => {
     if (viewMode === "continuous") refreshCurrentView();
     else await renderPage(currentPage);
     if (wasOpen) toggleThumbnails();
-    toast(`Página girada ${rotation}°`);
+    toast(rotation ? `Páginas giradas ${rotation}° · vuelve a pulsar para seguir girando` : "Páginas en su orientación original");
   } finally {
     button.disabled = false;
     isRotating = false;
   }
 };
+$("viewRotateBtn").onclick = () => $("rotateBtn").click();
 $("thumbBtn").onclick = toggleThumbnails;
 $("closeThumbs").onclick = toggleThumbnails;
 function fullscreenElement() {

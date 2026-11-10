@@ -725,7 +725,7 @@ html.ui4 .appearance-popover.view-menu { width: 340px !important; max-width: cal
 .view-menu .vm-aspect-text strong { display: block; font-size: 14px; }
 .view-menu .vm-aspect-text small { display: block; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .view-menu .vm-aspect > [data-vm-icon] .ui-icon { width: 16px; height: 16px; color: var(--muted); }
-.view-menu .vm-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.view-menu .vm-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
 .view-menu .vm-tile { display: grid; justify-items: center; gap: 4px; min-height: 64px; padding: 8px 2px; border: 0; border-radius: 12px; background: var(--soft); color: var(--text); font: inherit; font-size: 11.5px; line-height: 1.15; text-align: center; cursor: pointer; }
 .view-menu .vm-tile .ui-icon { width: 20px; height: 20px; }
 .view-menu .vm-tile[aria-pressed="true"] { background: var(--accent); color: var(--surface-solid); }
