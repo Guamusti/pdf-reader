@@ -3,7 +3,7 @@ import { chromium } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { FIXTURES } from "./helpers.mjs";
 import { buildZip } from "./zip-writer.mjs";
-import { buildXfaPdf } from "./xfa-fixture.mjs";
+import { buildXfaPdf, buildAcroFormPdf } from "./xfa-fixture.mjs";
 
 const PAPER = `<body style="font-family:serif;padding:40px;font-size:15px">
 <h2>6. Dimensions of irreducible representations</h2>
@@ -71,6 +71,7 @@ export default async function globalSetup() {
   );
   await writeFile(`${FIXTURES}/libro.epub`, buildZip(epubFiles(png)));
   await writeFile(`${FIXTURES}/xfa.pdf`, await buildXfaPdf());
+  await writeFile(`${FIXTURES}/acroform.pdf`, await buildAcroFormPdf());
   await page.setContent(LINKS);
   await writeFile(`${FIXTURES}/links.pdf`, await page.pdf({ format: "A4" }));
   // Página escaneada: el texto es una imagen, sin capa de texto.

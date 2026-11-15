@@ -530,6 +530,7 @@ html { height: 100%; overflow: hidden; overscroll-behavior: none; }
 .lib-dialog { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 16px; background: rgba(12, 15, 22, .38); }
 .lib-dialog-card { width: min(380px, 100%); display: grid; gap: 14px; padding: 18px; border-radius: 16px; background: var(--surface-solid); box-shadow: 0 24px 60px rgba(0, 0, 0, .3); }
 .lib-dialog-card strong { font-size: 16px; }
+.lib-dialog-text { margin: -6px 0 0; color: var(--muted); font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .lib-dialog-card input { min-height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 16px; }
 .lib-dialog-card input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .lib-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -985,3 +986,6 @@ html.ui4 :is(.study, .shortcuts) { padding-top: max(16px, var(--safe-top, 0px));
   html.ui4 .toolbar .toolbar-nav,
   html.ui4 .toolbar .nav-history { display: none !important; }
 }
+
+/* Detalle nítido: repaso de la zona visible a densidad completa (ver refineVisibleDetail). */
+canvas.page-detail { position: absolute; z-index: 0; display: block; max-width: none; pointer-events: none; }

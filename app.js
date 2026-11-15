@@ -1,4 +1,4 @@
-import { pdfjsLib, openPdfBlob } from "./pdf-engine.js?v=2";
+import { pdfjsLib, openPdfBlob, PdfPasswordCancelled } from "./pdf-engine.js?v=3";
 
 import {
   openDatabase,
@@ -1248,13 +1248,13 @@ async function deleteFolder(id) {
 }
 // Pequeño diálogo para escribir un nombre (el prompt() nativo se ve fuera de
 // lugar y en algunas vistas de iPad no aparece).
-function askName({ title, value = "", action = "Crear" }) {
+function askName({ title, value = "", action = "Crear", text = "", type = "text", placeholder = "" }) {
   return new Promise((resolve) => {
-    const host = $("libraryPanel");
-    host.querySelector(".lib-dialog")?.remove();
+    const host = $("libraryPanel").hidden ? document.body : $("libraryPanel");
+    document.querySelector(".lib-dialog")?.remove();
     const dialog = document.createElement("form");
     dialog.className = "lib-dialog";
-    dialog.innerHTML = `<div class="lib-dialog-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><strong>${escapeHtml(title)}</strong><input type="text" maxlength="80" autocomplete="off" enterkeyhint="done" /><div class="lib-dialog-actions"><button type="button" data-dialog-cancel>Cancelar</button><button type="submit" class="is-primary">${escapeHtml(action)}</button></div></div>`;
+    dialog.innerHTML = `<div class="lib-dialog-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><strong>${escapeHtml(title)}</strong>${text ? `<p class="lib-dialog-text">${escapeHtml(text)}</p>` : ""}<input type="${type}" maxlength="${type === "password" ? 200 : 80}" autocomplete="off" enterkeyhint="done" placeholder="${escapeHtml(placeholder)}" /><div class="lib-dialog-actions"><button type="button" data-dialog-cancel>Cancelar</button><button type="submit" class="is-primary">${escapeHtml(action)}</button></div></div>`;
     const input = dialog.querySelector("input");
     input.value = value;
     const finish = (result) => {
@@ -1263,7 +1263,7 @@ function askName({ title, value = "", action = "Crear" }) {
     };
     dialog.addEventListener("submit", (event) => {
       event.preventDefault();
-      const name = input.value.replace(/\s+/g, " ").trim();
+      const name = type === "password" ? input.value : input.value.replace(/\s+/g, " ").trim();
       if (name) finish(name);
       else input.focus();
     });
@@ -1344,8 +1344,12 @@ async function openMoveBookMenu(anchor, id) {
         openSplitView({ id, page: id === currentBook.id ? currentPage : savedPageOf(id) });
       } }]
     : [];
+  // Unir con el PDF abierto: este documento a continuación del actual.
+  const canMerge = !isTextBook(book) && pdfDoc && currentBook && !isTextBook(currentBook) && id !== currentBook.id;
+  const merge = canMerge ? [{ label: "Unir a continuación del actual", icon: "merge", run: () => mergeBooks(currentBook.id, id).then(renderLibrary) }] : [];
   openLibraryMenu(anchor, [
     ...sideBySide,
+    ...merge,
     { heading: "Mover a" },
     ...folderTargets(current).map((target) => ({ label: target.label, icon: target.id ? "folder" : "library", depth: target.depth, checked: target.checked, run: () => target.id !== current && move(target.id) })),
     { label: "Nueva carpeta…", icon: "plus", run: async () => {
@@ -2119,7 +2123,8 @@ async function openStored(id) {
       button.classList.toggle("active", button.dataset.readingMode === (reflowMode ? "reflow" : "pdf")),
     );
     resetRenderEngine();
-    const loadedDoc = await openPdfBlob(rec.blob);
+    showLoader(true);
+    const loadedDoc = await openPdfBlob(rec.blob, { askPassword: (retry) => askPdfPassword(rec, retry) });
     rec.pages = loadedDoc.numPages;
     rec.openedAt = Date.now();
     if (!superseded()) await dbPut(rec);
@@ -2129,12 +2134,18 @@ async function openStored(id) {
     }
     // A partir de aquí no hay esperas hasta el primer render: el documento
     // nuevo y su estado se asignan juntos.
+    await detectFormDocument(loadedDoc);
+    if (superseded()) {
+      loadedDoc.destroy?.();
+      return;
+    }
     restoreXfaValues(loadedDoc, rec.id);
     // Portada antigua de un formulario XFA: era la página «Please wait…».
     if (isXfaDocument(loadedDoc) && !rec.xfa) {
       Object.assign(rec, { xfa: true, cover: null, coverChecked: true });
       await dbPut(rec);
     }
+    releasePdfDocument(pdfDoc, loadedDoc);
     pdfDoc = loadedDoc;
     currentBook = rec;
     if (!rec.cover) ensureBookCover(rec, pdfDoc);
@@ -2207,13 +2218,35 @@ async function openStored(id) {
     console.error(e);
     if (!superseded()) {
       requestedDocId = currentBook?.id || "";
-      toast("No se pudo abrir el PDF");
+      toast(e instanceof PdfPasswordCancelled ? "Este PDF está protegido: hace falta su contraseña para abrirlo" : e?.name === "InvalidPDFException" ? "El archivo está dañado o no es un PDF válido" : "No se pudo abrir el PDF");
     }
   } finally {
     if (!superseded()) showLoader(false);
   }
 }
 
+// PDF protegido con contraseña: se pide al abrirlo y se recuerda solo durante
+// esta sesión.
+function askPdfPassword(rec, retry) {
+  showLoader(false);
+  return askName({
+    title: retry ? "Contraseña incorrecta" : "PDF protegido",
+    text: `«${libraryDisplayName(rec.name)}» necesita una contraseña para abrirse.${retry ? " Prueba otra vez." : ""}`,
+    type: "password",
+    placeholder: "Contraseña del PDF",
+    action: "Abrir",
+  });
+}
+// Al cambiar de documento se libera el anterior (páginas, fuentes e imágenes
+// decodificadas). Si la vista dividida lo sigue mostrando, pasa a ser suyo.
+function releasePdfDocument(previous, next) {
+  if (!previous || previous === next) return;
+  if (split.doc === previous) {
+    split.own = true;
+    return;
+  }
+  setTimeout(() => previous.destroy?.().catch?.(() => {}), 0);
+}
 function cancelScheduledPrefetch() {
   if (!prefetchHandle) return;
   if ("cancelIdleCallback" in window) window.cancelIdleCallback(prefetchHandle);
@@ -2268,6 +2301,10 @@ function resetRenderEngine() {
   pageRenderPending = null;
   pageProxyCache.clear();
   textContentCache.clear();
+  clearPageRasters();
+  cancelDetailWork();
+  clearPageDetail($("canvasWrap"));
+  clearPageDetail($("facingWrap"));
 }
 function renderPage(num, options = {}) {
   if (!pdfDoc) return Promise.resolve(false);
@@ -2428,22 +2465,87 @@ async function renderXfaLayer(host, page, viewport) {
   layer.replaceChildren(div);
   pdfjsLib.XfaLayer.render({ viewport: viewport.clone({ dontFlip: true }), div, xfaHtml, annotationStorage: pdfDoc.annotationStorage, linkService: xfaLinkService, intent: "display" });
 }
-// Valores del formulario: se guardan al escribir y se recuperan al abrirlo.
+// ---- Formularios rellenables normales (AcroForm) ----
+// La mayoría de formularios PDF (contratos, solicitudes, impresos de empresa)
+// son de este tipo. pdf.js coloca campos de verdad sobre la página: texto,
+// casillas, botones de opción y listas. Lo escrito se guarda en este
+// dispositivo y, al exportar, va dentro del PDF como en cualquier otro visor.
+const formDocuments = new WeakSet();
+function isFormDocument(doc = pdfDoc) {
+  return Boolean(doc && formDocuments.has(doc));
+}
+async function detectFormDocument(doc) {
+  if (isXfaDocument(doc)) return;
+  try {
+    const fields = await doc.getFieldObjects();
+    if (fields && Object.keys(fields).length) {
+      formDocuments.add(doc);
+      doc.paperFieldObjects = fields;
+    }
+  } catch {}
+}
+function ensureFormStyles() {
+  if (document.getElementById("formStyles")) return;
+  const link = document.createElement("link");
+  link.id = "formStyles";
+  link.rel = "stylesheet";
+  link.href = "form-layer.css?v=1";
+  document.head.append(link);
+}
+async function renderFormLayer(host, page, viewport) {
+  let layer = host?.querySelector(":scope > .form-host");
+  if (!host || !isFormDocument()) {
+    layer?.remove();
+    return;
+  }
+  const doc = pdfDoc;
+  ensureFormStyles();
+  const widgets = (await page.getAnnotations({ intent: "display" })).filter((annotation) => annotation.subtype === "Widget" && !annotation.hidden);
+  if (doc !== pdfDoc) return;
+  if (!widgets.length) {
+    layer?.remove();
+    return;
+  }
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.className = "form-host";
+    host.append(layer);
+  }
+  layer.dataset.page = String(page.pageNumber);
+  layer.style.setProperty("--scale-factor", String(viewport.scale));
+  layer.style.setProperty("--total-scale-factor", String(viewport.scale));
+  const div = document.createElement("div");
+  div.className = "annotationLayer";
+  layer.replaceChildren(div);
+  try {
+    const annotationLayer = new pdfjsLib.AnnotationLayer({ div, accessibilityManager: null, annotationCanvasMap: null, annotationEditorUIManager: null, page, viewport: viewport.clone({ dontFlip: true }) });
+    await annotationLayer.render({ annotations: widgets, imageResourcesPath: "", renderForms: true, linkService: xfaLinkService, downloadManager: null, annotationStorage: doc.annotationStorage, enableScripting: false, hasJSActions: false, fieldObjects: doc.paperFieldObjects });
+  } catch (error) {
+    console.warn("No se pudieron mostrar los campos del formulario", error);
+    layer.remove();
+  }
+}
+// Valores del formulario (XFA o AcroForm): se guardan al escribir y se
+// recuperan al abrirlo.
 let xfaSaveTimer = 0;
+function formValuesKey(doc = pdfDoc) {
+  return isXfaDocument(doc) ? "xfa-values" : "form-values";
+}
 function saveXfaValues() {
   clearTimeout(xfaSaveTimer);
-  if (!currentBook || !isXfaDocument()) return;
+  if (!currentBook || !(isXfaDocument() || isFormDocument())) return;
   const values = pdfDoc.annotationStorage.getAll?.() || null;
-  if (values) setJSON(key(currentBook.id, "xfa-values"), values);
+  if (values) setJSON(key(currentBook.id, formValuesKey()), values);
 }
 function restoreXfaValues(doc, id) {
-  const values = getJSON(key(id, "xfa-values"), null);
-  if (!values || !isXfaDocument(doc)) return;
+  if (!(isXfaDocument(doc) || isFormDocument(doc))) return;
+  const values = getJSON(key(id, formValuesKey(doc)), null);
+  if (!values) return;
   for (const [field, value] of Object.entries(values)) doc.annotationStorage.setValue(field, value);
 }
 for (const type of ["input", "change"]) {
   document.addEventListener(type, (event) => {
-    if (!event.target.closest?.(".xfa-host")) return;
+    if (!event.target.closest?.(".xfa-host, .form-host")) return;
     clearTimeout(xfaSaveTimer);
     xfaSaveTimer = setTimeout(saveXfaValues, 400);
   }, true);
@@ -2482,31 +2584,228 @@ async function exportXfaForm() {
   }
   return true;
 }
+// ---- Dibujo de páginas sin parpadeo ----
+// Cada página se dibuja primero en un lienzo aparte («raster») y solo cuando
+// está completa se copia al visible. Antes el lienzo visible se vaciaba al
+// empezar: al hacer zoom o pasar de página se veía un fogonazo blanco.
+// En página única, además, la página siguiente se deja dibujada de antemano
+// mientras se lee la actual, así pasar de página es instantáneo.
+const pageRasterCache = new Map();
+const PAGE_RASTER_LIMIT = IS_IOS ? 1 : 2;
+function pageRenderDpr(viewport) {
+  const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
+  // El límite evita que un PDF enorme a 500% bloquee el navegador; se sigue
+  // dibujando desde el vector de origen y solo se reduce la sobremuestra (la
+  // zona visible se afina después: ver «Detalle nítido»).
+  return Math.min(targetDpr, Math.sqrt(CANVAS_PIXELS_PER_PAGE / (viewport.width * viewport.height)));
+}
+function rasterKey(pageNumber, viewport, dpr) {
+  return `${currentBook?.id}|${pageNumber}|${viewport.width.toFixed(1)}x${viewport.height.toFixed(1)}|${viewport.rotation}|${dpr.toFixed(3)}`;
+}
+function startPageRaster(page, viewport, dpr) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width * dpr);
+  canvas.height = Math.floor(viewport.height * dpr);
+  // En un formulario rellenable los campos van en su propia capa (HTML): el
+  // lienzo no los dibuja para que no se vea el valor dos veces.
+  const params = { canvasContext: canvas.getContext("2d"), viewport, transform: [dpr, 0, 0, dpr, 0, 0] };
+  if (isFormDocument()) params.annotationMode = pdfjsLib.AnnotationMode.ENABLE_FORMS;
+  const task = page.render(params);
+  const raster = { canvas, task, promise: task.promise, done: false };
+  task.promise.then(() => (raster.done = true), () => {});
+  return raster;
+}
+function releaseRaster(raster) {
+  if (!raster) return;
+  if (!raster.done) {
+    try { raster.task.cancel(); } catch {}
+  }
+  raster.canvas.width = 0;
+  raster.canvas.height = 0;
+}
+function clearPageRasters(keep = "") {
+  for (const [cacheKey, raster] of pageRasterCache) {
+    if (cacheKey === keep) continue;
+    pageRasterCache.delete(cacheKey);
+    releaseRaster(raster);
+  }
+}
+// Devuelve el raster ya preparado para esa página y zoom o empieza uno nuevo.
+function takePageRaster(page, viewport, dpr) {
+  const cacheKey = rasterKey(page.pageNumber, viewport, dpr);
+  const cached = pageRasterCache.get(cacheKey);
+  // Los demás pre-renderizados dejan de competir con la página pedida.
+  clearPageRasters(cacheKey);
+  if (cached) {
+    pageRasterCache.delete(cacheKey);
+    return cached;
+  }
+  return startPageRaster(page, viewport, dpr);
+}
+function commitRaster(target, raster, viewport) {
+  target.width = raster.canvas.width;
+  target.height = raster.canvas.height;
+  target.style.width = `${viewport.width}px`;
+  target.style.height = `${viewport.height}px`;
+  if (raster.canvas.width && raster.canvas.height) target.getContext("2d").drawImage(raster.canvas, 0, 0);
+  raster.canvas.width = 0;
+  raster.canvas.height = 0;
+}
+async function prerenderPage(pageNumber) {
+  if (!pdfDoc || viewMode !== "single" || reflowMode || presentationMode) return;
+  const page = await getCachedPage(pageNumber);
+  if (pageRenderPending || renderTask) return;
+  const viewport = page.getViewport({ scale, rotation });
+  const dpr = pageRenderDpr(viewport);
+  const cacheKey = rasterKey(pageNumber, viewport, dpr);
+  if (pageRasterCache.has(cacheKey)) return;
+  while (pageRasterCache.size >= PAGE_RASTER_LIMIT) {
+    const oldest = pageRasterCache.keys().next().value;
+    releaseRaster(pageRasterCache.get(oldest));
+    pageRasterCache.delete(oldest);
+  }
+  const raster = startPageRaster(page, viewport, dpr);
+  pageRasterCache.set(cacheKey, raster);
+  raster.promise.catch(() => {
+    if (pageRasterCache.get(cacheKey) === raster) pageRasterCache.delete(cacheKey);
+  });
+}
+// ---- Detalle nítido ----
+// Con mucho zoom la página entera no cabe en un lienzo a la densidad de la
+// pantalla (el límite de píxeles lo impide, sobre todo en iPad y iPhone) y se
+// dibujaba algo borrosa. Cuando eso ocurre, la zona visible se vuelve a
+// dibujar desde el vector a densidad completa en un lienzo pequeño encima.
+const DETAIL_PIXELS = IS_IOS ? 9_000_000 : 16_000_000;
+let detailTimer = 0;
+let detailRun = 0;
+const detailTasks = new Set();
+function clearPageDetail(host) {
+  host?.querySelectorAll(":scope > canvas.page-detail").forEach((canvas) => {
+    canvas.width = 0;
+    canvas.height = 0;
+    canvas.remove();
+  });
+}
+function cancelDetailWork() {
+  detailRun++;
+  clearTimeout(detailTimer);
+  for (const task of detailTasks) {
+    try { task.cancel(); } catch {}
+  }
+  detailTasks.clear();
+}
+function scheduleDetail(delay = 160) {
+  clearTimeout(detailTimer);
+  detailTimer = setTimeout(refineVisibleDetail, delay);
+}
+function detailHosts() {
+  if (viewMode === "continuous") {
+    const container = $("continuousView");
+    if (!container) return [];
+    return [currentPage - 1, currentPage, currentPage + 1]
+      .map((pageNumber) => ({ host: container.children[pageNumber - 1], pageNumber }))
+      .filter((entry) => entry.host && continuousRendered.has(entry.pageNumber) && !entry.host.dataset.stale);
+  }
+  const hosts = [{ host: $("canvasWrap"), pageNumber: currentPage }];
+  if (viewMode === "double" && !$("facingWrap").hidden) hosts.push({ host: $("facingWrap"), pageNumber: currentPage + 1 });
+  return hosts;
+}
+async function refineVisibleDetail() {
+  if (!pdfDoc || reflowMode || pinchGesture || renderTask || pageRenderPending) return;
+  cancelDetailWork();
+  const run = detailRun;
+  const doc = pdfDoc;
+  const view = $("viewer").getBoundingClientRect();
+  const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
+  for (const { host, pageNumber } of detailHosts()) {
+    const main = host.querySelector(":scope > canvas:not(.page-detail)");
+    if (!main?.width) continue;
+    const box = host.getBoundingClientRect();
+    if (!box.width || !box.height) continue;
+    // Densidad real del lienzo principal: si ya es la de la pantalla, sobra.
+    const currentDpr = main.width / box.width;
+    if (currentDpr >= targetDpr * 0.97) {
+      clearPageDetail(host);
+      continue;
+    }
+    const margin = 60;
+    const x0 = Math.max(0, Math.floor(view.left - box.left - margin));
+    const y0 = Math.max(0, Math.floor(view.top - box.top - margin));
+    const x1 = Math.min(box.width, Math.ceil(view.right - box.left + margin));
+    const y1 = Math.min(box.height, Math.ceil(view.bottom - box.top + margin));
+    const width = x1 - x0,
+      height = y1 - y0;
+    if (width < 8 || height < 8) {
+      clearPageDetail(host);
+      continue;
+    }
+    const dpr = Math.min(targetDpr, Math.sqrt(DETAIL_PIXELS / (width * height)));
+    if (dpr <= currentDpr * 1.08) continue;
+    try {
+      const page = await getCachedPage(pageNumber);
+      if (run !== detailRun || doc !== pdfDoc) return;
+      const viewport = page.getViewport({ scale, rotation });
+      // El lienzo visible puede estar aún estirado por un zoom en curso.
+      if (Math.abs(viewport.width - box.width) > 2) continue;
+      const canvas = document.createElement("canvas");
+      canvas.className = "page-detail";
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      const params = { canvasContext: canvas.getContext("2d"), viewport, transform: [dpr, 0, 0, dpr, -x0 * dpr, -y0 * dpr] };
+      if (isFormDocument()) params.annotationMode = pdfjsLib.AnnotationMode.ENABLE_FORMS;
+      const task = page.render(params);
+      detailTasks.add(task);
+      try {
+        await task.promise;
+      } finally {
+        detailTasks.delete(task);
+      }
+      if (run !== detailRun || doc !== pdfDoc || !host.isConnected) {
+        canvas.width = 0;
+        return;
+      }
+      Object.assign(canvas.style, { left: `${x0}px`, top: `${y0}px`, width: `${width}px`, height: `${height}px` });
+      clearPageDetail(host);
+      main.after(canvas);
+    } catch (error) {
+      if (error?.name !== "RenderingCancelledException") console.warn("No se pudo afinar el detalle de la página", error);
+      if (run !== detailRun) return;
+    }
+  }
+}
 async function renderPageGraphics(pageNumber, targets, token) {
   const page = await getCachedPage(pageNumber);
   if (token !== undefined && token !== renderToken) return null;
   const viewport = page.getViewport({ scale, rotation });
-  const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
-  const dpr = Math.min(targetDpr, Math.sqrt(CANVAS_PIXELS_PER_PAGE / (viewport.width * viewport.height)));
+  const dpr = pageRenderDpr(viewport);
   const { canvas, textLayer, linkLayer, sizeTarget } = targets;
-  const ctx = canvas.getContext("2d");
-  canvas.width = Math.floor(viewport.width * dpr);
-  canvas.height = Math.floor(viewport.height * dpr);
-  canvas.style.width = `${viewport.width}px`;
-  canvas.style.height = `${viewport.height}px`;
+  const raster = startPageRaster(page, viewport, dpr);
+  try {
+    await raster.promise;
+  } catch (error) {
+    releaseRaster(raster);
+    if (error?.name === "RenderingCancelledException") return null;
+    throw error;
+  }
+  if (token !== undefined && token !== renderToken) {
+    releaseRaster(raster);
+    return null;
+  }
+  // La página pudo salir de la vista (o cambiar el zoom) mientras se dibujaba.
+  if (viewport.scale !== scale) {
+    releaseRaster(raster);
+    return null;
+  }
+  commitRaster(canvas, raster, viewport);
+  delete (sizeTarget || canvas).dataset.stale;
+  clearPageDetail(sizeTarget || canvas.parentElement);
+  scheduleDetail();
   if (sizeTarget) {
     sizeTarget.style.width = `${viewport.width}px`;
     sizeTarget.style.height = `${viewport.height}px`;
   }
-  const task = page.render({ canvasContext: ctx, viewport, transform: [dpr, 0, 0, dpr, 0, 0] });
-  try {
-    await task.promise;
-  } catch (error) {
-    if (error?.name === "RenderingCancelledException") return null;
-    throw error;
-  }
-  if (token !== undefined && token !== renderToken) return null;
   await renderXfaLayer(sizeTarget || canvas.parentElement, page, viewport);
+  await renderFormLayer(sizeTarget || canvas.parentElement, page, viewport);
   if (textLayer && isXfaDocument()) textLayer.replaceChildren();
   else if (textLayer) {
     textLayer.replaceChildren();
@@ -2804,15 +3103,34 @@ async function rescaleContinuousView() {
   if (viewMode !== "continuous") return;
   const viewport = page.getViewport({ scale, rotation });
   holdContinuousSync();
+  // Las páginas a la vista conservan su imagen, estirada al tamaño nuevo,
+  // hasta que llega la nítida: sin fogonazo blanco al hacer zoom.
   for (const pageNumber of continuousRendered) {
     const slot = container.children[pageNumber - 1];
-    if (slot) clearContinuousSlot(slot);
+    if (!slot) continue;
+    const canvas = slot.querySelector("canvas");
+    if (Math.abs(pageNumber - target) <= 2 && canvas?.width) {
+      slot.dataset.stale = "1";
+      clearPageDetail(slot);
+      const ratio = canvas.height / canvas.width;
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.width * ratio}px`;
+      slot.querySelector(".textLayer")?.replaceChildren();
+      slot.querySelector(".link-layer")?.replaceChildren();
+    } else clearContinuousSlot(slot);
   }
   continuousRendered = new Set();
   for (const slot of container.children) {
+    if (slot.dataset.stale) {
+      const canvas = slot.querySelector("canvas");
+      slot.style.width = canvas.style.width;
+      slot.style.height = canvas.style.height;
+      continue;
+    }
     slot.style.width = `${viewport.width}px`;
     slot.style.height = `${viewport.height}px`;
   }
+  resetPinchPreview();
   const after = container.children[target - 1];
   viewer.scrollTop = after.offsetTop + ratio * after.offsetHeight;
   viewer.scrollLeft = Math.max(0, horizontal * viewer.scrollWidth - viewer.clientWidth / 2);
@@ -2875,11 +3193,16 @@ function trimContinuousRenders() {
 }
 function unloadContinuousSlot(slot) {
   const pageNumber = Number(slot.dataset.page);
-  if (!continuousRendered.has(pageNumber)) return;
+  if (!continuousRendered.has(pageNumber)) {
+    if (slot.dataset.stale) clearContinuousSlot(slot);
+    return;
+  }
   continuousRendered.delete(pageNumber);
   clearContinuousSlot(slot);
 }
 function clearContinuousSlot(slot) {
+  delete slot.dataset.stale;
+  clearPageDetail(slot);
   const canvas = slot.querySelector("canvas");
   if (canvas) {
     canvas.width = 0;
@@ -3285,6 +3608,8 @@ function paletteActions() {
     { icon: "↗", title: "Exportar anotaciones a Markdown", keys: "descargar notas md", when: hasDoc, run: exportMarkdown },
     { icon: "⌗", title: "Reconocer texto (OCR) de esta página", keys: "ocr escaneado escaneo reconocer texto imagen", when: hasPdf, run: () => runOcr([currentPage]) },
     { icon: "⌗", title: "Reconocer texto (OCR) de todo el documento", keys: "ocr escaneado libro reconocer texto todas paginas", when: hasPdf, run: () => runOcr("all") },
+    { icon: "⎙", title: "Imprimir", keys: "imprimir print impresora papel", when: hasPdf, run: printDocument },
+    { icon: "✂", title: "Extraer páginas a un PDF nuevo", keys: "extraer dividir separar recortar paginas rango split", when: hasPdf, run: extractPages },
     { icon: "⇩", title: "Guardar PDF con las anotaciones dentro", keys: "exportar descargar pdf anotado acrobat zotero goodnotes compartir", when: hasPdf, run: exportAnnotatedPdf },
     { icon: "↓", title: "Exportar copia de las anotaciones (JSON)", keys: "descargar backup", when: hasDoc, run: exportAnnotations },
     { icon: "◫", title: splitOpen() ? "Cerrar la vista dividida" : "Vista dividida (dos documentos a la vez)", keys: "split dividir comparar dos paneles lado", shortcut: ["D"], when: hasPdf, run: toggleSplitView },
@@ -4257,6 +4582,9 @@ const ICONS = {
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z"/>',
   download: '<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
+  printer: '<path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="8" rx="2"/><path d="M7 14h10v6H7z"/>',
+  scissors: '<circle cx="6.5" cy="6.5" r="2.5"/><circle cx="6.5" cy="17.5" r="2.5"/><path d="M8.6 8.2 20 18M8.6 15.8 20 6"/>',
+  merge: '<rect x="4" y="3.5" width="9" height="12" rx="1.5"/><rect x="11" y="8.5" width="9" height="12" rx="1.5"/>',
   send: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   fitWidth: '<path d="M3 5v14M21 5v14"/><path d="m7 12 3-3M7 12l3 3M7 12h10m0 0-3-3m3 3-3 3"/>',
@@ -5143,33 +5471,31 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   // PDF.js vuelve a dibujar el vector en cada nivel de zoom. El lienzo se
   // prepara a densidad de pantalla (hasta 3x), así que no ampliamos un bitmap
   // ya renderizado mediante CSS.
-  const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
-  // El límite evita que un PDF enorme a 500% bloquee el navegador; seguimos
-  // renderizando desde el vector de origen y reducimos sólo la sobremuestra.
-  const maxCanvasPixels = CANVAS_PIXELS_PER_PAGE;
-  const dpr = Math.min(targetDpr, Math.sqrt(maxCanvasPixels / (viewport.width * viewport.height)));
-  const canvas = $("pdfCanvas"),
-    ctx = canvas.getContext("2d");
-  canvas.width = Math.floor(viewport.width * dpr);
-  canvas.height = Math.floor(viewport.height * dpr);
-  canvas.style.width = `${viewport.width}px`;
-  canvas.style.height = `${viewport.height}px`;
-  $("canvasWrap").style.width = `${viewport.width}px`;
-  $("canvasWrap").style.height = `${viewport.height}px`;
-  renderTask = page.render({
-    canvasContext: ctx,
-    viewport,
-    transform: [dpr, 0, 0, dpr, 0, 0],
-  });
+  const dpr = pageRenderDpr(viewport);
+  const canvas = $("pdfCanvas");
+  // Se dibuja aparte (o se aprovecha la página ya preparada) y el lienzo
+  // visible conserva lo que mostraba hasta que la nueva imagen está lista.
+  const raster = takePageRaster(page, viewport, dpr);
+  renderTask = raster.task;
   try {
-    await renderTask.promise;
+    await raster.promise;
   } catch (error) {
-    renderTask = null;
+    if (renderTask === raster.task) renderTask = null;
+    releaseRaster(raster);
     if (error?.name !== "RenderingCancelledException") throw error;
     return false;
   }
-  renderTask = null;
-  if (token !== renderToken || requestId !== pageRenderRequestId) return false;
+  if (renderTask === raster.task) renderTask = null;
+  if (token !== renderToken || requestId !== pageRenderRequestId) {
+    releaseRaster(raster);
+    return false;
+  }
+  commitRaster(canvas, raster, viewport);
+  clearPageDetail($("canvasWrap"));
+  scheduleDetail();
+  $("canvasWrap").style.width = `${viewport.width}px`;
+  $("canvasWrap").style.height = `${viewport.height}px`;
+  resetPinchPreview();
   kv.setItem(key(currentBook.id, "page"), String(currentPage));
   kv.setItem(key(currentBook.id, "scale"), String(scale));
   kv.setItem(key(currentBook.id, "rotation"), String(rotation));
@@ -5178,6 +5504,7 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   if (anchor) restoreZoomAnchor(anchor);
   else if (resetScroll) $("viewer").scrollTo({ top: 0, left: 0 });
   await renderXfaLayer($("canvasWrap"), page, viewport);
+  await renderFormLayer($("canvasWrap"), page, viewport);
   await renderTextLayer(page, viewport);
   if (token !== renderToken || requestId !== pageRenderRequestId) return false;
   renderLinkLayer(page, viewport, token);
@@ -5405,6 +5732,8 @@ function prefetchAdjacentPages(pageNumber) {
           getCachedTextContent(page).catch(() => {});
       } catch {}
     }
+    // La página hacia la que se avanza queda dibujada de antemano.
+    if (candidates[0] && !pageRenderPending) prerenderPage(candidates[0]).catch(() => {});
   };
   prefetchHandle = "requestIdleCallback" in window
     ? window.requestIdleCallback(run, { timeout: 500 })
@@ -6359,7 +6688,13 @@ async function loadSplitDocument(id, page = 1) {
   else {
     const record = await dbGet(id);
     if (!record || isTextBook(record)) return toast("La vista dividida solo admite PDFs");
-    doc = await openPdfBlob(record.blob);
+    try {
+      doc = await openPdfBlob(record.blob, { askPassword: (retry) => askPdfPassword(record, retry) });
+    } catch (error) {
+      if (token === split.token) toast(error instanceof PdfPasswordCancelled ? "Ese PDF está protegido: hace falta su contraseña" : "No se pudo abrir ese PDF");
+      populateSplitSelect();
+      return;
+    }
     own = true;
   }
   if (token !== split.token) {
@@ -7704,7 +8039,7 @@ async function setZoom(nextScale, anchor = null) {
   zoomMode = "custom";
   persistZoomMode();
   updateZoomLabel();
-  if (viewMode === "continuous") refreshCurrentView();
+  if (viewMode === "continuous" && !reflowMode) await rescaleContinuousView();
   else await renderPage(currentPage, { anchor, resetScroll: false });
 }
 async function zoom(delta, anchor = null) {
@@ -8494,6 +8829,160 @@ function chooseOption({ title, text = "", options }) {
     dialog.querySelector(".choose-option")?.focus();
   });
 }
+// ---- Imprimir ----
+// Se imprime el PDF de verdad (vectorial, con el diálogo del sistema), con las
+// anotaciones y los datos de formulario dentro. En el móvil se comparte: la
+// hoja de compartir de iOS y Android incluye «Imprimir».
+async function printablePdfBytes() {
+  if (isXfaDocument()) return buildFlatXfaPdf();
+  try {
+    return (await buildAnnotatedPdf({ includeBoard: false })).bytes;
+  } catch (error) {
+    console.warn("Se imprime el PDF original", error);
+    const record = currentBook.blob ? currentBook : await dbGet(currentBook.id);
+    return new Uint8Array(await record.blob.arrayBuffer());
+  }
+}
+async function printDocument() {
+  if (!pdfDoc || !currentBook || isTextBook(currentBook)) return toast("Abre un PDF primero");
+  showLoader(true, "Preparando la impresión…", "Con tus anotaciones");
+  try {
+    const blob = new Blob([await printablePdfBytes()], { type: "application/pdf" });
+    const name = currentBook.name.replace(/\.pdf$/i, "") + ".pdf";
+    if (IS_IOS || document.body.classList.contains("is-mobile")) {
+      showLoader(false);
+      await shareOrDownload(name, blob);
+      return toast("Elige «Imprimir» en el menú de compartir");
+    }
+    const url = URL.createObjectURL(blob);
+    document.getElementById("printFrame")?.remove();
+    const frame = document.createElement("iframe");
+    frame.id = "printFrame";
+    frame.setAttribute("aria-hidden", "true");
+    Object.assign(frame.style, { position: "fixed", right: "0", bottom: "0", width: "1px", height: "1px", border: "0", opacity: "0" });
+    const fallback = () => window.open(url, "_blank", "noopener") || downloadBlob(name, blob);
+    frame.onload = () => {
+      // El visor de PDF del navegador necesita un instante para estar listo.
+      setTimeout(() => {
+        try {
+          frame.contentWindow.focus();
+          frame.contentWindow.print();
+        } catch {
+          fallback();
+        }
+      }, 350);
+    };
+    frame.onerror = fallback;
+    frame.src = url;
+    document.body.append(frame);
+    setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+  } catch (error) {
+    console.error(error);
+    toast("No se pudo preparar la impresión");
+  } finally {
+    showLoader(false);
+  }
+}
+
+// ---- Extraer y unir páginas ----
+// «1-3, 7, 10-» → [1, 2, 3, 7, 10, …, total] (en ese orden, sin repetir).
+function parsePageRange(text, total) {
+  const pages = [];
+  for (const part of String(text).split(/[,;\s]+/).filter(Boolean)) {
+    const match = part.match(/^(\d*)\s*(?:[-–—:]\s*(\d*))?$/);
+    if (!match || (!match[1] && match[2] === undefined)) return null;
+    const single = match[2] === undefined;
+    const from = match[1] ? Number(match[1]) : 1;
+    const to = single ? from : match[2] ? Number(match[2]) : total;
+    if (from < 1 || to > total || from > to) return null;
+    for (let page = from; page <= to; page++) if (!pages.includes(page)) pages.push(page);
+  }
+  return pages.length ? pages : null;
+}
+async function recordBytes(record) {
+  const source = record.blob ? record : await dbGet(record.id);
+  return new Uint8Array(await source.blob.arrayBuffer());
+}
+async function extractPages() {
+  if (!pdfDoc || !currentBook || isTextBook(currentBook)) return toast("Abre un PDF primero");
+  const total = pdfDoc.numPages;
+  const answer = await askName({ title: "Extraer páginas", text: `Qué páginas quieres en el PDF nuevo (de 1 a ${total}). Por ejemplo: 1-3, 7, 10-`, value: String(currentPage), action: "Extraer", placeholder: "1-3, 7" });
+  if (!answer) return;
+  const pages = parsePageRange(answer, total);
+  if (!pages) return toast(`No entiendo «${answer}». Escribe algo como 1-3, 7 (hasta la ${total})`);
+  const where = await chooseOption({ title: `${pages.length} página${pages.length === 1 ? "" : "s"}`, options: [
+    { id: "library", label: "Añadir a la biblioteca", hint: "Como un documento nuevo, para leerlo y anotarlo aquí.", primary: true },
+    { id: "download", label: "Descargar", hint: "Guardar el PDF nuevo en este dispositivo." },
+  ] });
+  if (!where) return;
+  showLoader(true, "Extrayendo páginas…", "Se hace en este dispositivo");
+  try {
+    const { PDFDocument } = await loadPdfLib();
+    const source = await PDFDocument.load(await recordBytes(currentBook), { ignoreEncryption: true, updateMetadata: false });
+    if (source.isEncrypted) return toast("Este PDF está protegido y no se puede dividir");
+    const target = await PDFDocument.create();
+    (await target.copyPages(source, pages.map((page) => page - 1))).forEach((page) => target.addPage(page));
+    const label = pages.length === 1 ? `p${pages[0]}` : `p${pages[0]}-${pages[pages.length - 1]}`;
+    const name = `${currentBook.name.replace(/\.pdf$/i, "")} (${label}).pdf`;
+    const file = new File([await target.save()], name, { type: "application/pdf" });
+    if (where === "download") {
+      downloadBlob(name, file);
+      toast(`PDF con ${pages.length} página${pages.length === 1 ? "" : "s"} descargado`);
+    } else {
+      await addFile(file, false);
+      toast(`«${libraryDisplayName(name)}» añadido a la biblioteca`);
+    }
+  } catch (error) {
+    console.error(error);
+    toast("No se pudieron extraer las páginas");
+  } finally {
+    showLoader(false);
+  }
+}
+// Une dos PDFs de la biblioteca (primero + segundo) en un documento nuevo.
+async function mergeBooks(firstId, secondId) {
+  showLoader(true, "Uniendo los PDFs…", "Se hace en este dispositivo");
+  try {
+    const [first, second] = await Promise.all([dbGet(firstId), dbGet(secondId)]);
+    if (!first || !second || isTextBook(first) || isTextBook(second)) return toast("Solo se pueden unir PDFs");
+    const { PDFDocument } = await loadPdfLib();
+    const target = await PDFDocument.create();
+    for (const record of [first, second]) {
+      const source = await PDFDocument.load(await recordBytes(record), { ignoreEncryption: true, updateMetadata: false });
+      if (source.isEncrypted) return toast(`«${libraryDisplayName(record.name)}» está protegido y no se puede unir`);
+      (await target.copyPages(source, source.getPageIndices())).forEach((page) => target.addPage(page));
+    }
+    const name = `${first.name.replace(/\.pdf$/i, "")} + ${second.name.replace(/\.pdf$/i, "")}.pdf`;
+    await addFile(new File([await target.save()], name, { type: "application/pdf" }), false);
+    toast(`«${libraryDisplayName(name)}» añadido a la biblioteca`);
+  } catch (error) {
+    console.error(error);
+    toast("No se pudieron unir los PDFs");
+  } finally {
+    showLoader(false);
+  }
+}
+
+// ---- Pantalla encendida ----
+// Mientras la app pasa las páginas sola (auto-scroll, presentación, lectura en
+// voz alta) no se toca la pantalla: se evita que el dispositivo la apague.
+let wakeLock = null;
+async function syncWakeLock() {
+  const wanted = Boolean(currentBook) && document.visibilityState === "visible" && (autoScroll.on || presentationMode || ttsActive);
+  if (!("wakeLock" in navigator)) return;
+  if (wanted && !wakeLock) {
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => (wakeLock = null));
+    } catch {}
+  } else if (!wanted && wakeLock) {
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+}
+document.addEventListener("visibilitychange", () => syncWakeLock());
+setInterval(() => syncWakeLock(), 5000);
+
 async function shareOrDownload(name, blob) {
   const file = new File([blob], name, { type: blob.type });
   if (window.innerWidth <= 900 && navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: name }).catch(() => downloadBlob(name, blob));
@@ -8503,7 +8992,18 @@ async function buildAnnotatedPdf({ includeBoard = true } = {}) {
   const lib = await loadPdfLib();
   const { PDFDocument, PDFName, PDFArray } = lib;
   const record = currentBook.blob ? currentBook : await dbGet(currentBook.id);
-  const doc = await PDFDocument.load(new Uint8Array(await record.blob.arrayBuffer()), { ignoreEncryption: true, updateMetadata: false });
+  // Formulario rellenable: se parte del PDF con los datos escritos dentro.
+  let source = null;
+  if (isFormDocument()) {
+    saveXfaValues();
+    try {
+      source = await pdfDoc.saveDocument();
+    } catch (error) {
+      console.warn("No se pudieron guardar los campos del formulario", error);
+    }
+  }
+  source ||= new Uint8Array(await record.blob.arrayBuffer());
+  const doc = await PDFDocument.load(source, { ignoreEncryption: true, updateMetadata: false });
   if (doc.isEncrypted) throw Object.assign(new Error("El PDF está cifrado"), { code: "encrypted" });
   const context = doc.context;
   const pages = doc.getPages();
@@ -8578,13 +9078,15 @@ async function exportAnnotatedPdf() {
   // Un formulario XFA se guarda con sus datos (las anotaciones encima no se
   // verían: los visores dibujan el formulario, no las páginas).
   if (await exportXfaForm()) return;
-  showLoader(true, "Preparando el PDF anotado…", "Escribiendo las anotaciones en el documento");
+  showLoader(true, isFormDocument() ? "Guardando el formulario…" : "Preparando el PDF anotado…", isFormDocument() ? "Con los datos escritos dentro del PDF" : "Escribiendo las anotaciones en el documento");
   try {
     const { bytes, count, boardPages } = await buildAnnotatedPdf();
-    if (!count && !boardPages) return toast("Este documento no tiene anotaciones que guardar");
-    const name = `${currentBook.name.replace(/\.pdf$/i, "")}-anotado.pdf`;
+    const isForm = isFormDocument();
+    if (!count && !boardPages && !isForm) return toast("Este documento no tiene anotaciones que guardar");
+    const name = `${currentBook.name.replace(/\.pdf$/i, "")}-${isForm ? "rellenado" : "anotado"}.pdf`;
     const file = new File([bytes], name, { type: "application/pdf" });
-    const summary = `${count} ${count === 1 ? "anotación" : "anotaciones"}${boardPages ? ` y ${boardPages} página${boardPages === 1 ? "" : "s"} de pizarra` : ""}`;
+    const marks = `${count} ${count === 1 ? "anotación" : "anotaciones"}${boardPages ? ` y ${boardPages} página${boardPages === 1 ? "" : "s"} de pizarra` : ""}`;
+    const summary = isForm ? `los datos del formulario${count || boardPages ? ` y ${marks}` : ""}` : marks;
     // En el móvil se ofrece compartir (GoodNotes, Files, Drive…); si no, se descarga.
     if (document.body.classList.contains("is-mobile") && navigator.canShare?.({ files: [file] })) {
       try {
@@ -12489,7 +12991,9 @@ function mobileMoreItems() {
     { id: "reflow", icon: "type", label: reflowMode ? "Ver el PDF" : "Modo lectura", when: hasPdf, active: reflowMode, run: () => setReadingMode(reflowMode ? "pdf" : "reflow") },
     { id: "rotate", icon: "rotate", label: "Girar páginas", when: hasPdf && !reflowMode, run: () => $("rotateBtn").click() },
     { id: "themes", icon: "textSize", label: "Temas y ajustes", when: hasDoc, run: openThemeSheet },
-    { id: "pdf", icon: "download", label: isXfaDocument() ? "Guardar formulario" : "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
+    { id: "pdf", icon: "download", label: isXfaDocument() || isFormDocument() ? "Guardar formulario" : "PDF anotado", when: hasPdf, run: exportAnnotatedPdf },
+    { id: "print", icon: "printer", label: "Imprimir", when: hasPdf, run: printDocument },
+    { id: "extract", icon: "scissors", label: "Extraer páginas", when: hasPdf, run: extractPages },
     { id: "ocr", icon: "scan", label: "Reconocer texto (OCR)", when: hasPdf, run: () => runOcr("all") },
     { id: "markdown", icon: "copy", label: "Exportar notas", when: hasDoc, run: exportMarkdown },
     { id: "backup", icon: "database", label: "Copia y sincronización", run: openDataPanel },
@@ -12663,7 +13167,11 @@ document.addEventListener("webkitfullscreenchange", syncFullscreenState);
 // estorbar al seleccionar.
 let paperTap = null;
 let viewerScrolledAt = 0;
-$("viewer").addEventListener("scroll", () => (viewerScrolledAt = performance.now()), { passive: true });
+$("viewer").addEventListener("scroll", () => {
+  viewerScrolledAt = performance.now();
+  scheduleDetail(220);
+}, { passive: true });
+window.addEventListener("resize", () => scheduleDetail(300), { passive: true });
 $("viewer").addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || document.body.classList.contains("ink-drawing-mode") || !currentBook) return;
   paperTap = { id: event.pointerId, x: event.clientX, y: event.clientY, time: performance.now(), selection: window.getSelection()?.toString() || "", editorOpen: !$("annotationEditor").hidden || Boolean($("annotationActions")?.classList.contains("show")) };
@@ -12756,6 +13264,8 @@ $("viewer").addEventListener("wheel", (event) => {
 $("exportNotes").onclick = exportAnnotations;
 $("exportMarkdown").onclick = exportMarkdown;
 $("exportAnnotatedPdf").onclick = exportAnnotatedPdf;
+$("printBtn").onclick = () => (closeViewMenu(), printDocument());
+$("extractPagesBtn").onclick = () => (closeViewMenu(), extractPages());
 $("annotationImportInput").onchange = async (event) => {
   const [file] = event.target.files || [];
   if (file) await importAnnotationBackup(file);
@@ -13729,9 +14239,10 @@ document.addEventListener(
       e.preventDefault();
       const gesture = pinchGesture;
       pinchGesture = null;
-      resetPinchPreview();
       swipeStart = null;
-      setZoom(gesture.nextScale, gesture.anchor);
+      // La vista previa ampliada se mantiene hasta que la página nítida está
+      // lista (antes volvía un instante al tamaño anterior y parpadeaba).
+      setZoom(gesture.nextScale, gesture.anchor).catch(() => {}).finally(resetPinchPreview);
       return;
     }
     const start = swipeStart;

@@ -40,3 +40,23 @@ export async function buildXfaPdf() {
   doc.catalog.set(PDFName.of("AcroForm"), doc.context.obj({ Fields: [], XFA: xfa }));
   return Buffer.from(await doc.save({ useObjectStreams: false }));
 }
+
+// Formulario rellenable normal (AcroForm): texto, casilla y lista.
+export async function buildAcroFormPdf() {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([595, 842]);
+  page.drawText("Solicitud de prueba AcroForm", { x: 50, y: 780, size: 18, font });
+  page.drawText("Nombre", { x: 50, y: 730, size: 11, font });
+  page.drawText("Acepto", { x: 80, y: 672, size: 11, font });
+  page.drawText("Provincia", { x: 50, y: 620, size: 11, font });
+  const form = doc.getForm();
+  const name = form.createTextField("nombre");
+  name.addToPage(page, { x: 130, y: 722, width: 260, height: 22, font });
+  const accept = form.createCheckBox("acepto");
+  accept.addToPage(page, { x: 50, y: 668, width: 16, height: 16 });
+  const province = form.createDropdown("provincia");
+  province.addOptions(["Madrid", "Sevilla", "Valencia"]);
+  province.addToPage(page, { x: 130, y: 612, width: 160, height: 22, font });
+  return doc.save();
+}

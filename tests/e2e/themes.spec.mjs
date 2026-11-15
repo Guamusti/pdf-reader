@@ -148,7 +148,7 @@ test.describe("menú Vista", () => {
     await openDoc(page, "refs.pdf");
     await page.click("#appearanceBtn");
     const menu = page.locator("#appearancePopover");
-    await expect(menu.locator(".vm-label")).toHaveText(["Aspecto", "Páginas", "Herramientas", "Esta página"]);
+    await expect(menu.locator(".vm-label")).toHaveText(["Aspecto", "Páginas", "Herramientas", "Página y documento"]);
     // Lo que ya está en el pie o en «Temas y ajustes» no se repite aquí.
     await expect(menu.locator("#appearanceZoomIn, #appearanceTheme, [data-theme-choice]")).toHaveCount(0);
     await expect(page.locator("#viewRulerSizes")).toBeHidden();
