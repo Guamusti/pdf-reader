@@ -90,7 +90,7 @@ test.describe("móvil", () => {
     expect(Math.round((await page.locator(".footer").boundingBox()).height)).toBe(40);
 
     await page.click("#mobileMoreBtn");
-    await expect(page.locator(".mm-grid button")).toContainText(["Biblioteca", "Cuaderno", "Pizarra"]);
+    await expect(page.locator(".mm-grid button")).toContainText(["Biblioteca", "Cuaderno de notas", "Pizarra"]);
   });
 });
 
@@ -101,8 +101,11 @@ test.describe("iPad", () => {
     await openDoc(page, "scan.pdf");
     await expect(page.locator("#mobileMoreBtn")).toBeVisible();
     await page.click("#mobileMoreBtn");
+    // Todo está en el menú, ordenado por secciones.
+    await expect(page.locator("#mobileMore .mm-title")).toHaveText(["Documento", "Vista", "Anotar", "Estudiar e IA", "Herramientas", "Paper Reader"]);
     const menu = page.locator("#mobileMore .mm-grid button");
-    await expect(menu).toHaveText(["Nota en la página", "Estudiar", "Dos PDFs a la vez", "Modo lectura", "Girar páginas", "Temas y ajustes", "PDF anotado", "Imprimir", "Extraer páginas", "Reconocer texto (OCR)", "Exportar notas", "Copia y sincronización", "Pantalla completa"]);
+    await expect(page.locator('#mobileMore .mm-section:has(.mm-title:text-is("Documento")) button')).toHaveText(["Biblioteca", "Buscar", "Imprimir", "Guardar PDF anotado", "Extraer páginas", "Referencias y cita"]);
+    for (const label of ["Modo lectura", "Dos PDFs a la vez", "Girar páginas", "Presentación", "Nota en la página", "Pizarra", "Estudiar tarjetas", "Reconocer texto (OCR)", "Regla de lectura", "Copia y sincronización", "Atajos de teclado", "Todas las acciones"]) await expect(menu.filter({ hasText: label })).toHaveCount(1);
     // Desplegable bajo el botón, no hoja inferior.
     await page.waitForTimeout(250);
     const [button, sheet] = await Promise.all([page.locator("#mobileMoreBtn").boundingBox(), page.locator(".mm-sheet").boundingBox()]);

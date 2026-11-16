@@ -22,7 +22,7 @@ test("OCR de una página escaneada: texto seleccionable, resaltable y buscable",
   await expect(page.locator("#annotationLayer .annotation")).toHaveCount(1);
 
   await page.click("#markerModeBtn");
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+f");
   await page.keyboard.type("Young");
   await expect(page.locator("#paletteList")).toContainText("Tablas de Young");
 });
