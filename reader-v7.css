@@ -1,0 +1,325 @@
+/* ==========================================================================
+   Paper Reader · sistema de diseño (v7)
+   Una sola capa visual para toda la app: colores de papel cálidos con un
+   único acento, la misma forma para botones, campos, pestañas, tarjetas y
+   paneles, y tres niveles de sombra. Se carga la última y sustituye a los
+   estilos anteriores, que mezclaban negro puro, azules distintos y radios
+   diferentes en cada pantalla.
+   ========================================================================== */
+
+/* ---- 1. Tokens --------------------------------------------------------- */
+html.ui4 {
+  --r-xs: 6px; --r-sm: 9px; --r-md: 12px; --r-lg: 16px; --r-xl: 22px; --r-pill: 999px;
+  --ctl: 36px;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html.ui4[data-theme="light"] {
+  --bg: #efede8;            /* mesa sobre la que descansa la página */
+  --chrome: #faf9f6;        /* barras y panel lateral */
+  --surface: rgba(255, 255, 255, .94);
+  --surface-solid: #ffffff;
+  --text: #1c1b19;
+  --muted: #6c6962;
+  --faint: #9a968d;
+  --line: #e4e1d9;
+  --line-strong: #d3cfc5;
+  --soft: #f3f1ec;
+  --soft-2: #ebe8e1;
+  --accent: #2f55d4;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(47, 85, 212, .1);
+  --accent-line: rgba(47, 85, 212, .32);
+  --ok: #1f8a4c; --warn: #b26a00; --danger: #c93a3a;
+  --shadow-1: 0 1px 2px rgba(40, 34, 20, .06), 0 1px 1px rgba(40, 34, 20, .04);
+  --shadow-2: 0 10px 30px -8px rgba(40, 34, 20, .2), 0 2px 6px rgba(40, 34, 20, .06);
+  --shadow-3: 0 28px 70px -18px rgba(40, 34, 20, .34), 0 6px 18px rgba(40, 34, 20, .08);
+  --shadow: var(--shadow-2);
+  --page-shadow: 0 1px 2px rgba(40, 34, 20, .1), 0 14px 40px -10px rgba(40, 34, 20, .22);
+  --scrim: rgba(30, 26, 18, .34);
+}
+html.ui4[data-theme="dark"] {
+  --bg: #111214;
+  --chrome: #18191c;
+  --surface: rgba(30, 31, 35, .94);
+  --surface-solid: #1e1f23;
+  --text: #ecebe7;
+  --muted: #a09e97;
+  --faint: #74726c;
+  --line: #2c2d32;
+  --line-strong: #3a3b41;
+  --soft: #26272c;
+  --soft-2: #2e3035;
+  --accent: #8ea6ff;
+  --accent-ink: #0d1330;
+  --accent-soft: rgba(142, 166, 255, .15);
+  --accent-line: rgba(142, 166, 255, .4);
+  --ok: #6fd39a; --warn: #f0b870; --danger: #ff8080;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-2: 0 12px 32px -8px rgba(0, 0, 0, .6), 0 2px 6px rgba(0, 0, 0, .3);
+  --shadow-3: 0 30px 80px -18px rgba(0, 0, 0, .75), 0 6px 18px rgba(0, 0, 0, .4);
+  --shadow: var(--shadow-2);
+  --page-shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 18px 50px -12px rgba(0, 0, 0, .7);
+  --scrim: rgba(0, 0, 0, .55);
+}
+html.ui4[data-theme="sepia"] {
+  --bg: #e9dfca;
+  --chrome: #f6eddb;
+  --surface: rgba(252, 245, 231, .94);
+  --surface-solid: #fbf3e2;
+  --text: #43342a;
+  --muted: #7d6a58;
+  --faint: #a39280;
+  --line: #e0d3bb;
+  --line-strong: #cfbf9f;
+  --soft: #f1e6d0;
+  --soft-2: #e8dcc3;
+  --accent: #9a5a24;
+  --accent-ink: #fff8ea;
+  --accent-soft: rgba(154, 90, 36, .12);
+  --accent-line: rgba(154, 90, 36, .34);
+  --ok: #3f7d3c; --warn: #a2620a; --danger: #b5432f;
+  --shadow-1: 0 1px 2px rgba(70, 48, 20, .08);
+  --shadow-2: 0 10px 30px -8px rgba(70, 48, 20, .24), 0 2px 6px rgba(70, 48, 20, .08);
+  --shadow-3: 0 28px 70px -18px rgba(70, 48, 20, .38), 0 6px 18px rgba(70, 48, 20, .1);
+  --shadow: var(--shadow-2);
+  --page-shadow: 0 1px 2px rgba(70, 48, 20, .12), 0 14px 40px -10px rgba(70, 48, 20, .26);
+  --scrim: rgba(60, 42, 20, .36);
+}
+
+/* ---- 2. Base ----------------------------------------------------------- */
+html.ui4 body { font-family: var(--font-ui); color: var(--text); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+html.ui4 ::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+html.ui4 :is(button, a, input, select, textarea, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+html.ui4 kbd, html.ui4 .palette-kbd { font-family: var(--font-mono); }
+
+/* ---- 3. Controles comunes --------------------------------------------- */
+/* Botón neutro (fantasma) de las barras. */
+html.ui4 .toolbar .btn, html.ui4 .footer .btn, html.ui4 .split-head .btn {
+  border-radius: var(--r-sm) !important; color: var(--text); transition: background .14s var(--ease), color .14s var(--ease), box-shadow .14s var(--ease);
+}
+html.ui4 .toolbar .btn:hover:not(:disabled), html.ui4 .footer .btn:hover:not(:disabled) { background: var(--soft-2) !important; }
+html.ui4 .toolbar .btn[aria-pressed="true"], html.ui4 .toolbar .btn.active, html.ui4 .toolbar .btn[aria-expanded="true"] {
+  background: var(--accent-soft) !important; color: var(--accent) !important; box-shadow: none !important;
+}
+html.ui4 .toolbar .btn:disabled, html.ui4 .footer .btn:disabled { opacity: .35; }
+/* Campos de texto y listas. */
+html.ui4 :is(.field, .lib-select, .data-pass, .lib-dialog-card input, .tts-select) {
+  border: 1px solid var(--line-strong) !important; border-radius: var(--r-sm) !important; background-color: var(--surface-solid) !important; color: var(--text) !important;
+  transition: border-color .14s var(--ease), box-shadow .14s var(--ease);
+}
+html.ui4 :is(.field, .lib-select, .data-pass, .lib-dialog-card input):focus { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-soft) !important; outline: none !important; }
+/* Control segmentado: pista suave y pastilla elevada. */
+html.ui4 :is(.vm-segmented, .nw-tabs, .sidebar-tabs, .structure-tabs, .lib-view, .ai-scope, .reflow-themes) {
+  background: var(--soft-2) !important; border: 0 !important; border-radius: var(--r-md) !important; padding: 3px !important;
+}
+html.ui4 :is(.vm-segmented, .nw-tabs, .sidebar-tabs, .structure-tabs, .lib-view, .ai-scope) > button {
+  border: 0 !important; border-radius: var(--r-sm) !important; background: transparent !important; color: var(--muted) !important; font-weight: 550 !important; box-shadow: none !important;
+  transition: background .14s var(--ease), color .14s var(--ease);
+}
+html.ui4 :is(.vm-segmented, .nw-tabs, .sidebar-tabs, .structure-tabs, .lib-view, .ai-scope) > button:hover:not(:disabled) { color: var(--text) !important; }
+html.ui4 :is(.vm-segmented, .nw-tabs, .sidebar-tabs, .structure-tabs, .lib-view, .ai-scope) > button:is(.active, [aria-selected="true"], [aria-checked="true"], [aria-pressed="true"]) {
+  background: var(--surface-solid) !important; color: var(--text) !important; font-weight: 650 !important; box-shadow: var(--shadow-1) !important;
+}
+/* Etiquetas de sección. */
+html.ui4 :is(.label, .vm-label, .mm-title, .palette-group, .study-kicker, .thumb-kicker, .nw-kicker, .data-kicker) {
+  color: var(--faint) !important; font-size: 10.5px !important; font-weight: 700 !important; letter-spacing: .09em !important; text-transform: uppercase;
+}
+/* Teclas. */
+html.ui4 kbd {
+  border: 1px solid var(--line) !important; border-bottom-width: 2px !important; border-radius: var(--r-xs) !important; background: var(--surface-solid) !important; color: var(--muted) !important;
+}
+html.ui4 .palette-tabs button[aria-selected="true"] kbd { background: transparent !important; border-color: color-mix(in srgb, currentColor 30%, transparent) !important; color: inherit !important; }
+
+/* ---- 4. Estructura: panel lateral, barra superior y pie --------------- */
+html.ui4 .sidebar { background: var(--chrome) !important; border-right: 1px solid var(--line) !important; }
+html.ui4 .brand { border-bottom-color: var(--line) !important; }
+html.ui4 .brand h1 { letter-spacing: -.02em; font-weight: 700; }
+html.ui4 .toolbar { background: color-mix(in srgb, var(--chrome) 92%, transparent) !important; border-bottom: 1px solid var(--line) !important; backdrop-filter: saturate(1.4) blur(18px); -webkit-backdrop-filter: saturate(1.4) blur(18px); box-shadow: none !important; }
+html.ui4 .toolbar .title { font-weight: 650; letter-spacing: -.01em; }
+html.ui4 .toolbar .subtitle { color: var(--muted); }
+html.ui4 .toolbar-nav { background: var(--soft-2) !important; border: 0 !important; border-radius: var(--r-md) !important; box-shadow: none !important; }
+html.ui4 .toolbar-nav input, html.ui4 .footer input[type="number"], html.ui4 .footer #pageInput { background: var(--surface-solid) !important; border-radius: var(--r-xs) !important; box-shadow: var(--shadow-1); }
+html.ui4 .palette-trigger { background: var(--soft-2) !important; border: 1px solid transparent !important; border-radius: var(--r-md) !important; color: var(--muted) !important; }
+html.ui4 .palette-trigger:hover { background: var(--surface-solid) !important; border-color: var(--line-strong) !important; color: var(--text) !important; }
+html.ui4 .toolbar-actions .toolbar-group { border-left-color: var(--line) !important; }
+html.ui4 .viewer { background: var(--bg) !important; }
+html.ui4 :is(.canvas-wrap, .cont-page, .split-page) { box-shadow: var(--page-shadow) !important; border-radius: 2px !important; }
+html.ui4 .footer { background: var(--surface) !important; border: 1px solid var(--line) !important; border-radius: var(--r-lg) !important; box-shadow: var(--shadow-2) !important; }
+html.ui4 .footer .btn.zoom-level, html.ui4 .footer .zoom-level { background: var(--soft-2) !important; border-radius: var(--r-sm) !important; font-weight: 650; font-variant-numeric: tabular-nums; }
+html.ui4 .page-scrubber { accent-color: var(--accent); }
+html.ui4 .reading-progress, html.ui4 #readingProgress, html.ui4 .progress-bar { background: var(--accent) !important; }
+
+/* ---- 5. Superficies flotantes: menús, paneles y diálogos -------------- */
+html.ui4 :is(.tool-popover, .mm-sheet, .lib-menu, .hover-preview, .annotation-actions, #annotationEditor, .ink-color-card, .as-menu, .prompt-menu) {
+  background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-lg) !important; box-shadow: var(--shadow-2) !important; color: var(--text);
+}
+html.ui4 :is(.palette-card, .study-card, .shortcuts-card, .lib-dialog-card, .loader-card, .theme-sheet-card, .ts-card) {
+  background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-xl) !important; box-shadow: var(--shadow-3) !important;
+}
+html.ui4 :is(.ai-card, .notes-window) { background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-lg) !important; box-shadow: var(--shadow-3) !important; }
+html.ui4 :is(.palette, .study, .shortcuts, .lib-dialog) { background: var(--scrim) !important; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+html.ui4 .mm-backdrop { background: var(--scrim) !important; }
+html.ui4 .mobile-more.is-popover .mm-backdrop { background: transparent !important; }
+/* Filas de menú y de la paleta. */
+html.ui4 .mm-section .mm-grid button, html.ui4 .lib-menu button, html.ui4 .palette-item { border-radius: var(--r-sm) !important; }
+html.ui4 .mm-section .mm-grid button:hover, html.ui4 .lib-menu button:hover:not(:disabled) { background: var(--soft) !important; }
+html.ui4 .mm-section .mm-grid button[aria-pressed="true"] { background: var(--accent-soft) !important; color: var(--accent) !important; }
+html.ui4 .mm-section .mm-grid button[aria-pressed="true"] .ui-icon { color: var(--accent) !important; }
+html.ui4 .palette-item[aria-selected="true"] { background: var(--accent-soft) !important; box-shadow: none !important; }
+html.ui4 .palette-item[aria-selected="true"] .palette-item-icon { background: var(--accent) !important; color: var(--accent-ink) !important; }
+html.ui4 .palette-item-icon { background: var(--soft-2) !important; border-radius: var(--r-sm) !important; }
+html.ui4 .palette-tabs button[aria-selected="true"] { background: var(--accent) !important; color: var(--accent-ink) !important; }
+html.ui4 .palette-input-row { border-bottom-color: var(--line) !important; }
+html.ui4 .palette-foot { border-top-color: var(--line) !important; background: var(--soft); }
+html.ui4 .palette-opt.active { background: var(--accent) !important; border-color: var(--accent) !important; color: var(--accent-ink) !important; }
+
+/* ---- 6. Botones con nombre (primario y secundario) -------------------- */
+html.ui4 :is(.lib-dialog-actions button, .data-card button, .data-actions button, .study-action, .nw-foot button, .nw-empty button, .lib-new-folder, .lib-path button, .vm-actions button, .choose-option, .refs-actions button, .as-primary, .btn.primary) {
+  border-radius: var(--r-sm) !important; font-weight: 600; transition: background .14s var(--ease), border-color .14s var(--ease), transform .08s var(--ease);
+}
+html.ui4 :is(.lib-dialog-actions .is-primary, .data-card .is-primary, .data-actions .is-primary, .btn.primary, .lib-add, .choose-option.is-primary) {
+  background: var(--accent) !important; border-color: var(--accent) !important; color: var(--accent-ink) !important; box-shadow: var(--shadow-1) !important;
+}
+html.ui4 :is(.lib-dialog-actions .is-primary, .data-card .is-primary, .btn.primary, .lib-add):hover { filter: brightness(1.07); }
+html.ui4 :is(.lib-dialog-actions .is-primary, .btn.primary, .lib-add):active { transform: translateY(1px); }
+html.ui4 .choose-option.is-primary small { color: color-mix(in srgb, var(--accent-ink) 78%, transparent) !important; }
+
+/* ---- 7. Menú Vista ----------------------------------------------------- */
+html.ui4 .view-menu .vm-section { border-top-color: var(--line) !important; }
+html.ui4 .view-menu .vm-tile, html.ui4 .view-menu .vm-actions button, html.ui4 .view-menu .vm-aspect {
+  background: var(--soft) !important; border: 1px solid transparent !important; border-radius: var(--r-md) !important; color: var(--text) !important;
+}
+html.ui4 .view-menu :is(.vm-tile, .vm-actions button, .vm-aspect):hover { background: var(--soft-2) !important; filter: none !important; }
+html.ui4 .view-menu .vm-tile[aria-pressed="true"] { background: var(--accent-soft) !important; border-color: var(--accent-line) !important; color: var(--accent) !important; }
+html.ui4 .view-menu .vm-close, html.ui4 :is(.lib-close, .lib-data, .study-close, .shortcuts-close) { border-radius: var(--r-pill) !important; background: var(--soft) !important; border: 0 !important; color: var(--text) !important; }
+html.ui4 .view-menu .vm-aspect-aa { background: var(--surface-solid) !important; box-shadow: var(--shadow-1); border-radius: var(--r-sm) !important; }
+
+/* ---- 8. Vista dividida y barras propias ------------------------------- */
+html.ui4 .split-pane { background: var(--bg) !important; border-left: 1px solid var(--line) !important; }
+html.ui4 .split-head { background: var(--chrome) !important; border-bottom: 1px solid var(--line) !important; }
+html.ui4 .split-head .split-doc, html.ui4 .split-nav, html.ui4 .split-zoom { background-color: var(--soft-2) !important; border-color: transparent !important; border-radius: var(--r-md) !important; }
+html.ui4 .split-grip { background: var(--surface-solid) !important; border-color: var(--line-strong) !important; box-shadow: var(--shadow-1) !important; }
+
+/* ---- 9. Avisos --------------------------------------------------------- */
+html.ui4 .toast { background: var(--text) !important; color: var(--surface-solid) !important; border: 0 !important; border-radius: var(--r-pill) !important; box-shadow: var(--shadow-2) !important; font-weight: 550; padding-inline: 18px !important; }
+
+/* ---- 10. Biblioteca ---------------------------------------------------- */
+html.ui4 .lib-panel { background: var(--bg) !important; color: var(--text); }
+html.ui4 .lib-top h2 { font-size: clamp(26px, 3vw, 34px) !important; font-weight: 720 !important; letter-spacing: -.03em !important; }
+html.ui4 .lib-summary { color: var(--muted) !important; }
+html.ui4 .lib-add { border-radius: var(--r-md) !important; font-weight: 650 !important; }
+html.ui4 .lib-search { background: var(--surface-solid) !important; border: 1px solid var(--line-strong) !important; border-radius: var(--r-md) !important; box-shadow: var(--shadow-1) !important; }
+html.ui4 .lib-search:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-soft) !important; }
+html.ui4 .lib-search input, html.ui4 .lib-search input:focus-visible { outline: none !important; border: 0 !important; box-shadow: none !important; background: transparent !important; }
+html.ui4 .lib-filters button { border: 1px solid var(--line-strong) !important; border-radius: var(--r-pill) !important; background: transparent !important; color: var(--text) !important; font-weight: 550 !important; box-shadow: none !important; }
+html.ui4 .lib-filters button:hover:not(:disabled) { background: var(--surface-solid) !important; }
+html.ui4 .lib-filters button:is(.active, [aria-checked="true"]) { background: var(--accent-soft) !important; border-color: var(--accent-line) !important; color: var(--accent) !important; font-weight: 650 !important; }
+html.ui4 .lib-filters button:is(.active, [aria-checked="true"]) * { color: inherit !important; }
+html.ui4 .lib-filters button:disabled { opacity: .5; }
+html.ui4 .lib-new-folder, html.ui4 .lib-path > button { background: var(--surface-solid) !important; border: 1px solid var(--line-strong) !important; color: var(--text) !important; box-shadow: var(--shadow-1); }
+html.ui4 .lib-cover { border-radius: var(--r-sm) !important; box-shadow: var(--page-shadow) !important; background-color: var(--surface-solid); transition: transform .2s var(--ease), box-shadow .2s var(--ease); }
+html.ui4 .lib-open:hover .lib-cover { transform: translateY(-3px); }
+html.ui4 .lib-book.is-current .lib-cover { outline: 2px solid var(--accent) !important; outline-offset: 3px; box-shadow: var(--page-shadow) !important; }
+html.ui4 .lib-book.is-current .lib-open { outline: none !important; box-shadow: none !important; }
+html.ui4 .lib-name { font-weight: 650 !important; letter-spacing: -.01em; }
+html.ui4 .lib-meta, html.ui4 .lib-when { color: var(--muted) !important; }
+html.ui4 .lib-book.is-current .lib-detail { color: var(--accent) !important; font-weight: 650; }
+html.ui4 .lib-badge { border-radius: var(--r-xs) !important; background: rgba(28, 27, 25, .78) !important; color: #fff !important; backdrop-filter: blur(6px); letter-spacing: .06em; }
+html.ui4 .lib-progress { background: var(--soft-2) !important; border-radius: var(--r-pill); overflow: hidden; }
+html.ui4 .lib-progress b { background: var(--accent) !important; border-radius: var(--r-pill); }
+html.ui4 :is(.lib-move, .lib-remove, .lib-more) { border-radius: var(--r-sm) !important; }
+html.ui4 .lib-folder-body { background: var(--soft-2) !important; border: 1px solid var(--line) !important; border-radius: var(--r-md) !important; }
+html.ui4 .lib-folder-tab { background: var(--soft-2) !important; border: 1px solid var(--line) !important; border-bottom: 0 !important; }
+html.ui4 .lib-foot { color: var(--faint) !important; }
+html.ui4 .lib-drop > div { background: var(--surface-solid) !important; border: 2px dashed var(--accent) !important; border-radius: var(--r-xl) !important; box-shadow: var(--shadow-3) !important; }
+html.ui4 .lib-menu-heading { color: var(--faint) !important; }
+html.ui4 .lib-hero, html.ui4 .lib-continue > * { border-radius: var(--r-lg) !important; }
+
+/* ---- 11. Asistente ----------------------------------------------------- */
+html.ui4 .as-head, html.ui4 .nw-head { border-bottom: 1px solid var(--line) !important; background: transparent !important; }
+html.ui4 :is(.as-spark, .as-empty-mark) { background: var(--accent) !important; color: var(--accent-ink) !important; border-radius: var(--r-md) !important; box-shadow: none !important; }
+html.ui4 .as-title { font-weight: 680 !important; letter-spacing: -.01em; }
+html.ui4 .as-status, html.ui4 .as-model { color: var(--muted) !important; }
+html.ui4 .as-chip { border: 1px solid var(--line-strong) !important; border-radius: var(--r-pill) !important; background: var(--surface-solid) !important; color: var(--text) !important; font-weight: 550 !important; }
+html.ui4 .as-chip:hover:not(:disabled) { background: var(--accent-soft) !important; border-color: var(--accent-line) !important; color: var(--accent) !important; }
+html.ui4 .as-composer { border: 1px solid var(--line-strong) !important; border-radius: var(--r-md) !important; background: var(--surface-solid) !important; box-shadow: var(--shadow-1) !important; }
+html.ui4 .as-composer:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-soft) !important; }
+html.ui4 .as-composer textarea:focus-visible { outline: none !important; }
+html.ui4 .as-send { background: var(--accent) !important; color: var(--accent-ink) !important; border-radius: var(--r-sm) !important; }
+html.ui4 .as-user .as-bubble { background: var(--accent) !important; color: var(--accent-ink) !important; border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg) !important; }
+html.ui4 .as-bot .as-bubble, html.ui4 .as-card { background: var(--soft) !important; border: 1px solid var(--line) !important; border-radius: var(--r-lg) !important; }
+html.ui4 .as-cite { background: var(--accent-soft) !important; color: var(--accent) !important; }
+html.ui4 .as-dock { border-top: 1px solid var(--line) !important; background: color-mix(in srgb, var(--soft) 55%, var(--surface-solid)) !important; }
+
+/* ---- 12. Cuaderno de notas -------------------------------------------- */
+html.ui4 .nw-title { font-weight: 680 !important; letter-spacing: -.01em; }
+html.ui4 .nw-seg { background: var(--soft-2) !important; border: 0 !important; border-radius: var(--r-md) !important; }
+html.ui4 .nw-seg button { border-radius: var(--r-sm) !important; }
+html.ui4 .nw-seg button:is(.active, [aria-pressed="true"]) { background: var(--surface-solid) !important; color: var(--accent) !important; box-shadow: var(--shadow-1) !important; }
+html.ui4 .nw-foot { border-top: 1px solid var(--line) !important; background: color-mix(in srgb, var(--soft) 55%, var(--surface-solid)) !important; }
+html.ui4 :is(.nw-foot button, .nw-empty button) { background: var(--surface-solid) !important; border: 1px solid var(--line-strong) !important; color: var(--text) !important; box-shadow: var(--shadow-1); }
+html.ui4 :is(.nw-card, .note-card) { background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-md) !important; box-shadow: var(--shadow-1) !important; }
+html.ui4 .note-chip { border-radius: var(--r-pill) !important; }
+
+/* ---- 13. Estudio, datos y atajos -------------------------------------- */
+html.ui4 :is(.study-head, .data-card-head) { border-bottom-color: var(--line) !important; }
+html.ui4 .study-head h2, html.ui4 .study-head strong { letter-spacing: -.02em; }
+html.ui4 .study-stat { background: var(--soft) !important; border: 1px solid var(--line) !important; border-radius: var(--r-md) !important; color: var(--text) !important; }
+html.ui4 .study-stat-main { background: var(--accent) !important; border-color: var(--accent) !important; color: var(--accent-ink) !important; }
+html.ui4 .study-stat-main * { color: inherit !important; }
+html.ui4 .study-actions > button, html.ui4 .study-item { background: var(--surface-solid) !important; border: 1px solid var(--line-strong) !important; border-radius: var(--r-md) !important; color: var(--text) !important; }
+html.ui4 .study-actions > button:hover:not(:disabled) { background: var(--soft) !important; border-color: var(--accent-line) !important; }
+html.ui4 .study-actions > button:first-child:not(:disabled) { background: var(--accent) !important; border-color: var(--accent) !important; color: var(--accent-ink) !important; }
+html.ui4 .study-actions > button:first-child:not(:disabled) * { color: inherit !important; }
+html.ui4 .study-actions > button:disabled { background: var(--soft-2) !important; border-color: transparent !important; color: var(--muted) !important; opacity: 1 !important; }
+html.ui4 .study-actions > button:disabled * { color: inherit !important; }
+html.ui4 .data-card { background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-lg) !important; box-shadow: none !important; }
+html.ui4 .data-card button { background: var(--surface-solid) !important; border: 1px solid var(--line-strong) !important; color: var(--text) !important; box-shadow: var(--shadow-1); }
+html.ui4 :is(.data-card, .study-card, .ai-card, .notes-window, .lib-panel, .sidebar) button:is(.is-primary, .primary, .primary-action) { background: var(--accent) !important; border-color: var(--accent) !important; color: var(--accent-ink) !important; }
+html.ui4 .data-pill { border-radius: var(--r-pill) !important; font-weight: 650; }
+html.ui4 .data-hint, html.ui4 .data-meta { color: var(--muted) !important; }
+html.ui4 .shortcut-row { border-bottom-color: var(--line) !important; }
+
+/* ---- 14. Barra de anotar ---------------------------------------------- */
+html.ui4 .ink-strip-inner { background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-lg) !important; box-shadow: var(--shadow-2) !important; }
+html.ui4 .ink-strip button { border-radius: var(--r-sm) !important; }
+html.ui4 .ink-strip button:hover:not(:disabled) { background: var(--soft-2) !important; }
+html.ui4 .ink-strip button:is(.active, [aria-pressed="true"]) { background: var(--accent-soft) !important; box-shadow: inset 0 0 0 1px var(--accent-line) !important; }
+html.ui4 .ink-sep, html.ui4 .ink-divider { background: var(--line) !important; }
+
+/* ---- 15. Temas y ajustes, miniaturas, referencias ---------------------- */
+html.ui4 .ts-backdrop { background: var(--scrim) !important; }
+html.ui4 .ts-head { border-bottom-color: var(--line) !important; }
+html.ui4 .ts-section-title { color: var(--faint) !important; font-size: 10.5px !important; font-weight: 700 !important; letter-spacing: .09em !important; text-transform: uppercase; }
+html.ui4 .ts-preset { border: 1px solid var(--line) !important; border-radius: var(--r-md) !important; }
+html.ui4 .ts-preset:is(.active, [aria-pressed="true"], [aria-checked="true"]) { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-soft) !important; }
+html.ui4 .ts-segmented { background: var(--soft-2) !important; border: 0 !important; border-radius: var(--r-md) !important; padding: 3px !important; }
+html.ui4 .ts-segmented > button { border: 0 !important; border-radius: var(--r-sm) !important; background: transparent !important; color: var(--muted) !important; }
+html.ui4 .ts-segmented > button:is(.active, [aria-pressed="true"], [aria-checked="true"]) { background: var(--surface-solid) !important; color: var(--text) !important; box-shadow: var(--shadow-1) !important; }
+html.ui4 .ts-preview { border: 1px solid var(--line) !important; border-radius: var(--r-md) !important; }
+html.ui4 input[type="range"] { accent-color: var(--accent); }
+html.ui4 input[type="checkbox"], html.ui4 input[type="radio"] { accent-color: var(--accent); }
+html.ui4 .thumbnail-rail { background: var(--surface) !important; border: 1px solid var(--line) !important; border-radius: var(--r-lg) !important; box-shadow: var(--shadow-2) !important; }
+html.ui4 .thumb { border-radius: var(--r-xs) !important; }
+html.ui4 .thumb.active { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-soft) !important; }
+html.ui4 .refs-doc-card { background: var(--soft) !important; border: 1px solid var(--line) !important; border-radius: var(--r-md) !important; }
+
+/* ---- 16. Panel lateral: listas ---------------------------------------- */
+html.ui4 :is(.outline-row, .structure-item, .annotation-item, .bookmark-item) { border-radius: var(--r-sm) !important; }
+html.ui4 :is(.outline-row, .structure-item):hover { background: var(--soft-2) !important; }
+html.ui4 :is(.outline-row.active, .outline-row.is-current, .structure-item.active) { background: var(--accent-soft) !important; color: var(--accent) !important; }
+html.ui4 .outline-filter { background: var(--surface-solid) !important; border: 1px solid var(--line-strong) !important; border-radius: var(--r-sm) !important; }
+html.ui4 .structure-page, html.ui4 .outline-page { color: var(--faint) !important; font-variant-numeric: tabular-nums; }
+
+/* Los diálogos reciben el foco al abrirse: sin anillo alrededor de toda la tarjeta. */
+html.ui4 :is(.study-card, .shortcuts-card, .palette-card, .lib-dialog-card, .ts-card, .mm-sheet, .tool-popover, [role="dialog"], .viewer, .sidebar):focus-visible { outline: none !important; }
+
+/* Filtros de anotaciones del panel lateral: mismas pastillas que la biblioteca. */
+html.ui4 .annotation-filters button { border: 1px solid var(--line-strong) !important; border-radius: var(--r-pill) !important; background: transparent !important; color: var(--muted) !important; font-weight: 550 !important; }
+html.ui4 .annotation-filters button:is(.active, [aria-pressed="true"]) { background: var(--accent-soft) !important; border-color: var(--accent-line) !important; color: var(--accent) !important; font-weight: 650 !important; }
+html.ui4 .study-launch { background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-md) !important; box-shadow: var(--shadow-1) !important; }
+html.ui4 .study-launch-icon { background: var(--accent) !important; color: var(--accent-ink) !important; border-radius: var(--r-sm) !important; }
+html.ui4 :is(.data-card, .study-card, .ai-card, .notes-window, .lib-panel, .sidebar) button:is(.is-primary, .primary, .primary-action):disabled { background: var(--soft-2) !important; border-color: transparent !important; color: var(--muted) !important; box-shadow: none !important; opacity: 1 !important; }
+html.ui4 :is(.data-card, .study-card) button:is(.is-primary, .primary, .primary-action):not(:disabled) small { color: color-mix(in srgb, var(--accent-ink) 78%, transparent) !important; }
