@@ -1472,7 +1472,7 @@ async function renderLibrary() {
     : "");
   $("libraryPath").hidden = !(books.length || folders.length);
   setHtml($("libraryFilters"), books.length
-    ? filters.map(([id, label]) => `<button type="button" role="radio" data-library-filter="${id}" aria-checked="${libraryFilter === id}" ${id !== "all" && !counts[id] ? "disabled" : ""}>${label}<span>${counts[id]}</span></button>`).join("")
+    ? filters.filter(([id]) => id === "all" || counts[id]).map(([id, label]) => `<button type="button" role="radio" data-library-filter="${id}" aria-checked="${libraryFilter === id}">${label}<span>${counts[id]}</span></button>`).join("")
     : "");
   document.querySelectorAll("[data-library-view]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.libraryView === view)));
   $("librarySort").value = sort;
@@ -1521,6 +1521,11 @@ async function addFiles(files) {
 }
 function bindLibrary() {
   setIcon("closeLibrary", "close");
+  $("libraryThemeBtn").onclick = (event) => {
+    event.stopPropagation();
+    if ($("libraryMenu")) return closeLibraryMenu();
+    openLibraryMenu($("libraryThemeBtn"), [{ heading: "Tema de la app" }, ...APP_THEMES.map(([id, label, icon]) => ({ label, icon, checked: id === themeChoice, run: () => setTheme(id) }))]);
+  };
   $("libraryAddIcon").innerHTML = iconSvg("plus");
   $("librarySearchIcon").innerHTML = iconSvg("search");
   document.querySelector('[data-library-view="grid"]').innerHTML = iconSvg("grid");
@@ -4634,6 +4639,7 @@ const ICONS = {
   hand: '<path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
+  contrast: '<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z"/>',
   download: '<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
@@ -13024,13 +13030,39 @@ bindOutline();
 $("shortcutsPanel").addEventListener("pointerdown", (event) => {
   if (event.target === $("shortcutsPanel")) closeShortcuts();
 });
-function setTheme(theme) {
+// Tema de la app: claro, sepia, oscuro o «Automático» (sigue al sistema: claro
+// de día y oscuro cuando el dispositivo está en modo oscuro).
+const APP_THEMES = [["auto", "Automático", "contrast"], ["light", "Claro", "sun"], ["sepia", "Sepia", "file"], ["dark", "Oscuro", "moon"]];
+const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+let themeChoice = "light";
+function resolveTheme(choice) {
+  return choice === "auto" ? (systemDark.matches ? "dark" : "light") : choice;
+}
+function setTheme(choice) {
+  themeChoice = APP_THEMES.some(([id]) => id === choice) ? choice : "light";
+  const theme = resolveTheme(themeChoice);
   document.documentElement.dataset.theme = theme;
-  kv.setItem("paper.theme", theme);
+  kv.setItem("paper.theme", themeChoice);
   syncThemeColor();
   $("themeSelect").value = theme;
   if ($("appearanceTheme")) $("appearanceTheme").value = theme;
   document.querySelectorAll("[data-theme-choice]").forEach((button) => button.classList.toggle("active", button.dataset.themeChoice === theme));
+  document.querySelectorAll("[data-app-theme]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.appTheme === themeChoice)));
+  const toggle = $("libraryThemeBtn");
+  if (toggle) toggle.innerHTML = iconSvg(theme === "dark" ? "moon" : "sun");
+}
+systemDark.addEventListener?.("change", () => themeChoice === "auto" && setTheme("auto"));
+document.addEventListener("click", (event) => {
+  const option = event.target.closest?.("[data-app-theme]");
+  if (option) setTheme(option.dataset.appTheme);
+});
+function appThemeSwitchHtml() {
+  return `<div class="vm-segmented vm-small app-theme-switch" role="radiogroup" aria-label="Tema de la app">${APP_THEMES.map(([id, label, icon]) => `<button type="button" role="radio" data-app-theme="${id}" aria-checked="${id === themeChoice}" title="${id === "auto" ? "Claro u oscuro según tu dispositivo" : `Tema ${label.toLowerCase()}`}">${iconSvg(icon)}<span>${label}</span></button>`).join("")}</div>`;
+}
+function nextTheme() {
+  const order = APP_THEMES.map(([id]) => id);
+  setTheme(order[(order.indexOf(themeChoice) + 1) % order.length]);
+  toast(`Tema: ${APP_THEMES.find(([id]) => id === themeChoice)[1]}`);
 }
 // ---- Menú «Más» del móvil ----
 // La cabecera del móvil solo muestra buscar, IA, Ink y Vista; el resto de
@@ -13099,6 +13131,7 @@ function mainMenuSections() {
       { id: "image", icon: "image", label: "Página como imagen", when: hasPdf, run: exportPageImage },
     ] },
     { title: "Paper Reader", items: [
+      { id: "theme", icon: document.documentElement.dataset.theme === "dark" ? "moon" : "sun", label: `Tema: ${APP_THEMES.find(([id]) => id === themeChoice)[1]}`, run: nextTheme },
       { id: "backup", icon: "database", label: "Copia y sincronización", run: openDataPanel },
       { id: "shortcuts", icon: "keyboard", label: "Atajos de teclado", keys: ["?"], run: openShortcuts },
       { id: "actions", icon: "command", label: "Todas las acciones", keys: [mod, "K"], run: () => openPalette("", "actions") },
@@ -14540,6 +14573,7 @@ readingStatsRefreshTimer = setInterval(() => flushReadingSession(false), 15_000)
   configureFooterIsland();
   configureMobileMore();
   configureResponsiveUi();
+  $("viewThemeSwitch").innerHTML = appThemeSwitchHtml();
   setTheme(kv.getItem("paper.theme") || "light");
   setUiScale(Number(kv.getItem("paper.ui-scale") || 1));
   document.querySelector('[data-color="yellow"]').classList.add("active");

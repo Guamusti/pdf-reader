@@ -323,3 +323,66 @@ html.ui4 .study-launch { background: var(--surface-solid) !important; border: 1p
 html.ui4 .study-launch-icon { background: var(--accent) !important; color: var(--accent-ink) !important; border-radius: var(--r-sm) !important; }
 html.ui4 :is(.data-card, .study-card, .ai-card, .notes-window, .lib-panel, .sidebar) button:is(.is-primary, .primary, .primary-action):disabled { background: var(--soft-2) !important; border-color: transparent !important; color: var(--muted) !important; box-shadow: none !important; opacity: 1 !important; }
 html.ui4 :is(.data-card, .study-card) button:is(.is-primary, .primary, .primary-action):not(:disabled) small { color: color-mix(in srgb, var(--accent-ink) 78%, transparent) !important; }
+
+/* ---- 17. Selector de tema de la app ----------------------------------- */
+html.ui4 .vm-theme-row { margin-top: 10px; }
+html.ui4 .app-theme-switch { display: flex !important; }
+html.ui4 .app-theme-switch > button { display: inline-flex !important; align-items: center; justify-content: center; gap: 6px; min-width: 34px; min-height: 30px; padding: 0 8px !important; }
+html.ui4 .app-theme-switch > button .ui-icon { width: 15px; height: 15px; }
+html.ui4 .app-theme-switch > button span { display: none; font-size: 12.5px; }
+html.ui4 .app-theme-switch > button[aria-checked="true"] span { display: inline; }
+html.ui4 .app-theme-switch > button[aria-checked="true"] { color: var(--accent) !important; }
+
+/* ---- 18. Biblioteca: segunda pasada ----------------------------------- */
+html.ui4 .lib-shell { width: min(1320px, 100%) !important; }
+html.ui4 .lib-top { margin-bottom: 22px !important; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+html.ui4 .lib-top-actions { gap: 8px !important; }
+html.ui4 :is(.lib-data, .lib-close) { width: 42px !important; height: 42px !important; display: grid !important; place-items: center; border: 1px solid var(--line-strong) !important; border-radius: var(--r-md) !important; background: var(--surface-solid) !important; color: var(--text) !important; box-shadow: var(--shadow-1) !important; cursor: pointer; }
+html.ui4 :is(.lib-data, .lib-close):hover { background: var(--soft) !important; border-color: var(--accent-line) !important; color: var(--accent) !important; }
+html.ui4 .lib-add { min-height: 42px !important; padding-inline: 16px !important; }
+html.ui4 .lib-toolbar { gap: 10px 10px !important; margin-bottom: 14px !important; }
+html.ui4 .lib-search { min-height: 40px; }
+html.ui4 .lib-filters button { min-height: 34px; padding: 0 12px !important; gap: 7px; }
+html.ui4 .lib-filters button span { min-width: 18px; padding: 1px 5px; border-radius: var(--r-pill); background: var(--soft-2); color: var(--muted) !important; font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: center; }
+html.ui4 .lib-filters button[aria-checked="true"] span { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent) !important; }
+html.ui4 .lib-select { min-height: 36px; }
+html.ui4 .lib-path { margin-bottom: 18px !important; }
+html.ui4 .lib-crumb { border-radius: var(--r-sm) !important; color: var(--muted) !important; font-weight: 550; }
+html.ui4 .lib-crumb.is-current { color: var(--text) !important; font-weight: 650; }
+html.ui4 .lib-crumb:hover { background: var(--soft-2) !important; }
+/* Continuar leyendo. */
+html.ui4 .lib-hero { background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-xl) !important; box-shadow: var(--shadow-1) !important; transition: box-shadow .2s var(--ease), border-color .2s var(--ease), transform .2s var(--ease); }
+html.ui4 .lib-hero:hover { border-color: var(--accent-line) !important; box-shadow: var(--shadow-2) !important; transform: translateY(-1px); }
+html.ui4 .lib-hero-copy small { color: var(--accent) !important; }
+html.ui4 .lib-hero-cta { background: var(--accent) !important; color: var(--accent-ink) !important; border-radius: var(--r-sm) !important; }
+/* Tarjetas. */
+html.ui4 .lib-grid:not([data-view="list"]) { grid-template-columns: repeat(auto-fill, minmax(164px, 1fr)) !important; gap: 30px 22px !important; }
+html.ui4 .lib-grid:not([data-view="list"]) .lib-info { padding-top: 12px; gap: 3px; }
+html.ui4 .lib-grid:not([data-view="list"]) .lib-name { font-size: 14px !important; line-height: 1.3 !important; }
+html.ui4 .lib-meta, html.ui4 .lib-detail, html.ui4 .lib-when { font-size: 12.5px !important; }
+html.ui4 .lib-book.is-reading .lib-detail { color: var(--text) !important; font-weight: 550; }
+html.ui4 .lib-book.is-done .lib-detail { color: var(--ok) !important; font-weight: 600; }
+html.ui4 .lib-grid:not([data-view="list"]) :is(.lib-move, .lib-remove, .lib-more) { width: 32px !important; height: 32px !important; border-radius: var(--r-pill) !important; background: rgba(28, 27, 25, .72) !important; color: #fff !important; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); box-shadow: 0 2px 8px rgba(0, 0, 0, .25); }
+html.ui4 .lib-grid:not([data-view="list"]) :is(.lib-move, .lib-more):hover { background: var(--accent) !important; color: var(--accent-ink) !important; }
+html.ui4 .lib-grid:not([data-view="list"]) .lib-remove:hover { background: var(--danger) !important; }
+html.ui4 .lib-grid[data-view="list"] { background: var(--surface-solid) !important; border: 1px solid var(--line) !important; border-radius: var(--r-lg) !important; box-shadow: var(--shadow-1); }
+html.ui4 .lib-grid[data-view="list"] .lib-open:hover, html.ui4 .lib-grid[data-view="list"] .lib-folder-open:hover { background: var(--soft) !important; }
+html.ui4 .lib-empty { color: var(--muted) !important; }
+html.ui4 .lib-menu button.is-checked { color: var(--accent) !important; font-weight: 650; }
+html.ui4 .lib-menu button.is-danger { color: var(--danger) !important; }
+html.ui4 .lib-foot { margin-top: 44px !important; padding-top: 18px; border-top: 1px solid var(--line); }
+
+/* ---- 19. Botones: tacto y estados ------------------------------------- */
+html.ui4 :is(.btn, .lib-add, .lib-data, .lib-close, .lib-new-folder, .lib-filters button, .vm-tile, .vm-actions button, .as-chip, .as-send, .choose-option, .lib-dialog-actions button, .study-actions > button, .data-actions .btn, .nw-foot button, .nw-empty button, .mm-section .mm-grid button, .palette-tabs button) {
+  cursor: pointer; -webkit-tap-highlight-color: transparent; user-select: none;
+}
+html.ui4 :is(.btn, .lib-add, .lib-data, .lib-close, .lib-new-folder, .lib-filters button, .vm-tile, .vm-actions button, .as-chip, .as-send, .choose-option, .lib-dialog-actions button, .data-actions .btn, .nw-foot button, .nw-empty button):active:not(:disabled) { transform: scale(.97); }
+html.ui4 :is(.btn, .lib-add, .lib-new-folder, .lib-dialog-actions button, .data-actions .btn):disabled { cursor: default; }
+/* Secundario: fondo de superficie y borde; al pasar, el borde toma el acento. */
+html.ui4 :is(.lib-new-folder, .lib-dialog-actions button:not(.is-primary), .data-actions .btn:not(.primary-action), .nw-foot button, .nw-empty button, .refs-actions button):hover:not(:disabled) { border-color: var(--accent-line) !important; background: var(--soft) !important; }
+html.ui4 :is(.lib-dialog-actions button, .data-actions .btn) { min-height: 38px; padding-inline: 16px !important; }
+/* Primario: acento, con relieve al pasar. */
+html.ui4 :is(.lib-add, .lib-dialog-actions .is-primary, .data-actions .primary-action, .btn.primary, .lib-hero-cta):not(:disabled) { box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 45%, transparent), inset 0 1px 0 rgba(255, 255, 255, .16) !important; }
+html.ui4 :is(.lib-add, .lib-dialog-actions .is-primary, .data-actions .primary-action, .btn.primary):hover:not(:disabled) { box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--accent) 55%, transparent), inset 0 1px 0 rgba(255, 255, 255, .16) !important; }
+/* Botones de icono de la barra y del pie: mismo tamaño y zona de toque. */
+html.ui4 .toolbar .btn.icon, html.ui4 .footer .btn.icon { min-width: var(--ctl); min-height: var(--ctl); }

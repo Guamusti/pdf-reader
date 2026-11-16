@@ -77,3 +77,29 @@ test("el menú «⋯» tiene todas las funciones, con atajos, y cabe en pantalla
   await page.click('[data-mm="thumbs"]');
   await expect(page.locator("#thumbnailRail")).toBeVisible();
 });
+
+test("el tema se cambia desde Vista, la biblioteca y el menú; «Automático» sigue al sistema", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await openDoc(page, "paper.pdf");
+  const theme = () => page.evaluate(() => document.documentElement.dataset.theme);
+  expect(await theme()).toBe("light");
+  // Menú Vista.
+  await page.click("#appearanceBtn");
+  await page.click('#viewThemeSwitch [data-app-theme="dark"]');
+  expect(await theme()).toBe("dark");
+  await page.click('#viewThemeSwitch [data-app-theme="auto"]');
+  expect(await theme()).toBe("dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect.poll(theme).toBe("light");
+  await page.keyboard.press("Escape");
+  // Biblioteca.
+  await page.click("#homeBtn");
+  await page.click("#libraryThemeBtn");
+  await expect(page.locator("#libraryMenu button.is-checked")).toHaveText("Automático");
+  await page.locator("#libraryMenu button", { hasText: "Sepia" }).click();
+  expect(await theme()).toBe("sepia");
+  // Se recuerda al recargar.
+  await page.waitForTimeout(800);
+  await page.reload();
+  await expect.poll(theme).toBe("sepia");
+});
