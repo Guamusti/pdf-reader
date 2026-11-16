@@ -1034,3 +1034,10 @@ canvas.page-detail { position: absolute; z-index: 0; display: block; max-width: 
   html.ui4 .palette-trigger { width: clamp(132px, 11vw, 170px) !important; }
 }
 .palette-item-icon .ui-icon { width: 16px; height: 16px; }
+/* Con el panel lateral abierto y menos de 1340 px no caben nombres y buscador
+   ancho a la vez: el buscador queda como botón con la lupa. */
+@media (min-width: 1181px) and (max-width: 1340px) {
+  html.ui4 .palette-trigger { width: var(--ctl) !important; padding: 0 !important; justify-content: center; }
+  html.ui4 .palette-trigger-label, html.ui4 .palette-kbd { display: none !important; }
+  html.ui4 .palette-tabs .palette-kbd { display: inline-block !important; }
+}
