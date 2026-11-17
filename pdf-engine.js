@@ -58,19 +58,42 @@ export class PdfPasswordCancelled extends Error {
   }
 }
 
+// Lectura por trozos: pdf.js pide solo las partes del archivo que necesita (la
+// tabla de objetos y la página que se va a mostrar) y cada trozo se lee del
+// disco en ese momento. Antes se cargaba el PDF entero en memoria antes de
+// poder pintar nada: con un plano o un libro de cientos de MB eran segundos
+// de espera y el doble de memoria.
+const RANGE_CHUNK = 256 * 1024;
+const RANGE_MIN_SIZE = 3 * 1024 * 1024;
+function blobRangeTransport(engine, blob, initialData) {
+  const transport = new engine.PDFDataRangeTransport(blob.size, initialData);
+  transport.requestDataRange = (begin, end) => {
+    blob
+      .slice(begin, end)
+      .arrayBuffer()
+      .then((buffer) => transport.onDataRange(begin, new Uint8Array(buffer)))
+      .catch((error) => console.warn("No se pudo leer un trozo del PDF", error));
+  };
+  return transport;
+}
+
 // `askPassword(retry)` → Promise<string|null>. Sin ella (portadas, búsqueda en
 // la biblioteca…), un PDF protegido cuya contraseña no se conoce simplemente
 // falla, sin preguntar nada.
 export async function openPdfBlob(blob, { askPassword = null } = {}) {
-  // Leer el archivo y cargar el motor en paralelo evita una espera adicional.
-  const [engine, buffer] = await Promise.all([loadPdfEngine(), blob.arrayBuffer()]);
+  const ranged = blob.size >= RANGE_MIN_SIZE;
+  // Leer el archivo (o su primer trozo) y cargar el motor en paralelo.
+  const [engine, buffer] = await Promise.all([loadPdfEngine(), (ranged ? blob.slice(0, RANGE_CHUNK) : blob).arrayBuffer()]);
   const data = new Uint8Array(buffer);
-  const print = fingerprint(data);
+  const print = `${blob.size}:${fingerprint(data).split(":")[1]}`;
+  const source = ranged
+    ? { range: blobRangeTransport(engine, blob, data), length: blob.size, rangeChunkSize: RANGE_CHUNK, disableAutoFetch: true, disableStream: true }
+    : { data };
   // enableXfa: los formularios XFA dinámicos (los de «Please wait… your PDF
   // viewer may not be able to display this type of document») se abren con su
   // contenido real en lugar de esa página de aviso.
   const task = engine.getDocument({
-    data,
+    ...source,
     enableXfa: true,
     cMapUrl: `${PDFJS_ASSETS}cmaps/`,
     cMapPacked: true,

@@ -60,3 +60,40 @@ export async function buildAcroFormPdf() {
   province.addToPage(page, { x: 130, y: 612, width: 160, height: 22, font });
   return doc.save();
 }
+
+// PDF con dos capas (contenido opcional): «Cotas» visible y «Notas» visible.
+export async function buildLayersPdf() {
+  const { PDFOperator } = await import("pdf-lib");
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([595, 842]);
+  const context = doc.context;
+  const ocg = (name) => context.register(context.obj({ Type: "OCG", Name: PDFString.of(name) }));
+  const cotas = ocg("Cotas");
+  const notas = ocg("Notas");
+  page.drawText("Plano base", { x: 50, y: 780, size: 20, font });
+  const layer = (key, draw) => {
+    page.pushOperators(PDFOperator.of("BDC", [PDFName.of("OC"), PDFName.of(key)]));
+    draw();
+    page.pushOperators(PDFOperator.of("EMC"));
+  };
+  layer("LCotas", () => page.drawRectangle({ x: 50, y: 500, width: 200, height: 200, color: undefined, borderWidth: 0, opacity: 1 }));
+  layer("LCotas", () => page.drawText("COTAS 12,50 m", { x: 60, y: 600, size: 22, font }));
+  layer("LNotas", () => page.drawText("NOTAS del arquitecto", { x: 60, y: 300, size: 22, font }));
+  page.node.Resources().set(PDFName.of("Properties"), context.obj({ LCotas: cotas, LNotas: notas }));
+  doc.catalog.set(PDFName.of("OCProperties"), context.obj({ OCGs: [cotas, notas], D: { Order: [cotas, notas], ON: [cotas, notas] } }));
+  return doc.save();
+}
+
+// PDF de más de 3 MB (se abre leyendo por trozos): texto normal más un
+// adjunto grande que no se puede comprimir.
+export async function buildBigPdf() {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let i = 1; i <= 3; i++) doc.addPage([595, 842]).drawText(`Documento grande, pagina ${i}`, { x: 50, y: 780, size: 20, font });
+  const noise = new Uint8Array(4 * 1024 * 1024);
+  let seed = 12345;
+  for (let i = 0; i < noise.length; i++) noise[i] = (seed = (Math.imul(seed, 1103515245) + 12345) | 0) >>> 24;
+  await doc.attach(noise, "relleno.bin", { mimeType: "application/octet-stream" });
+  return doc.save();
+}

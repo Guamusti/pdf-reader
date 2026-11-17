@@ -1,8 +1,9 @@
-const CACHE = 'paper-reader-v132';
+const CACHE = 'paper-reader-v133';
 const SHARE_CACHE = 'paper-share';
+const SNAPSHOT_CACHE = 'paper-snapshots';
 // Rutas relativas al propio service worker: la app funciona igual en la raíz
 // de un dominio (Vercel) que en una subcarpeta (GitHub Pages: /pdf-reader/).
-const CORE = ['./', 'index.html', 'reader-ui.css?v=32', 'reader-v3.css?v=8', 'reader-v6.css?v=32', 'reader-v7.css?v=2', 'app.js?v=116', 'storage.js?v=2', 'sync.js?v=2', 'references.js?v=5', 'epub.js?v=1', 'pdf-engine.js?v=3', 'xfa-layer.css?v=1', 'form-layer.css?v=1', 'ai-worker.js?v=1', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png'];
+const CORE = ['./', 'index.html', 'reader-ui.css?v=32', 'reader-v3.css?v=8', 'reader-v6.css?v=32', 'reader-v7.css?v=3', 'app.js?v=117', 'storage.js?v=2', 'sync.js?v=2', 'references.js?v=5', 'epub.js?v=1', 'pdf-engine.js?v=4', 'xfa-layer.css?v=1', 'form-layer.css?v=1', 'ai-worker.js?v=1', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 const INDEX = new URL('index.html', self.location).href;
 const appUrl = (path) => new URL(path, self.registration.scope).href;
 const PDFJS = ['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs', 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs'];
@@ -19,7 +20,7 @@ self.addEventListener('install', event => {
 
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
-    for (const key of await caches.keys()) if (key !== CACHE && key !== SHARE_CACHE) await caches.delete(key);
+    for (const key of await caches.keys()) if (key !== CACHE && key !== SHARE_CACHE && key !== SNAPSHOT_CACHE) await caches.delete(key);
     await self.clients.claim();
   })());
 });

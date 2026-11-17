@@ -386,3 +386,17 @@ html.ui4 :is(.lib-add, .lib-dialog-actions .is-primary, .data-actions .primary-a
 html.ui4 :is(.lib-add, .lib-dialog-actions .is-primary, .data-actions .primary-action, .btn.primary):hover:not(:disabled) { box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--accent) 55%, transparent), inset 0 1px 0 rgba(255, 255, 255, .16) !important; }
 /* Botones de icono de la barra y del pie: mismo tamaño y zona de toque. */
 html.ui4 .toolbar .btn.icon, html.ui4 .footer .btn.icon { min-width: var(--ctl); min-height: var(--ctl); }
+
+/* ---- 20. Capas del documento ------------------------------------------ */
+html.ui4 .layer-count { margin-left: 6px; color: var(--faint); font-weight: 600; letter-spacing: 0; text-transform: none; }
+html.ui4 .layer-tools { display: flex; gap: 4px; }
+html.ui4 .layer-tools button { min-height: 24px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--r-pill); background: transparent; color: var(--muted); font: 600 11px/1 inherit; cursor: pointer; }
+html.ui4 .layer-tools button:hover { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
+html.ui4 .layer-list { display: grid; gap: 1px; margin-top: 6px; max-height: 320px; overflow: auto; }
+html.ui4 .layer-row { display: flex; align-items: center; gap: 9px; min-height: 32px; padding: 4px 8px 4px calc(8px + var(--depth, 0) * 14px); border-radius: var(--r-sm); font-size: 13px; cursor: pointer; }
+html.ui4 .layer-row:hover { background: var(--soft-2); }
+html.ui4 .layer-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html.ui4 .layer-row input:not(:checked) + span { color: var(--faint); }
+html.ui4 .layer-group { padding: 8px 8px 2px calc(8px + var(--depth, 0) * 14px); color: var(--muted); font-size: 11.5px; font-weight: 650; }
+/* Imagen guardada de la última página mientras llega la de verdad. */
+html.ui4 .canvas-wrap.is-snapshot > canvas { filter: saturate(.96); }

@@ -148,7 +148,7 @@
   <link rel="stylesheet" href="reader-ui.css?v=32" />
   <link rel="stylesheet" href="reader-v3.css?v=8" />
   <link rel="stylesheet" href="reader-v6.css?v=32" />
-  <link rel="stylesheet" href="reader-v7.css?v=2" />
+  <link rel="stylesheet" href="reader-v7.css?v=3" />
 </head>
 <body>
 <div class="progress"><div id="progressBar"></div></div>
@@ -159,6 +159,7 @@
     <div class="sidebar-panel" id="sidebarContentsPanel" role="tabpanel">
       <div class="section" id="searchResultsSection" hidden><div class="label">Resultados</div><div class="search-scope" role="group" aria-label="Alcance de la búsqueda"><button class="search-scope-btn active" data-search-scope="document">Este documento</button><button class="search-scope-btn" data-search-scope="library">Biblioteca</button></div><div class="search-nav"><button class="btn icon" id="searchPrev" title="Coincidencia anterior" aria-label="Coincidencia anterior">↑</button><span id="searchCounter" class="search-counter">—</span><button class="btn icon" id="searchNext" title="Coincidencia siguiente" aria-label="Coincidencia siguiente">↓</button></div><div class="bookmark-list" id="searchResults"></div></div>
       <div class="section"><div class="label">Marcadores</div><div class="bookmark-list" id="bookmarkList"></div></div>
+      <div class="section layers-section" id="layersSection" hidden><div class="outline-head"><div class="label">Capas <span class="layer-count" id="layerCount"></span></div><div class="layer-tools"><button type="button" data-layers-all="on">Todas</button><button type="button" data-layers-all="off">Ninguna</button></div></div><div class="layer-list" id="layerList"></div></div>
       <div class="section outline-section"><div class="outline-head"><div class="label">Índice</div><div class="outline-tools" id="outlineTools" hidden><button class="outline-tool" id="outlineExpandAll" title="Expandir todo" aria-label="Expandir todo el índice"></button><button class="outline-tool" id="outlineCollapseAll" title="Contraer todo" aria-label="Contraer todo el índice"></button></div></div><label class="outline-filter" id="outlineFilterWrap" hidden><span class="outline-filter-icon" aria-hidden="true"></span><input id="outlineFilter" type="search" placeholder="Filtrar índice…" autocomplete="off" aria-label="Filtrar el índice"></label><div class="outline-list" id="outlineList"></div></div>
       <div class="section structure-section" id="structureSection" hidden><div class="label">Resultados y notación</div><div class="structure-tabs" role="tablist" aria-label="Estructura del documento"><button role="tab" data-structure-tab="statements" aria-selected="true">Enunciados</button><button role="tab" data-structure-tab="equations" aria-selected="false">Ecuaciones</button><button role="tab" data-structure-tab="notation" aria-selected="false">Notación</button></div><div class="structure-list" id="structureList"></div></div>
     </div>
@@ -212,6 +213,6 @@
 <section class="annotation-editor" id="annotationEditor" hidden role="dialog" aria-label="Editar anotación"></section>
 <section class="assistant" id="assistantPanel" hidden role="dialog" aria-labelledby="assistantTitle"><header class="as-head" id="assistantDragHandle"><div class="as-title"><span class="as-spark" id="assistantSpark" aria-hidden="true"></span><div><strong id="assistantTitle">Asistente</strong><small class="as-model" id="assistantModel" data-state="checking"><i></i><span>Comprobando la IA local…</span></small></div></div><div class="as-head-actions"><button class="btn icon" id="assistantNew" title="Nueva conversación" aria-label="Nueva conversación"></button><button class="btn icon" id="assistantMinimize" title="Minimizar" aria-label="Minimizar asistente"></button><button class="btn icon" id="assistantClose" title="Cerrar (Esc)" aria-label="Cerrar asistente"></button></div></header><div class="as-thread" id="assistantThread" aria-live="polite"></div><div class="as-dock"><div class="as-context" id="assistantContext"></div><div class="as-actions" id="assistantActions" role="group" aria-label="Acciones rápidas"></div><form class="as-composer" id="assistantComposer"><textarea id="assistantInput" rows="1" placeholder="Pregunta sobre la página…" aria-label="Pregunta para el asistente"></textarea><button type="submit" class="as-send" id="assistantSend" aria-label="Enviar"></button></form><div class="as-status" id="aiStatus" role="status"></div></div></section>
 
-<script type="module" src="app.js?v=116"></script>
+<script type="module" src="app.js?v=117"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-import { pdfjsLib, openPdfBlob, PdfPasswordCancelled } from "./pdf-engine.js?v=3";
+import { pdfjsLib, openPdfBlob, PdfPasswordCancelled } from "./pdf-engine.js?v=4";
 
 import {
   openDatabase,
@@ -478,6 +478,7 @@ function buildDocText(state = docText) {
 }
 
 async function deleteBook(id) {
+  if ("caches" in window) caches.open(SNAPSHOT_CACHE).then((cache) => cache.delete(snapshotUrl(id))).catch(() => {});
   if (!confirm("¿Eliminar este PDF y sus datos locales?")) return;
   await removeBook(id);
 }
@@ -2106,6 +2107,10 @@ async function openStored(id) {
     const rec = await dbGet(id);
     if (superseded()) return;
     if (!rec) throw new Error("Documento no encontrado");
+    if (isTextBook(rec)) {
+      layerConfig = null;
+      renderLayerList();
+    }
     if (rec.kind !== "epub") {
       closeEpubResources();
       $("reflowReader").classList.remove("is-epub");
@@ -2129,17 +2134,22 @@ async function openStored(id) {
     );
     resetRenderEngine();
     showLoader(true);
+    // Mientras el motor abre el archivo se enseña la última página leída tal
+    // como quedó (una imagen guardada): el documento «aparece» al instante.
+    if (currentBook?.id !== id) showSnapshot(id, superseded);
     const loadedDoc = await openPdfBlob(rec.blob, { askPassword: (retry) => askPdfPassword(rec, retry) });
     rec.pages = loadedDoc.numPages;
     rec.openedAt = Date.now();
-    if (!superseded()) await dbPut(rec);
     if (superseded()) {
       loadedDoc.destroy?.();
       return;
     }
-    // A partir de aquí no hay esperas hasta el primer render: el documento
-    // nuevo y su estado se asignan juntos.
-    await detectFormDocument(loadedDoc);
+    // La ficha (fecha de apertura, páginas) se guarda después del primer
+    // dibujo: escribirla antes obligaba a esperar a que el navegador copiase
+    // el archivo entero.
+    setTimeout(() => dbPut(rec).catch((error) => console.warn("No se pudo actualizar la ficha del documento", error)), 1500);
+    // Formulario y capas se consultan a la vez; hacen falta antes de dibujar.
+    const [, layers] = await Promise.all([detectFormDocument(loadedDoc), readLayerConfig(loadedDoc, rec.id)]);
     if (superseded()) {
       loadedDoc.destroy?.();
       return;
@@ -2153,6 +2163,8 @@ async function openStored(id) {
     releasePdfDocument(pdfDoc, loadedDoc);
     pdfDoc = loadedDoc;
     currentBook = rec;
+    layerConfig = layers;
+    renderLayerList();
     if (!rec.cover) ensureBookCover(rec, pdfDoc);
     loadCurrentDocText(rec, pdfDoc);
     assistantLoadDocument();
@@ -2589,6 +2601,190 @@ async function exportXfaForm() {
   }
   return true;
 }
+// ---- Capas (contenido opcional) ----
+// Planos, mapas y dibujos técnicos traen capas que se pueden encender y
+// apagar (cotas, instalaciones, textos…). Se listan en el panel lateral; lo
+// elegido se recuerda por documento y se aplica a todo lo que se dibuja.
+let layerConfig = null;
+async function readLayerConfig(doc, id) {
+  try {
+    const config = await doc.getOptionalContentConfig();
+    const groups = config?.getGroups?.();
+    if (!groups || !Object.keys(groups).length) return null;
+    const saved = getJSON(key(id, "layers"), null);
+    if (saved) for (const [groupId, visible] of Object.entries(saved)) if (groups[groupId]) config.setVisibility(groupId, Boolean(visible));
+    return config;
+  } catch {
+    return null;
+  }
+}
+function pageRenderParams(params) {
+  // En un formulario rellenable los campos van en su propia capa (HTML): el
+  // lienzo no los dibuja para que no se vea el valor dos veces.
+  if (isFormDocument()) params.annotationMode = pdfjsLib.AnnotationMode.ENABLE_FORMS;
+  if (layerConfig) params.optionalContentConfigPromise = Promise.resolve(layerConfig);
+  return params;
+}
+function layerGroups() {
+  return layerConfig ? Object.entries(layerConfig.getGroups() || {}).map(([id, group]) => ({ id, name: group.name || "Capa sin nombre", visible: layerConfig.getGroup(id)?.visible !== false })) : [];
+}
+function renderLayerList() {
+  const section = $("layersSection");
+  if (!section) return;
+  const groups = layerGroups();
+  section.hidden = !groups.length;
+  if (!groups.length) return ($("layerList").innerHTML = "");
+  const byId = new Map(groups.map((group) => [group.id, group]));
+  const seen = new Set();
+  const row = (group, depth) => {
+    seen.add(group.id);
+    return `<label class="layer-row" style="--depth:${depth}"><input type="checkbox" data-layer="${escapeHtml(group.id)}"${group.visible ? " checked" : ""}><span>${escapeHtml(group.name)}</span></label>`;
+  };
+  // El PDF puede traer las capas ordenadas y agrupadas; las que no estén en
+  // ese orden se añaden al final.
+  const walk = (order, depth) =>
+    (order || [])
+      .map((entry) => {
+        if (typeof entry === "string") return byId.has(entry) && !seen.has(entry) ? row(byId.get(entry), depth) : "";
+        if (entry && Array.isArray(entry.order)) return `${entry.name ? `<div class="layer-group" style="--depth:${depth}">${escapeHtml(entry.name)}</div>` : ""}${walk(entry.order, depth + (entry.name ? 1 : 0))}`;
+        return "";
+      })
+      .join("");
+  let html = "";
+  try {
+    html = walk(layerConfig.getOrder(), 0);
+  } catch {}
+  html += groups.filter((group) => !seen.has(group.id)).map((group) => row(group, 0)).join("");
+  $("layerList").innerHTML = html;
+  const shown = groups.filter((group) => group.visible).length;
+  $("layerCount").textContent = `${shown} de ${groups.length}`;
+}
+function applyLayerChange() {
+  if (!layerConfig || !currentBook) return;
+  setJSON(key(currentBook.id, "layers"), Object.fromEntries(layerGroups().map((group) => [group.id, group.visible])));
+  renderLayerList();
+  clearPageRasters();
+  cancelDetailWork();
+  resetThumbnails();
+  if (viewMode === "continuous" && !reflowMode) rescaleContinuousView();
+  else renderPage(currentPage, { resetScroll: false });
+}
+function setAllLayers(visible) {
+  for (const group of layerGroups()) layerConfig.setVisibility(group.id, visible);
+  applyLayerChange();
+}
+function openLayers() {
+  if (!layerConfig) return toast("Este PDF no tiene capas");
+  if (isDrawerLayout()) document.body.classList.add("sidebar-open");
+  else if (document.body.classList.contains("sidebar-collapsed")) toggleSidebar();
+  setSidebarPanel("contents");
+  $("layersSection").scrollIntoView({ block: "start", behavior: "smooth" });
+}
+document.addEventListener("change", (event) => {
+  const box = event.target.closest?.("[data-layer]");
+  if (!box || !layerConfig) return;
+  layerConfig.setVisibility(box.dataset.layer, box.checked);
+  applyLayerChange();
+});
+document.addEventListener("click", (event) => {
+  const all = event.target.closest?.("[data-layers-all]");
+  if (all) setAllLayers(all.dataset.layersAll === "on");
+});
+
+// ---- Última página vista, al instante ----
+// De cada documento se guarda una imagen pequeña de la página en la que se
+// quedó. Al abrirlo se pinta esa imagen de inmediato y, en cuanto pdf.js
+// tiene la página de verdad, la sustituye sin salto.
+const SNAPSHOT_CACHE = "paper-snapshots";
+const snapshotUrl = (id) => new URL(`__snapshot/${encodeURIComponent(id)}`, location.href).href;
+let snapshotTimer = 0;
+function scheduleSnapshot() {
+  clearTimeout(snapshotTimer);
+  snapshotTimer = setTimeout(saveSnapshot, 2500);
+}
+async function saveSnapshot() {
+  if (!("caches" in window) || !currentBook || !pdfDoc || reflowMode || isXfaDocument()) return;
+  const id = currentBook.id;
+  const source = viewMode === "continuous" ? $("continuousView")?.children[currentPage - 1]?.querySelector("canvas") : $("pdfCanvas");
+  if (!source?.width || !source.height) return;
+  const cssWidth = parseFloat(source.style.width) || source.width;
+  const width = Math.min(source.width, 1100);
+  const height = Math.round((source.height / source.width) * width);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(source, 0, 0, width, height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+  canvas.width = 0;
+  if (!blob) return;
+  try {
+    const cache = await caches.open(SNAPSHOT_CACHE);
+    await cache.put(snapshotUrl(id), new Response(blob, { headers: { "Content-Type": "image/jpeg", "X-Page": String(currentPage), "X-Css-Width": String(Math.round(cssWidth)), "X-Rotation": String(rotation) } }));
+  } catch {}
+}
+async function showSnapshot(id, superseded) {
+  if (!("caches" in window) || reflowMode) return;
+  try {
+    const response = await (await caches.open(SNAPSHOT_CACHE)).match(snapshotUrl(id));
+    if (!response || superseded() || currentBook?.id === id) return;
+    if (Number(response.headers.get("X-Page")) !== Number(kv.getItem(key(id, "page")) || 1)) return;
+    const bitmap = await createImageBitmap(await response.blob());
+    if (superseded() || currentBook?.id === id) return bitmap.close?.();
+    const viewer = $("viewer");
+    const cssWidth = Math.max(120, Math.min(Number(response.headers.get("X-Css-Width")) || bitmap.width, viewer.clientWidth - 24));
+    const cssHeight = (bitmap.height / bitmap.width) * cssWidth;
+    teardownContinuous();
+    $("continuousView").hidden = true;
+    $("facingWrap").hidden = true;
+    $("emptyState").hidden = true;
+    for (const layer of ["textLayer", "linkLayer", "annotationLayer"]) $(layer)?.replaceChildren();
+    $("canvasWrap").querySelectorAll(":scope > .xfa-host, :scope > .form-host").forEach((node) => node.remove());
+    clearPageDetail($("canvasWrap"));
+    const canvas = $("pdfCanvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    for (const node of [canvas, $("canvasWrap")]) Object.assign(node.style, { width: `${cssWidth}px`, height: `${cssHeight}px` });
+    canvas.dataset.page = "";
+    $("canvasWrap").hidden = false;
+    $("canvasWrap").classList.add("is-snapshot");
+    viewer.scrollTo({ top: 0, left: 0 });
+    document.body.classList.add("has-doc");
+    showLoader(false);
+  } catch {}
+}
+// Páginas lentas de dibujar (planos con miles de trazos): pasado un momento,
+// lo que pdf.js lleva dibujado se va copiando al lienzo visible, para que se
+// vea avanzar en vez de esperar con la página anterior o en blanco.
+function mirrorSlowRaster(raster, target, viewport, onFirst) {
+  let started = false;
+  const copy = () => {
+    if (raster.done || !raster.canvas.width) return;
+    if (!started) {
+      started = true;
+      target.width = raster.canvas.width;
+      target.height = raster.canvas.height;
+      target.style.width = `${viewport.width}px`;
+      target.style.height = `${viewport.height}px`;
+      onFirst?.();
+    }
+    target.getContext("2d").drawImage(raster.canvas, 0, 0);
+  };
+  const delay = setTimeout(() => {
+    copy();
+    interval = setInterval(copy, 220);
+  }, 320);
+  let interval = 0;
+  return () => {
+    clearTimeout(delay);
+    clearInterval(interval);
+  };
+}
+
 // ---- Dibujo de páginas sin parpadeo ----
 // Cada página se dibuja primero en un lienzo aparte («raster») y solo cuando
 // está completa se copia al visible. Antes el lienzo visible se vaciaba al
@@ -2596,6 +2792,9 @@ async function exportXfaForm() {
 // En página única, además, la página siguiente se deja dibujada de antemano
 // mientras se lee la actual, así pasar de página es instantáneo.
 const pageRasterCache = new Map();
+// Lo que tardó en dibujarse la última página: con páginas pesadas no se
+// prepara la siguiente de antemano y el repaso nítido espera más.
+let lastRenderMs = 0;
 const PAGE_RASTER_LIMIT = IS_IOS ? 1 : 2;
 function pageRenderDpr(viewport) {
   const targetDpr = Math.min(window.devicePixelRatio || 1, 3);
@@ -2613,10 +2812,9 @@ function startPageRaster(page, viewport, dpr) {
   canvas.height = Math.floor(viewport.height * dpr);
   // En un formulario rellenable los campos van en su propia capa (HTML): el
   // lienzo no los dibuja para que no se vea el valor dos veces.
-  const params = { canvasContext: canvas.getContext("2d"), viewport, transform: [dpr, 0, 0, dpr, 0, 0] };
-  if (isFormDocument()) params.annotationMode = pdfjsLib.AnnotationMode.ENABLE_FORMS;
+  const params = pageRenderParams({ canvasContext: canvas.getContext("2d"), viewport, transform: [dpr, 0, 0, dpr, 0, 0] });
   const task = page.render(params);
-  const raster = { canvas, task, promise: task.promise, done: false };
+  const raster = { canvas, task, promise: task.promise, done: false, startedAt: performance.now() };
   task.promise.then(() => (raster.done = true), () => {});
   return raster;
 }
@@ -2657,7 +2855,7 @@ function commitRaster(target, raster, viewport) {
   raster.canvas.height = 0;
 }
 async function prerenderPage(pageNumber) {
-  if (!pdfDoc || viewMode !== "single" || reflowMode || presentationMode) return;
+  if (!pdfDoc || viewMode !== "single" || reflowMode || presentationMode || lastRenderMs > 900) return;
   const page = await getCachedPage(pageNumber);
   if (pageRenderPending || renderTask) return;
   const viewport = page.getViewport({ scale, rotation });
@@ -2701,7 +2899,7 @@ function cancelDetailWork() {
 }
 function scheduleDetail(delay = 160) {
   clearTimeout(detailTimer);
-  detailTimer = setTimeout(refineVisibleDetail, delay);
+  detailTimer = setTimeout(refineVisibleDetail, Math.max(delay, Math.min(1200, lastRenderMs * 0.6)));
 }
 function detailHosts() {
   if (viewMode === "continuous") {
@@ -2756,8 +2954,7 @@ async function refineVisibleDetail() {
       canvas.className = "page-detail";
       canvas.width = Math.floor(width * dpr);
       canvas.height = Math.floor(height * dpr);
-      const params = { canvasContext: canvas.getContext("2d"), viewport, transform: [dpr, 0, 0, dpr, -x0 * dpr, -y0 * dpr] };
-      if (isFormDocument()) params.annotationMode = pdfjsLib.AnnotationMode.ENABLE_FORMS;
+      const params = pageRenderParams({ canvasContext: canvas.getContext("2d"), viewport, transform: [dpr, 0, 0, dpr, -x0 * dpr, -y0 * dpr] });
       const task = page.render(params);
       detailTasks.add(task);
       try {
@@ -2785,13 +2982,18 @@ async function renderPageGraphics(pageNumber, targets, token) {
   const dpr = pageRenderDpr(viewport);
   const { canvas, textLayer, linkLayer, sizeTarget } = targets;
   const raster = startPageRaster(page, viewport, dpr);
+  const stopMirror = canvas.width ? () => {} : mirrorSlowRaster(raster, canvas, viewport);
   try {
     await raster.promise;
   } catch (error) {
+    stopMirror();
     releaseRaster(raster);
     if (error?.name === "RenderingCancelledException") return null;
     throw error;
   }
+  stopMirror();
+  lastRenderMs = performance.now() - raster.startedAt;
+  if (pageNumber === currentPage) scheduleSnapshot();
   if (token !== undefined && token !== renderToken) {
     releaseRaster(raster);
     return null;
@@ -3613,6 +3815,7 @@ function paletteActions() {
     { icon: "↗", title: "Exportar anotaciones a Markdown", keys: "descargar notas md", when: hasDoc, run: exportMarkdown },
     { icon: "⌗", title: "Reconocer texto (OCR) de esta página", keys: "ocr escaneado escaneo reconocer texto imagen", when: hasPdf, run: () => runOcr([currentPage]) },
     { icon: "⌗", title: "Reconocer texto (OCR) de todo el documento", keys: "ocr escaneado libro reconocer texto todas paginas", when: hasPdf, run: () => runOcr("all") },
+    { icon: "◫", title: "Capas del documento (mostrar u ocultar)", keys: "capas layers plano cad ocg contenido opcional", when: hasPdf && Boolean(layerConfig), run: openLayers },
     { icon: "⎙", title: "Imprimir", keys: "imprimir print impresora papel", when: hasPdf, run: printDocument },
     { icon: "✂", title: "Extraer páginas a un PDF nuevo", keys: "extraer dividir separar recortar paginas rango split", when: hasPdf, run: extractPages },
     { icon: "⇩", title: "Guardar PDF con las anotaciones dentro", keys: "exportar descargar pdf anotado acrobat zotero goodnotes compartir", when: hasPdf, run: exportAnnotatedPdf },
@@ -4646,6 +4849,7 @@ const ICONS = {
   printer: '<path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="8" rx="2"/><path d="M7 14h10v6H7z"/>',
   scissors: '<circle cx="6.5" cy="6.5" r="2.5"/><circle cx="6.5" cy="17.5" r="2.5"/><path d="M8.6 8.2 20 18M8.6 15.8 20 6"/>',
   merge: '<rect x="4" y="3.5" width="9" height="12" rx="1.5"/><rect x="11" y="8.5" width="9" height="12" rx="1.5"/>',
+  layers: '<path d="m12 3.5 8.5 4.5-8.5 4.5L3.5 8z"/><path d="m3.5 12 8.5 4.5 8.5-4.5M3.5 16l8.5 4.5 8.5-4.5"/>',
   quote: '<path d="M9.5 7H6a1 1 0 0 0-1 1v4h4.5V8M9.5 12c0 2.5-1.2 4-3.5 5M18.5 7H15a1 1 0 0 0-1 1v4h4.5V8M18.5 12c0 2.5-1.2 4-3.5 5"/>',
   image: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m5 17 5-4.5 3.5 3 2.5-2 3.5 3.5"/>',
   keyboard: '<rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M7 14h10"/>',
@@ -5542,20 +5746,35 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   // visible conserva lo que mostraba hasta que la nueva imagen está lista.
   const raster = takePageRaster(page, viewport, dpr);
   renderTask = raster.task;
+  // Solo al cambiar de página: en un zoom se conserva la imagen estirada.
+  const pageKey = `${currentBook.id}:${currentPage}`;
+  const stopMirror = canvas.dataset.page === pageKey ? () => {} : mirrorSlowRaster(raster, canvas, viewport, () => {
+    $("canvasWrap").style.width = `${viewport.width}px`;
+    $("canvasWrap").style.height = `${viewport.height}px`;
+    for (const layer of ["textLayer", "linkLayer", "annotationLayer"]) $(layer)?.replaceChildren();
+    clearPageDetail($("canvasWrap"));
+    showLoader(false);
+  });
   try {
     await raster.promise;
   } catch (error) {
+    stopMirror();
     if (renderTask === raster.task) renderTask = null;
     releaseRaster(raster);
     if (error?.name !== "RenderingCancelledException") throw error;
     return false;
   }
+  stopMirror();
+  lastRenderMs = performance.now() - raster.startedAt;
   if (renderTask === raster.task) renderTask = null;
   if (token !== renderToken || requestId !== pageRenderRequestId) {
     releaseRaster(raster);
     return false;
   }
   commitRaster(canvas, raster, viewport);
+  canvas.dataset.page = pageKey;
+  $("canvasWrap").classList.remove("is-snapshot");
+  scheduleSnapshot();
   clearPageDetail($("canvasWrap"));
   scheduleDetail();
   $("canvasWrap").style.width = `${viewport.width}px`;
@@ -13105,6 +13324,7 @@ function mainMenuSections() {
       { id: "split", icon: "split", label: splitOpen() ? "Cerrar la vista dividida" : "Dos PDFs a la vez", keys: ["D"], when: hasPdf && window.innerWidth >= SPLIT_MIN_VIEWPORT, active: splitOpen(), run: toggleSplitView },
       { id: "rotate", icon: "rotate", label: "Girar páginas", keys: ["R"], when: pdfView, run: () => $("rotateBtn").click() },
       { id: "thumbs", icon: "grid", label: "Miniaturas", when: pdfView, run: toggleThumbnails },
+      { id: "layers", icon: "layers", label: "Capas", when: pdfView && Boolean(layerConfig), run: openLayers },
       { id: "present", icon: "present", label: "Presentación", keys: ["P"], when: pdfView, run: enterPresentation },
       { id: "focus", icon: "maximize", label: "Pantalla completa", keys: ["F"], when: hasDoc, run: toggleFocusMode },
     ] },
