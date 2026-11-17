@@ -453,12 +453,32 @@ async function loadCurrentDocText(rec, doc) {
   else if ("requestIdleCallback" in window) requestIdleCallback(() => buildDocText(state), { timeout: 2000 });
   else setTimeout(() => buildDocText(state), 500);
 }
+// El motor PDF trabaja en un solo hilo: indexar el texto o hacer portadas a
+// la vez que se dibuja una página la retrasa (en un plano pesado, segundos).
+// Ese trabajo de fondo espera a que no haya ningún dibujo en curso.
+let renderBusyUntil = 0;
+function markRenderBusy(ms = 700) {
+  renderBusyUntil = Math.max(renderBusyUntil, performance.now() + ms);
+}
+function renderIsBusy() {
+  return Boolean(renderTask || pageRenderPending || contActive.size || contPending.size) || performance.now() < renderBusyUntil;
+}
+function whenRenderIdle() {
+  return new Promise((resolve) => {
+    // Con la paleta de búsqueda abierta, el índice de texto no espera.
+    const check = () => (renderIsBusy() && $("palette").hidden ? setTimeout(check, 250) : resolve());
+    check();
+  });
+}
 function buildDocText(state = docText) {
   if (!state.checked || state.started || !state.doc) return;
   state.started = true;
   (async () => {
     const doc = state.doc;
     for (let i = 1; i <= doc.numPages; i++) {
+      if (docText !== state || pdfDoc !== doc) return;
+      // Si la paleta espera resultados se indexa sin pausas.
+      if ($("palette").hidden) await whenRenderIdle();
       if (docText !== state || pdfDoc !== doc) return;
       try {
         const page = await doc.getPage(i);
@@ -1088,6 +1108,7 @@ async function ensureBookCover(rec, doc = null) {
   libraryCoverQueue = libraryCoverQueue.then(async () => {
     let own = null;
     try {
+      await whenRenderIdle();
       const source = doc || (own = await openPdfBlob(rec.blob));
       // Un formulario XFA no tiene página que fotografiar (se dibuja en HTML):
       // portada propia con su nombre.
@@ -2980,8 +3001,11 @@ async function renderPageGraphics(pageNumber, targets, token) {
   if (token !== undefined && token !== renderToken) return null;
   const viewport = page.getViewport({ scale, rotation });
   const dpr = pageRenderDpr(viewport);
-  const { canvas, textLayer, linkLayer, sizeTarget } = targets;
+  const { canvas, textLayer, linkLayer, sizeTarget, control } = targets;
+  if (control?.cancelled) return null;
   const raster = startPageRaster(page, viewport, dpr);
+  if (control) control.raster = raster;
+  markRenderBusy();
   const stopMirror = canvas.width ? () => {} : mirrorSlowRaster(raster, canvas, viewport);
   try {
     await raster.promise;
@@ -3245,6 +3269,8 @@ async function renderFacingPage(token) {
 
 // ---- Modo scroll continuo ----
 function teardownContinuous() {
+  contPending.clear();
+  for (const control of contActive.values()) control.cancel();
   if (continuousObserver) {
     continuousObserver.disconnect();
     continuousObserver = null;
@@ -3342,30 +3368,75 @@ async function rescaleContinuousView() {
   viewer.scrollTop = after.offsetTop + ratio * after.offsetHeight;
   viewer.scrollLeft = Math.max(0, horizontal * viewer.scrollWidth - viewer.clientWidth / 2);
   // Volver a observar provoca el aviso inicial y se dibujan las visibles.
+  contPending.clear();
+  for (const control of contActive.values()) control.cancel();
   continuousObserver?.disconnect();
   container.querySelectorAll(".cont-page").forEach((slot) => continuousObserver?.observe(slot));
   holdContinuousSync();
   syncCurrentFromScroll(target);
 }
+// Scroll continuo: las páginas que entran en pantalla se dibujan de una en
+// una (dos a la vez como mucho), empezando por la más cercana a la que se
+// está leyendo. Si una página sale de la vista antes de terminar, su dibujo
+// se cancela: con un desplazamiento rápido ya no se gasta tiempo en páginas
+// por las que solo se ha pasado.
+const contPending = new Set();
+const contActive = new Map();
+const CONT_CONCURRENCY = 2;
 function onContinuousIntersect(entries) {
   for (const entry of entries) {
     const slot = entry.target;
     const pageNumber = Number(slot.dataset.page);
-    if (entry.isIntersecting) renderContinuousSlot(slot);
-    else if (Math.abs(pageNumber - currentPage) > 3) unloadContinuousSlot(slot);
+    if (entry.isIntersecting) {
+      slot.dataset.inView = "1";
+      if (!continuousRendered.has(pageNumber)) contPending.add(slot);
+    } else {
+      delete slot.dataset.inView;
+      contPending.delete(slot);
+      contActive.get(slot)?.cancel();
+      if (Math.abs(pageNumber - currentPage) > 3) unloadContinuousSlot(slot);
+    }
+  }
+  pumpContinuous();
+}
+function pumpContinuous() {
+  while (contActive.size < CONT_CONCURRENCY && contPending.size) {
+    let best = null;
+    for (const slot of contPending) {
+      if (!slot.isConnected) {
+        contPending.delete(slot);
+        continue;
+      }
+      if (!best || Math.abs(Number(slot.dataset.page) - currentPage) < Math.abs(Number(best.dataset.page) - currentPage)) best = slot;
+    }
+    if (!best) return;
+    contPending.delete(best);
+    const control = { cancel() { this.cancelled = true; try { this.raster?.task.cancel(); } catch {} } };
+    contActive.set(best, control);
+    renderContinuousSlot(best, control).finally(() => {
+      contActive.delete(best);
+      markRenderBusy(400);
+      pumpContinuous();
+    });
   }
 }
-async function renderContinuousSlot(slot) {
+async function renderContinuousSlot(slot, control = null) {
   const pageNumber = Number(slot.dataset.page);
   if (continuousRendered.has(pageNumber)) return;
   continuousRendered.add(pageNumber);
   try {
-    await renderPageGraphics(pageNumber, {
+    const result = await renderPageGraphics(pageNumber, {
       canvas: slot.querySelector("canvas"),
       textLayer: slot.querySelector(".textLayer"),
       linkLayer: slot.querySelector(".link-layer"),
       sizeTarget: slot,
+      control,
     });
+    // Cancelado (salió de la vista): se podrá volver a dibujar más tarde.
+    if (!result) {
+      continuousRendered.delete(pageNumber);
+      return;
+    }
     if (viewMode !== "continuous") return;
     if (currentBook) renderPageAnnotations(slot.querySelector(".annotation-layer"), pageNumber);
     if (captureAreas().some((area) => area.page === pageNumber)) renderAreaMarks();
@@ -3816,6 +3887,7 @@ function paletteActions() {
     { icon: "⌗", title: "Reconocer texto (OCR) de esta página", keys: "ocr escaneado escaneo reconocer texto imagen", when: hasPdf, run: () => runOcr([currentPage]) },
     { icon: "⌗", title: "Reconocer texto (OCR) de todo el documento", keys: "ocr escaneado libro reconocer texto todas paginas", when: hasPdf, run: () => runOcr("all") },
     { icon: "◫", title: "Capas del documento (mostrar u ocultar)", keys: "capas layers plano cad ocg contenido opcional", when: hasPdf && Boolean(layerConfig), run: openLayers },
+    { icon: "⏱", title: "Diagnóstico: por qué tarda esta página", keys: "lento rendimiento velocidad tarda diagnostico renderizado pesado", when: hasPdf, run: diagnosePage },
     { icon: "⎙", title: "Imprimir", keys: "imprimir print impresora papel", when: hasPdf, run: printDocument },
     { icon: "✂", title: "Extraer páginas a un PDF nuevo", keys: "extraer dividir separar recortar paginas rango split", when: hasPdf, run: extractPages },
     { icon: "⇩", title: "Guardar PDF con las anotaciones dentro", keys: "exportar descargar pdf anotado acrobat zotero goodnotes compartir", when: hasPdf, run: exportAnnotatedPdf },
@@ -3980,6 +4052,9 @@ function buildPaletteItems(query) {
     }));
   push(raw ? "Otros documentos" : "Abrir otro documento", libraryHits);
   push("Acciones", actionPointer);
+  // Mientras se indexa el texto, el aviso «Buscando…» no se queda con Enter si
+  // ya hay una acción que coincide.
+  if (items[0]?.title === "Buscando en el documento…" && actionPointer.length) items.unshift(items.pop());
   return items;
 }
 function schedulePaletteRender() {
@@ -4849,6 +4924,7 @@ const ICONS = {
   printer: '<path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="8" rx="2"/><path d="M7 14h10v6H7z"/>',
   scissors: '<circle cx="6.5" cy="6.5" r="2.5"/><circle cx="6.5" cy="17.5" r="2.5"/><path d="M8.6 8.2 20 18M8.6 15.8 20 6"/>',
   merge: '<rect x="4" y="3.5" width="9" height="12" rx="1.5"/><rect x="11" y="8.5" width="9" height="12" rx="1.5"/>',
+  gauge: '<path d="M4.5 16a8 8 0 1 1 15 0"/><path d="m12 13 3.5-4"/><circle cx="12" cy="13" r="1.2"/>',
   layers: '<path d="m12 3.5 8.5 4.5-8.5 4.5L3.5 8z"/><path d="m3.5 12 8.5 4.5 8.5-4.5M3.5 16l8.5 4.5 8.5-4.5"/>',
   quote: '<path d="M9.5 7H6a1 1 0 0 0-1 1v4h4.5V8M9.5 12c0 2.5-1.2 4-3.5 5M18.5 7H15a1 1 0 0 0-1 1v4h4.5V8M18.5 12c0 2.5-1.2 4-3.5 5"/>',
   image: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m5 17 5-4.5 3.5 3 2.5-2 3.5 3.5"/>',
@@ -5746,6 +5822,7 @@ async function performPageRender(num, options = {}, requestId = pageRenderReques
   // visible conserva lo que mostraba hasta que la nueva imagen está lista.
   const raster = takePageRaster(page, viewport, dpr);
   renderTask = raster.task;
+  markRenderBusy();
   // Solo al cambiar de página: en un zoom se conserva la imagen estirada.
   const pageKey = `${currentBook.id}:${currentPage}`;
   const stopMirror = canvas.dataset.page === pageKey ? () => {} : mirrorSlowRaster(raster, canvas, viewport, () => {
@@ -9113,6 +9190,75 @@ function chooseOption({ title, text = "", options }) {
     dialog.querySelector(".choose-option")?.focus();
   });
 }
+// ---- Diagnóstico de rendimiento ----
+// Explica por qué una página tarda en dibujarse: cuántas operaciones de dibujo
+// tiene, cuántas imágenes y de qué tamaño, fuentes y capas. Se puede copiar
+// para pedir ayuda sin tener que enviar el PDF.
+async function diagnosePage() {
+  if (!pdfDoc || !currentBook) return toast("Abre un PDF primero");
+  showLoader(true, "Analizando la página…", "Midiendo lo que cuesta dibujarla");
+  try {
+    const page = await getCachedPage(currentPage);
+    const view = page.getViewport({ scale: 1 });
+    const t0 = performance.now();
+    const list = await page.getOperatorList();
+    const parseMs = performance.now() - t0;
+    const OPS = pdfjsLib.OPS;
+    const names = Object.fromEntries(Object.entries(OPS).map(([name, code]) => [code, name]));
+    const counts = {};
+    for (const fn of list.fnArray) counts[names[fn]] = (counts[names[fn]] || 0) + 1;
+    const imageOps = (counts.paintImageXObject || 0) + (counts.paintInlineImageXObject || 0) + (counts.paintImageMaskXObject || 0) + (counts.paintImageXObjectRepeat || 0) + (counts.paintImageMaskXObjectGroup || 0);
+    const paths = (counts.constructPath || 0) + (counts.stroke || 0) + (counts.fill || 0) + (counts.eoFill || 0);
+    const images = [];
+    list.fnArray.forEach((fn, index) => {
+      if (fn !== OPS.paintImageXObject) return;
+      const [, width, height] = list.argsArray[index] || [];
+      if (width && height) images.push(width * height);
+    });
+    const biggest = images.length ? Math.max(...images) : 0;
+    const raster = document.createElement("canvas");
+    const viewport = page.getViewport({ scale, rotation });
+    const dpr = pageRenderDpr(viewport);
+    raster.width = Math.floor(viewport.width * dpr);
+    raster.height = Math.floor(viewport.height * dpr);
+    const t1 = performance.now();
+    await page.render(pageRenderParams({ canvasContext: raster.getContext("2d"), viewport, transform: [dpr, 0, 0, dpr, 0, 0] })).promise;
+    const drawMs = performance.now() - t1;
+    raster.width = 0;
+    const record = currentBook.blob ? currentBook : await dbGet(currentBook.id);
+    const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
+    const mp = (pixels) => `${(pixels / 1e6).toFixed(1)} Mpx`;
+    const causes = [];
+    if (biggest > 12e6) causes.push(`Imágenes enormes (la mayor tiene ${mp(biggest)}): descomprimirlas es lo que más cuesta.`);
+    if (list.fnArray.length > 50000) causes.push(`Muchísimos trazos (${list.fnArray.length.toLocaleString("es-ES")} operaciones de dibujo), típico de planos y mapas.`);
+    if (counts.setGState > 2000 || counts.beginGroup > 200) causes.push("Muchas transparencias o grupos, que son lentos de componer.");
+    if (layerConfig) causes.push("Tiene capas: apagar las que no necesites (panel lateral → Capas) acelera el dibujo.");
+    if (!causes.length) causes.push("Nada fuera de lo normal en esta página.");
+    const lines = [
+      `Documento: ${currentBook.name} (${mb(record?.blob?.size || 0)}, ${pdfDoc.numPages} páginas)`,
+      `Página ${currentPage}: ${Math.round(view.width)} × ${Math.round(view.height)} pt`,
+      `Dibujo a ${Math.round(scale * 100)} % y ${dpr.toFixed(2)}×: ${Math.round(drawMs)} ms (lienzo de ${mp(viewport.width * viewport.height * dpr * dpr)})`,
+      `Lectura de la página: ${Math.round(parseMs)} ms`,
+      `Operaciones de dibujo: ${list.fnArray.length.toLocaleString("es-ES")} (trazos y rellenos: ${paths.toLocaleString("es-ES")})`,
+      `Imágenes: ${imageOps}${biggest ? ` · la mayor ${mp(biggest)}` : ""}`,
+      `Fuentes cambiadas: ${(counts.setFont || 0).toLocaleString("es-ES")} · transparencias: ${(counts.setGState || 0).toLocaleString("es-ES")}`,
+      `Capas: ${layerConfig ? layerGroups().length : 0} · formulario: ${isXfaDocument() ? "XFA" : isFormDocument() ? "sí" : "no"}`,
+      `Navegador: ${navigator.userAgent}`,
+    ];
+    showLoader(false);
+    const choice = await chooseOption({ title: `Diagnóstico · página ${currentPage}`, text: [...causes, "", ...lines].join("\n"), options: [{ id: "copy", label: "Copiar el diagnóstico", hint: "Para pegarlo en un mensaje y pedir ayuda", primary: true }] });
+    if (choice === "copy") {
+      await navigator.clipboard?.writeText([...causes, "", ...lines].join("\n"));
+      toast("Diagnóstico copiado");
+    }
+  } catch (error) {
+    console.error(error);
+    toast("No se pudo analizar la página");
+  } finally {
+    showLoader(false);
+  }
+}
+
 // ---- Imprimir ----
 // Se imprime el PDF de verdad (vectorial, con el diálogo del sistema), con las
 // anotaciones y los datos de formulario dentro. En el móvil se comparte: la
@@ -13349,6 +13495,7 @@ function mainMenuSections() {
       { id: "autoscroll", icon: "autoScroll", label: "Auto-scroll", keys: ["A"], when: hasDoc, active: autoScroll.on, run: () => setAutoScroll(!autoScroll.on) },
       { id: "copytext", icon: "copy", label: "Copiar texto de la página", when: hasPdf, run: copyPageText },
       { id: "image", icon: "image", label: "Página como imagen", when: hasPdf, run: exportPageImage },
+      { id: "diagnose", icon: "gauge", label: "Diagnóstico de la página", when: hasPdf, run: diagnosePage },
     ] },
     { title: "Paper Reader", items: [
       { id: "theme", icon: document.documentElement.dataset.theme === "dark" ? "moon" : "sun", label: `Tema: ${APP_THEMES.find(([id]) => id === themeChoice)[1]}`, run: nextTheme },

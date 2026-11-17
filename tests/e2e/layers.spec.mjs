@@ -98,3 +98,33 @@ test("al reabrir un documento se pinta al instante la última página vista", as
   await expect(page.locator("#textLayer")).not.toBeEmpty();
   await expect(page.locator("#canvasWrap")).not.toHaveClass(/is-snapshot/);
 });
+
+test("diagnóstico de la página: explica qué la hace lenta y se puede copiar", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openDoc(page, "heavy.pdf");
+  await page.click("#mobileMoreBtn");
+  await page.click('[data-mm="diagnose"]');
+  const text = page.locator(".choose-dialog p");
+  await expect(text).toContainText("Muchísimos trazos", { timeout: 60000 });
+  await expect(text).toContainText("Tiene capas");
+  await expect(text).toContainText("Operaciones de dibujo: 120.019");
+  await page.click('[data-choose="copy"]');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("Página 1: 1191 × 842 pt");
+});
+
+test("scroll continuo rápido: las páginas por las que solo se pasa no se terminan de dibujar", async ({ page }) => {
+  await openDoc(page, "heavy.pdf");
+  await page.evaluate(() => document.querySelector('[data-view-mode="continuous"]').click());
+  await page.waitForFunction(() => document.querySelector('#continuousView .cont-page[data-page="1"] canvas')?.width > 0);
+  await page.mouse.move(700, 450);
+  for (let i = 0; i < 10; i++) {
+    await page.mouse.wheel(0, 1600);
+    await page.waitForTimeout(30);
+  }
+  // Se llega al final y la última página se dibuja.
+  await page.waitForFunction(() => {
+    const slot = document.querySelector('#continuousView .cont-page[data-page="4"]');
+    return slot?.querySelector("canvas").width > 0 && !slot.dataset.stale;
+  }, null, { timeout: 30000 });
+  await expect(page.locator("#toolbarPage")).toHaveValue("4");
+});

@@ -97,3 +97,38 @@ export async function buildBigPdf() {
   await doc.attach(noise, "relleno.bin", { mimeType: "application/octet-stream" });
   return doc.save();
 }
+
+// Plano pesado: cada página tiene decenas de miles de trazos vectoriales
+// (como un plano de arquitectura o un mapa), repartidos en dos capas.
+export async function buildHeavyPdf(pages = 4, strokes = 60000) {
+  const doc = await PDFDocument.create();
+  const context = doc.context;
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const ocg = (name) => context.register(context.obj({ Type: "OCG", Name: PDFString.of(name) }));
+  const grid = ocg("Rejilla");
+  const walls = ocg("Muros");
+  let seed = 7;
+  const rand = () => ((seed = (Math.imul(seed, 1103515245) + 12345) | 0) >>> 8) / 16777216;
+  for (let p = 1; p <= pages; p++) {
+    const page = doc.addPage([1191, 842]);
+    page.drawText(`Plano pesado, hoja ${p}`, { x: 40, y: 800, size: 22, font });
+    const parts = ["/OC /LGrid BDC 0.6 0.6 0.8 RG 0.3 w"];
+    for (let i = 0; i < strokes * 0.6; i++) {
+      const x = (rand() * 1191).toFixed(1), y = (rand() * 780).toFixed(1);
+      parts.push(`${x} ${y} m ${(+x + rand() * 30).toFixed(1)} ${(+y + rand() * 30).toFixed(1)} l S`);
+    }
+    parts.push("EMC /OC /LWalls BDC 0.1 0.1 0.1 RG 1.2 w");
+    for (let i = 0; i < strokes * 0.4; i++) {
+      const x = (rand() * 1191).toFixed(1), y = (rand() * 780).toFixed(1);
+      parts.push(`${x} ${y} m ${(+x + rand() * 80 - 40).toFixed(1)} ${(+y + rand() * 80 - 40).toFixed(1)} l ${(+x + rand() * 80 - 40).toFixed(1)} ${(+y + rand() * 80 - 40).toFixed(1)} l h S`);
+    }
+    parts.push("EMC");
+    const stream = context.flateStream(parts.join("\n"));
+    const ref = context.register(stream);
+    const contents = page.node.Contents();
+    page.node.set(PDFName.of("Contents"), context.obj([...(contents?.asArray?.() || [page.node.get(PDFName.of("Contents"))]), ref]));
+    page.node.Resources().set(PDFName.of("Properties"), context.obj({ LGrid: grid, LWalls: walls }));
+  }
+  doc.catalog.set(PDFName.of("OCProperties"), context.obj({ OCGs: [grid, walls], D: { Order: [grid, walls], ON: [grid, walls] } }));
+  return doc.save();
+}
